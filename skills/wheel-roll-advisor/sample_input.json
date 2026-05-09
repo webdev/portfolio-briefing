@@ -1,0 +1,53 @@
+{
+  "position": {
+    "symbol": "AAPL",
+    "positionType": "SHORT_PUT",
+    "optionType": "PUT",
+    "strikePrice": 170.00,
+    "expirationDate": "2026-06-19",
+    "quantity": 1,
+    "entryPrice": 4.85,
+    "currentMid": 1.50,
+    "delta": -0.22,
+    "daysToExpiry": 42,
+    "dayChange": -0.8
+  },
+  "underlying": {
+    "symbol": "AAPL",
+    "lastPrice": 181.20,
+    "outlook": "BULLISH",
+    "nextEarnings": null
+  },
+  "context": {
+    "ivRank": 38,
+    "regime": "NORMAL",
+    "existingOpenOrder": false
+  },
+  "chain": {
+    "expirations": ["2026-06-26", "2026-07-17", "2026-08-21"],
+    "candidates": [
+      {
+        "expirationDate": "2026-07-17",
+        "strikePrice": 170.00,
+        "optionType": "PUT",
+        "bid": 1.85,
+        "ask": 1.95,
+        "delta": -0.20,
+        "openInterest": 145,
+        "volume": 32,
+        "daysToExpiry": 71
+      },
+      {
+        "expirationDate": "2026-07-17",
+        "strikePrice": 165.00,
+        "optionType": "PUT",
+        "bid": 1.45,
+        "ask": 1.55,
+        "delta": -0.16,
+        "openInterest": 98,
+        "volume": 18,
+        "daysToExpiry": 71
+      }
+    ]
+  }
+}

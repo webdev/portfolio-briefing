@@ -1,0 +1,109 @@
+---
+# Persona Check Thresholds & Rules
+
+financial_advisor:
+  required_sections:
+    - name: "action_items"
+      pattern: '(## Action Items|## EXECUTE|## DO NOW)'
+    - name: "impact_summary"
+      pattern: '(## Total Impact|Total Potential)'
+  required_per_action:
+    - name: "why_section"
+      pattern: '\*\*Why:\*\*'
+      severity: "major"
+    - name: "gain_section"
+      pattern: '\*\*Gain:\*\*'
+      severity: "major"
+    - name: "yield_line"
+      pattern: '(Yield:|no yield \(one-time\))'
+      severity: "major"
+  required_header_format:
+    - pattern: '(## \w+ Briefing|# Portfolio)'
+    - date_formats: ['YYYY-MM-DD', 'Mon YYYY-MM-DD']
+      severity: "minor"
+  critical_fail:
+    - no_actions_surfaced: "briefing must contain at least one actionable recommendation"
+
+options_trader:
+  valid_weekdays:
+    - Mon
+    - Tue
+    - Wed
+    - Thu
+    - Fri
+  invalid_weekdays:
+    - Sat
+    - Sun
+  critical_fail:
+    - weekend_expiration: "option expiration on Saturday/Sunday is invalid"
+  roll_requirements:
+    - pattern: '(EXECUTE ROLL|DEFENSIVE ROLL)'
+      must_contain:
+        - "BTC"  # buy to close
+        - "STO"  # sell to open
+        - pattern: '\$\d+\.?\d*'  # limit price in $
+      severity: "critical"
+    - pattern: '(EXECUTE ROLL|DEFENSIVE ROLL)'
+      must_show:
+        - "Delta"
+        - pattern: '\d{1,2} (?:May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \'?\d{2}'
+      severity: "major"
+  vix_options:
+    expires_wednesday_only: true
+
+tax_cpa:
+  new_csp_checks:
+    - name: "wash_sale_line"
+      pattern: 'Wash-sale check:'
+      severity: "critical"
+    - name: "earnings_check"
+      pattern: 'Earnings check:'
+      severity: "critical"
+  roll_checks:
+    - name: "earnings_check"
+      pattern: 'Earnings check:'
+      severity: "major"
+  trim_checks:
+    - name: "ltcg_tax_cost"
+      pattern: 'LTCG|tax cost|tax impact'
+      severity: "major"
+  account_routing:
+    - pattern: '(Roth|Taxable|Traditional|IRA)'
+      required_on: "new_entries"
+      severity: "major"
+  impact_card:
+    - pattern: '(tax-avoided|tax saved|tax benefit|\$.*tax)'
+      severity: "minor"
+
+risk_manager:
+  required_sections:
+    - name: "stress_test"
+      pattern: '(## Stress Test|Stress Coverage|Scenario Analysis)'
+      severity: "critical"
+    - name: "hedge_book"
+      pattern: '(## Hedge Book|Current Hedges)'
+      severity: "critical"
+    - name: "greeks"
+      pattern: '(Net Greeks|Delta.*Theta|Greeks Summary)'
+      severity: "major"
+  stress_test_requirements:
+    - must_name_positions: true
+      severity: "major"
+    - example_pattern: "if SPY -3%, (AAPL|position|name) at risk"
+  greeks_requirements:
+    - non_zero_theta_when_shorts: true
+      description: "if short options exist, theta cannot be $0"
+      severity: "critical"
+  concentration_rules:
+    - max_single_position: 0.10  # 10% NLV
+    - breach_threshold: 0.10
+    - breach_requires_action: true
+    - valid_actions: ["TRIM", "COLLAR"]
+      severity: "major"
+
+scoring:
+  critical: -30
+  major: -15
+  minor: -5
+  pass_threshold: 70
+  start_score: 100

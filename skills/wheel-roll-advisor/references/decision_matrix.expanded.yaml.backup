@@ -1,0 +1,544 @@
+wheel_decision_matrix:
+  version: "0.1"
+  date: "2026-05-07"
+  
+  pre_guardrails: []
+  
+  short_put:
+    normal:
+      - id: "PUT_NORMAL_DEEP_OTM_LONG_DTE_50"
+        moneyness: DEEP_OTM
+        dte_band: LONG_DTE
+        profit_min: 0.50
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Theta accelerates late; redeploy premium."
+      
+      - id: "PUT_NORMAL_DEEP_OTM_MID_DTE_65"
+        moneyness: DEEP_OTM
+        dte_band: MID_DTE
+        profit_min: 0.65
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Mid-DTE premium locked in before acceleration phase."
+      
+      - id: "PUT_NORMAL_DEEP_OTM_SHORT_DTE_80"
+        moneyness: DEEP_OTM
+        dte_band: SHORT_DTE
+        profit_min: 0.80
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Let theta decay; close only at 80% capture."
+      
+      - id: "PUT_NORMAL_DEEP_OTM_HOLD"
+        moneyness: DEEP_OTM
+        profit_max: 0.50
+        decision: WAIT
+        rationale: "Theta still working. Let it ride."
+      
+      - id: "PUT_NORMAL_MOD_OTM_TAKEPROFIT"
+        moneyness: MODERATE_OTM
+        profit_min: 0.50
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Standard wheel sweet spot; take the profit."
+      
+      - id: "PUT_NORMAL_MOD_OTM_SQUEEZE"
+        moneyness: MODERATE_OTM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_min: 0.50
+        profit_max: 0.75
+        outlook: [NEUTRAL, BULLISH]
+        decision: GTC_LIMIT_75
+        rationale: "DTE sufficient, earnings distant. Place GTC limit at 75% capture."
+      
+      - id: "PUT_NORMAL_MOD_OTM_WAIT"
+        moneyness: MODERATE_OTM
+        profit_max: 0.50
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: WAIT
+        rationale: "Bullish outlook; let theta work."
+      
+      - id: "PUT_NORMAL_MOD_OTM_ROLL_OUT"
+        moneyness: MODERATE_OTM
+        profit_max: 0.50
+        outlook: [NEUTRAL, BEARISH]
+        decision: ROLL_OUT
+        rationale: "Neutral/bearish outlook: roll out for more decay."
+      
+      - id: "PUT_NORMAL_NEAR_ATM_TAKEPROFIT"
+        moneyness: NEAR_ATM
+        profit_min: 0.40
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Close sooner; assignment risk high."
+      
+      - id: "PUT_NORMAL_NEAR_ATM_WAIT"
+        moneyness: NEAR_ATM
+        profit_max: 0.40
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: WAIT
+        rationale: "Bullish outlook; assignment unlikely."
+      
+      - id: "PUT_NORMAL_NEAR_ATM_ROLL"
+        moneyness: NEAR_ATM
+        profit_max: 0.40
+        outlook: [NEUTRAL, BEARISH]
+        decision: ROLL_OUT
+        rationale: "Roll to reduce delta."
+      
+      - id: "PUT_NORMAL_ITM_LONG_DTE_BULLISH"
+        moneyness: ITM
+        dte_band: LONG_DTE
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: WAIT
+        rationale: "Bullish: underlying may snap back. Hold and hope."
+      
+      - id: "PUT_NORMAL_ITM_LONG_DTE_NEUTRAL"
+        moneyness: ITM
+        dte_band: LONG_DTE
+        outlook: NEUTRAL
+        decision: ROLL_OUT
+        rationale: "Neutral: roll out, same strike or down-and-out."
+      
+      - id: "PUT_NORMAL_ITM_LONG_DTE_BEARISH"
+        moneyness: ITM
+        dte_band: LONG_DTE
+        outlook: [BEARISH, STRONG_BEARISH]
+        decision: TAKE_ASSIGNMENT
+        rationale: "Bearish: assignment likely. Accept."
+      
+      - id: "PUT_NORMAL_ITM_MID_DTE_BULLISH"
+        moneyness: ITM
+        dte_band: MID_DTE
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: WAIT
+        rationale: "Bullish: underlying may snap back. Hold and hope."
+      
+      - id: "PUT_NORMAL_ITM_MID_DTE_NEUTRAL"
+        moneyness: ITM
+        dte_band: MID_DTE
+        outlook: NEUTRAL
+        decision: ROLL_OUT
+        rationale: "Neutral: roll out, same strike or down-and-out."
+      
+      - id: "PUT_NORMAL_ITM_MID_DTE_BEARISH"
+        moneyness: ITM
+        dte_band: MID_DTE
+        outlook: [BEARISH, STRONG_BEARISH]
+        decision: TAKE_ASSIGNMENT
+        rationale: "Bearish: assignment likely. Accept."
+      
+      - id: "PUT_NORMAL_ITM_SHORT_DTE_BULLISH"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: ROLL_OUT_AND_DOWN
+        rationale: "Short DTE + bullish: roll down-and-out."
+      
+      - id: "PUT_NORMAL_ITM_SHORT_DTE_NEUTRAL"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        outlook: NEUTRAL
+        decision: TAKE_ASSIGNMENT
+        rationale: "Short DTE + no conviction: assignment inevitable."
+      
+      - id: "PUT_NORMAL_ITM_SHORT_DTE_BEARISH"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        outlook: [BEARISH, STRONG_BEARISH]
+        decision: TAKE_ASSIGNMENT
+        rationale: "Short DTE + bearish: assignment inevitable."
+      
+      - id: "PUT_NORMAL_EXPIRY_WEEK"
+        moneyness: any
+        dte_band: EXPIRY_WEEK
+        outlook: any
+        decision: LET_EXPIRE
+        rationale: "Less than a week; let it expire worthless."
+    
+    caution:
+      # CAUTION regime: more conservative on defensive rolls
+      # Threshold drops from 1.40x (NORMAL) to 1.30x loss multiple
+
+      - id: "PUT_CAUTION_DEEP_OTM"
+        moneyness: DEEP_OTM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_min: 0.50
+        regime: CAUTION
+        decision: CLOSE_FOR_PROFIT
+        rationale: "CAUTION: lock profits earlier on DEEP OTM. Reduce overall risk."
+
+      - id: "PUT_CAUTION_MOD_OTM_TAKEPROFIT"
+        moneyness: MODERATE_OTM
+        profit_min: 0.40
+        regime: CAUTION
+        decision: CLOSE_FOR_PROFIT
+        rationale: "CAUTION: reduce risk. Close at 40%+ instead of 50%."
+
+      - id: "PUT_CAUTION_MOD_OTM_WAIT"
+        moneyness: MODERATE_OTM
+        profit_max: 0.40
+        outlook: [BULLISH, STRONG_BULLISH]
+        regime: CAUTION
+        decision: WAIT
+        rationale: "CAUTION + bullish: still hold, but monitor closely."
+
+      - id: "PUT_CAUTION_MOD_OTM_ROLL"
+        moneyness: MODERATE_OTM
+        profit_max: 0.40
+        outlook: [NEUTRAL, BEARISH]
+        regime: CAUTION
+        decision: ROLL_OUT
+        rationale: "CAUTION + neutral/bearish: roll out to extend runway."
+
+      - id: "PUT_CAUTION_NEAR_ATM_CLOSE"
+        moneyness: NEAR_ATM
+        profit_min: 0.25
+        regime: CAUTION
+        decision: CLOSE_FOR_PROFIT
+        rationale: "CAUTION: close NEAR_ATM at 25%+ profit."
+
+      - id: "PUT_CAUTION_NEAR_ATM_WAIT"
+        moneyness: NEAR_ATM
+        profit_max: 0.25
+        outlook: [BULLISH, STRONG_BULLISH]
+        regime: CAUTION
+        decision: WAIT
+        rationale: "CAUTION + bullish: wait, assignment unlikely."
+
+      - id: "PUT_CAUTION_NEAR_ATM_ROLL"
+        moneyness: NEAR_ATM
+        profit_max: 0.25
+        outlook: [NEUTRAL, BEARISH]
+        regime: CAUTION
+        decision: ROLL_OUT
+        rationale: "CAUTION: roll out to reduce delta."
+
+      # ITM in CAUTION: defensive rolls fire at 1.30x instead of 1.40x
+      - id: "PUT_CAUTION_ITM_DEFENSIVE_ROLL"
+        moneyness: ITM
+        dte_band: [MID_DTE, LONG_DTE]
+        regime: CAUTION
+        decision: DEFENSIVE_ROLL_OUT_AND_DOWN
+        rationale: "CAUTION ITM: roll down-and-out at 1.30x loss (more aggressive than NORMAL 1.40x)."
+
+      - id: "PUT_CAUTION_ITM_SHORT_DTE"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        regime: CAUTION
+        decision: TAKE_ASSIGNMENT
+        rationale: "CAUTION + ITM + short DTE: accept assignment. No time to defend."
+
+      - id: "PUT_CAUTION_EXPIRY_WEEK"
+        moneyness: any
+        dte_band: EXPIRY_WEEK
+        regime: CAUTION
+        decision: LET_EXPIRE
+        rationale: "CAUTION + final week: let expire or prepare for assignment."
+
+    risk_off:
+      # RISK_OFF regime: maximum defensiveness
+      # Don't roll ITM puts; close instead. Tighter thresholds overall.
+
+      - id: "PUT_RISK_OFF_DEEP_OTM"
+        moneyness: DEEP_OTM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_min: 0.40
+        regime: RISK_OFF
+        decision: CLOSE_FOR_PROFIT
+        rationale: "RISK_OFF: close DEEP OTM at 40%+ profit. Preserve capital."
+
+      - id: "PUT_RISK_OFF_MOD_OTM_TAKEPROFIT"
+        moneyness: MODERATE_OTM
+        profit_min: 0.30
+        regime: RISK_OFF
+        decision: CLOSE_FOR_PROFIT
+        rationale: "RISK_OFF: close at 30%+ profit. Reduce exposure."
+
+      - id: "PUT_RISK_OFF_MOD_OTM_WAIT"
+        moneyness: MODERATE_OTM
+        profit_max: 0.30
+        outlook: [BULLISH, STRONG_BULLISH]
+        regime: RISK_OFF
+        decision: WAIT
+        rationale: "RISK_OFF + bullish: hold, but prepare to close quickly."
+
+      - id: "PUT_RISK_OFF_MOD_OTM_CLOSE_NEUTRAL"
+        moneyness: MODERATE_OTM
+        profit_max: 0.30
+        outlook: [NEUTRAL, BEARISH]
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF: close early rather than roll. Avoid new risk."
+
+      - id: "PUT_RISK_OFF_NEAR_ATM_CLOSE"
+        moneyness: NEAR_ATM
+        profit_min: 0.15
+        regime: RISK_OFF
+        decision: CLOSE_FOR_PROFIT
+        rationale: "RISK_OFF: close NEAR_ATM at 15%+ profit."
+
+      - id: "PUT_RISK_OFF_NEAR_ATM_CLOSE_LOSS"
+        moneyness: NEAR_ATM
+        profit_max: 0.15
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF: close underwater to limit drawdown."
+
+      # ITM in RISK_OFF: never roll, always close
+      - id: "PUT_RISK_OFF_ITM_CLOSE"
+        moneyness: ITM
+        dte_band: [MID_DTE, LONG_DTE]
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF ITM: close don't roll. Preserve capital."
+
+      - id: "PUT_RISK_OFF_ITM_SHORT_DTE"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        regime: RISK_OFF
+        decision: TAKE_ASSIGNMENT
+        rationale: "RISK_OFF + ITM + short DTE: accept assignment."
+
+      - id: "PUT_RISK_OFF_EXPIRY_WEEK"
+        moneyness: any
+        dte_band: EXPIRY_WEEK
+        regime: RISK_OFF
+        decision: LET_EXPIRE
+        rationale: "RISK_OFF + final week: let expire or prepare for assignment."
+  
+  short_call_covered:
+    normal:
+      - id: "CALL_NORMAL_DEEP_OTM_SAFE_TAKEPROFIT"
+        moneyness: DEEP_OTM
+        profit_min: 0.50
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Stock hasn't rallied; call will expire worthless."
+
+      - id: "CALL_NORMAL_DEEP_OTM_SAFE_HOLD"
+        moneyness: DEEP_OTM
+        profit_max: 0.50
+        outlook: [BEARISH, NEUTRAL]
+        decision: WAIT
+        rationale: "Bearish: underlying unlikely to rally. Let theta decay."
+
+      - id: "CALL_NORMAL_DEEP_OTM_SAFE_ROLL"
+        moneyness: DEEP_OTM
+        profit_max: 0.50
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: ROLL_OUT
+        rationale: "Bullish: underlying may approach. Roll out."
+
+      - id: "CALL_NORMAL_NEAR_ATM_TAKEPROFIT"
+        moneyness: NEAR_ATM
+        profit_min: 0.40
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Assignment risk high; take the profit."
+
+      - id: "CALL_NORMAL_NEAR_ATM_WAIT"
+        moneyness: NEAR_ATM
+        profit_max: 0.40
+        outlook: [BEARISH, NEUTRAL]
+        decision: WAIT
+        rationale: "Bearish/neutral: stock unlikely to rally past strike. Hold."
+
+      - id: "CALL_NORMAL_NEAR_ATM_ROLL_UP"
+        moneyness: NEAR_ATM
+        profit_max: 0.40
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: ROLL_OUT_AND_UP
+        rationale: "Bullish: roll up to capture more premium before assignment."
+
+      - id: "CALL_NORMAL_ITM_LONG_DTE_BULLISH"
+        moneyness: ITM
+        dte_band: LONG_DTE
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: WAIT
+        rationale: "Stock rallying; let it ride. Assignment at profit acceptable."
+
+      - id: "CALL_NORMAL_ITM_LONG_DTE_NEUTRAL"
+        moneyness: ITM
+        dte_band: LONG_DTE
+        outlook: NEUTRAL
+        decision: ROLL_OUT_AND_UP
+        rationale: "Neutral: roll up to defer call-away and capture more premium."
+
+      - id: "CALL_NORMAL_ITM_LONG_DTE_BEARISH"
+        moneyness: ITM
+        dte_band: LONG_DTE
+        outlook: [BEARISH, STRONG_BEARISH]
+        decision: CLOSE
+        rationale: "Bearish + ITM call: stock rallied despite bearish outlook. Close."
+
+      - id: "CALL_NORMAL_ITM_MID_DTE_BULLISH"
+        moneyness: ITM
+        dte_band: MID_DTE
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: WAIT
+        rationale: "Stock rallying. Let assignment happen at profit."
+
+      - id: "CALL_NORMAL_ITM_MID_DTE_NEUTRAL"
+        moneyness: ITM
+        dte_band: MID_DTE
+        outlook: NEUTRAL
+        decision: ROLL_OUT_AND_UP
+        rationale: "Neutral: roll up to capture more premium."
+
+      - id: "CALL_NORMAL_ITM_MID_DTE_BEARISH"
+        moneyness: ITM
+        dte_band: MID_DTE
+        outlook: [BEARISH, STRONG_BEARISH]
+        decision: CLOSE
+        rationale: "Bearish + ITM: close before forced assignment."
+
+      - id: "CALL_NORMAL_ITM_SHORT_DTE_BULLISH"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        outlook: [BULLISH, STRONG_BULLISH]
+        decision: LET_EXPIRE
+        rationale: "ITM + short DTE + bullish: let be called away."
+
+      - id: "CALL_NORMAL_ITM_SHORT_DTE_NEUTRAL"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        outlook: NEUTRAL
+        decision: TAKE_ASSIGNMENT
+        rationale: "Short DTE + ITM: assignment imminent and acceptable."
+
+      - id: "CALL_NORMAL_ITM_SHORT_DTE_BEARISH"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        outlook: [BEARISH, STRONG_BEARISH]
+        decision: CLOSE
+        rationale: "Bearish + ITM + short DTE: close before assignment."
+
+      - id: "CALL_NORMAL_EX_DIV_WARNING"
+        moneyness: [NEAR_ATM, ITM]
+        outlook: any
+        dte_band: any
+        decision: CLOSE_FOR_PROFIT
+        rationale: "Early assignment risk on ex-dividend. Close if profit >= 40%."
+
+    caution:
+      # CAUTION regime for covered calls: more conservative on rolls, tighter profits
+
+      - id: "CALL_CAUTION_DEEP_OTM"
+        moneyness: DEEP_OTM
+        profit_min: 0.40
+        regime: CAUTION
+        decision: CLOSE_FOR_PROFIT
+        rationale: "CAUTION: lock profits at 40%+ to reduce exposure."
+
+      - id: "CALL_CAUTION_DEEP_OTM_WAIT"
+        moneyness: DEEP_OTM
+        profit_max: 0.40
+        outlook: [BEARISH, NEUTRAL]
+        regime: CAUTION
+        decision: WAIT
+        rationale: "CAUTION + bearish: hold, unlikely to rally."
+
+      - id: "CALL_CAUTION_NEAR_ATM_CLOSE"
+        moneyness: NEAR_ATM
+        profit_min: 0.30
+        regime: CAUTION
+        decision: CLOSE_FOR_PROFIT
+        rationale: "CAUTION: close at 30%+ to reduce assignment risk."
+
+      - id: "CALL_CAUTION_NEAR_ATM_WAIT"
+        moneyness: NEAR_ATM
+        profit_max: 0.30
+        outlook: [BEARISH, NEUTRAL]
+        regime: CAUTION
+        decision: WAIT
+        rationale: "CAUTION + bearish: stock unlikely to rally."
+
+      - id: "CALL_CAUTION_NEAR_ATM_ROLL_UP"
+        moneyness: NEAR_ATM
+        profit_max: 0.30
+        outlook: [BULLISH, STRONG_BULLISH]
+        regime: CAUTION
+        decision: ROLL_OUT_AND_UP
+        rationale: "CAUTION + bullish: roll up, but monitor closely."
+
+      - id: "CALL_CAUTION_ITM_LONG_DTE"
+        moneyness: ITM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_min: 0.30
+        regime: CAUTION
+        decision: ROLL_OUT_AND_UP
+        rationale: "CAUTION ITM: roll up if profitable. Otherwise close."
+
+      - id: "CALL_CAUTION_ITM_LONG_DTE_LOSS"
+        moneyness: ITM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_max: 0.30
+        regime: CAUTION
+        decision: CLOSE
+        rationale: "CAUTION ITM underwater: close to prevent larger loss."
+
+      - id: "CALL_CAUTION_ITM_SHORT_DTE"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        regime: CAUTION
+        decision: CLOSE
+        rationale: "CAUTION ITM + short DTE: close before forced assignment."
+
+    risk_off:
+      # RISK_OFF regime for covered calls: most conservative
+
+      - id: "CALL_RISK_OFF_DEEP_OTM"
+        moneyness: DEEP_OTM
+        profit_min: 0.30
+        regime: RISK_OFF
+        decision: CLOSE_FOR_PROFIT
+        rationale: "RISK_OFF: lock profits at 30%+. Minimize exposure."
+
+      - id: "CALL_RISK_OFF_DEEP_OTM_WAIT"
+        moneyness: DEEP_OTM
+        profit_max: 0.30
+        regime: RISK_OFF
+        decision: WAIT
+        rationale: "RISK_OFF: hold, but be ready to close."
+
+      - id: "CALL_RISK_OFF_NEAR_ATM_CLOSE"
+        moneyness: NEAR_ATM
+        profit_min: 0.20
+        regime: RISK_OFF
+        decision: CLOSE_FOR_PROFIT
+        rationale: "RISK_OFF: close at 20%+ profit."
+
+      - id: "CALL_RISK_OFF_NEAR_ATM_CLOSE_LOSS"
+        moneyness: NEAR_ATM
+        profit_max: 0.20
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF: close to limit drawdown."
+
+      - id: "CALL_RISK_OFF_ITM_CLOSE"
+        moneyness: ITM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_min: 0.20
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF ITM: close profitable positions to reduce exposure."
+
+      - id: "CALL_RISK_OFF_ITM_CLOSE_LOSS"
+        moneyness: ITM
+        dte_band: [MID_DTE, LONG_DTE]
+        profit_max: 0.20
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF ITM: close underwater to limit drawdown."
+
+      - id: "CALL_RISK_OFF_ITM_SHORT_DTE"
+        moneyness: ITM
+        dte_band: SHORT_DTE
+        regime: RISK_OFF
+        decision: CLOSE
+        rationale: "RISK_OFF: close before forced assignment."
+  
+  post_guardrails: []
+  
+  roll_target_selection:
+    step_1_expiration: ">= current_expiry + min_dte_for_roll"
+    step_2_delta: "IV-adaptive delta targets"
+    step_3_liquidity: "OI and spread filters"
+    step_4_net_credit: "10% of original or min per contract"
+    step_5_stress_test: "Loss at -10% <= 3.0x premium"
+    step_6_strike_selection: "Same, down, or up based on roll type"

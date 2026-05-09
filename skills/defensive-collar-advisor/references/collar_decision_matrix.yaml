@@ -1,0 +1,69 @@
+# Defensive Collar Decision Matrix
+# Each rule maps inputs (position state) to outputs (proposal parameters).
+# The advisor walks rules in order; first match wins.
+
+triggers:
+  # All conditions must be true for the position to qualify.
+  qualify_when:
+    - is_core: true                      # configured or auto-detected
+    - has_short_call: true               # existing covered call
+    - concentration_pct: ">10"           # over per-name cap
+    - tax_exposure_pct_of_nlv: ">1.5"    # material tax bill if assigned (lowered from 2% to capture borderline positions)
+
+new_call_strike:
+  # Where to set the new short call (raise the cap).
+  default_otm_pct: 15.0                  # spot × 1.15
+  aggressive_bullish_otm_pct: 20.0       # spot × 1.20
+  never_below_current: true              # don't reduce headroom
+
+  # Round to nearest available strike interval (varies by name)
+  strike_interval_default: 5.0
+  strike_interval_overrides:
+    SPY: 1.0
+    QQQ: 1.0
+    BRK.B: 5.0
+    GOOG: 5.0
+    GOOGL: 5.0
+
+put_strike:
+  # How far below spot to set the long put (the floor).
+  # Lower IV = cheaper puts = closer-to-spot strike OK
+  iv_rank_bands:
+    - condition: "iv_rank < 30"          # cheap insurance
+      put_otm_pct: 5.0                   # 5% below spot
+    - condition: "iv_rank in [30, 60]"   # normal
+      put_otm_pct: 10.0                  # 10% below spot
+    - condition: "iv_rank > 60"          # expensive insurance
+      put_otm_pct: 15.0                  # 15% below — cheaper but less protection
+
+  # Earnings adjustment: tighten the floor 1-2 weeks before earnings
+  earnings_window_days: 14
+  earnings_put_otm_pct: 7.0              # closer floor when an event is imminent
+
+decision_skip_put_leg:
+  # When to JUST propose the roll-up (no put):
+  # 1. IV rank too high (puts not worth their cost)
+  # 2. Position already has a long put (no need to stack)
+  conditions:
+    - iv_rank: ">70"
+    - already_has_long_put: true
+
+target_expiration:
+  # Match both legs to the same expiration where possible.
+  preferred_dte_min: 60
+  preferred_dte_max: 180
+  match_existing_call_exp_if_within_band: true
+
+  # Avoid earnings inside the window
+  avoid_earnings_within_dte: true
+
+cost_caps:
+  # Don't propose collars that consume too much capital
+  max_net_debit_pct_of_nlv: 1.5          # if total cost > 1.5% NLV, downgrade to "roll-up only"
+  max_put_cost_pct_of_position: 5.0      # cap put premium at 5% of position value
+
+aggressive_mode_overrides:
+  # Set when user has flagged "high macro caution" OR portfolio stress coverage < 0.4x.
+  # Tightens floor, accepts higher cost.
+  put_otm_pct: 5.0
+  max_net_debit_pct_of_nlv: 2.5

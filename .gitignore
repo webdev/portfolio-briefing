@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+pytest-cache-files-*/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.etrade_tokens.enc
+.shopping_list_cache.csv
+.shopping_list_fetched
+.ticker_map.json
+
+# State (per-user runtime)
+state/
+!state/.gitkeep
+
+# Reports (per-run output)
+reports/
+
+# Briefing snapshots
+state/briefing_snapshots/
+
+# Logs
+logs/
+*.log
+
+# OAuth tokens (any flavor)
+*token*.json
+oauth_token*
+
+# Build
+build/
+dist/
+*.egg-info/

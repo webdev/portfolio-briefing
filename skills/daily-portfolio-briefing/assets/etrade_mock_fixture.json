@@ -1,0 +1,131 @@
+{
+  "accounts": [
+    {
+      "accountIdKey": "E123456",
+      "accountName": "Taxable",
+      "accountType": "INDIVIDUAL",
+      "balance": 250000
+    },
+    {
+      "accountIdKey": "R789012",
+      "accountName": "Roth IRA",
+      "accountType": "ROTH",
+      "balance": 150000
+    }
+  ],
+  "positions": [
+    {
+      "symbol": "AAPL",
+      "assetType": "EQUITY",
+      "qty": 100,
+      "price": 185.00,
+      "costBasis": 170.00,
+      "accountIdKey": "E123456"
+    },
+    {
+      "symbol": "MSFT",
+      "assetType": "EQUITY",
+      "qty": 50,
+      "price": 420.00,
+      "costBasis": 400.00,
+      "accountIdKey": "E123456"
+    },
+    {
+      "symbol": "NVDA",
+      "assetType": "EQUITY",
+      "qty": 30,
+      "price": 850.00,
+      "costBasis": 750.00,
+      "accountIdKey": "E123456"
+    },
+    {
+      "symbol": "AAPL_SHORT_PUT_20260618",
+      "assetType": "OPTION",
+      "underlying": "AAPL",
+      "type": "PUT",
+      "strike": 170.00,
+      "expiration": "2026-06-18",
+      "qty": -1,
+      "premiumReceived": 2.50,
+      "currentMid": 2.10,
+      "delta": -0.25,
+      "gamma": 0.005,
+      "theta": -0.02,
+      "vega": -0.08,
+      "accountIdKey": "R789012"
+    },
+    {
+      "symbol": "MSFT_COVERED_CALL_20260618",
+      "assetType": "OPTION",
+      "underlying": "MSFT",
+      "type": "CALL",
+      "strike": 430.00,
+      "expiration": "2026-06-18",
+      "qty": -1,
+      "premiumReceived": 3.20,
+      "currentMid": 2.80,
+      "delta": 0.35,
+      "gamma": 0.006,
+      "theta": -0.015,
+      "vega": 0.12,
+      "accountIdKey": "E123456"
+    }
+  ],
+  "balance": {
+    "accountIdKey": "E123456",
+    "cash": 75000,
+    "accountValue": 250000
+  },
+  "quotes": {
+    "AAPL": { "last": 185.00, "bid": 184.99, "ask": 185.01 },
+    "MSFT": { "last": 420.00, "bid": 419.99, "ask": 420.01 },
+    "NVDA": { "last": 850.00, "bid": 849.99, "ask": 850.01 },
+    "SPY": { "last": 550.00, "bid": 549.99, "ask": 550.01 },
+    "QQQ": { "last": 450.00, "bid": 449.99, "ask": 450.01 },
+    "VIX": { "last": 20.00 }
+  },
+  "chains": {},
+  "open_orders": [
+    {
+      "orderId": "ORD001",
+      "underlying": "AAPL",
+      "action": "BUY_TO_CLOSE",
+      "symbol": "AAPL_SHORT_PUT_20260516",
+      "quantity": 1,
+      "limitPrice": 2.00,
+      "status": "OPEN"
+    }
+  ],
+  "theses": {
+    "AAPL": {
+      "ticker": "AAPL",
+      "status": "ACTIVE",
+      "entry_date": "2025-10-15",
+      "entry_price": 170.00,
+      "target_weight": 0.08,
+      "invalidation_price": 150.00,
+      "next_review_date": "2026-06-15",
+      "thesis_health": "INTACT"
+    },
+    "MSFT": {
+      "ticker": "MSFT",
+      "status": "ACTIVE",
+      "entry_date": "2025-11-01",
+      "entry_price": 400.00,
+      "target_weight": 0.06,
+      "invalidation_price": 380.00,
+      "next_review_date": "2026-07-01",
+      "thesis_health": "INTACT"
+    },
+    "NVDA": {
+      "ticker": "NVDA",
+      "status": "ACTIVE",
+      "entry_date": "2025-12-10",
+      "entry_price": 750.00,
+      "target_weight": 0.10,
+      "invalidation_price": 700.00,
+      "next_review_date": "2026-08-10",
+      "thesis_health": "WEAKENING"
+    }
+  }
+}

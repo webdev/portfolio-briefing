@@ -1,0 +1,193 @@
+# Briefing Directive Template
+# Copy and modify this template to create directives manually
+
+# --- DEFER Example ---
+# Use when: You want to defer a recommendation until a specific event
+
+directive_id: dir_20260507_aapl_defer_a3f1  # Auto-generated; don't set manually
+type: DEFER
+status: ACTIVE                               # Auto-set; don't manually edit
+created_at: 2026-05-07T09:30:00-04:00       # Auto-generated; don't set manually
+created_via: cli                             # How was this created: cli, programmatic, briefing review session
+reason: "Want to wait until earnings on 2026-05-21 are out before deciding."
+
+target:
+  kind: option_position                      # option_position | position_scope | new_idea | symbol
+  identifier: "AAPL  260619P00170000"        # For option_position: contract identifier
+
+expires:
+  trigger: earnings_passed                   # earnings_passed | time_elapsed | price_above | ...
+  symbol: AAPL
+
+status_history:  # Auto-maintained; don't edit manually
+  - at: 2026-05-07T09:30:00-04:00
+    status: ACTIVE
+    reason: created
+
+---
+
+# --- MANUAL Example ---
+# Use when: You'll handle this position/scope yourself
+
+directive_id: dir_20260507_msft_manual_b8e2
+type: MANUAL
+status: ACTIVE
+created_at: 2026-05-07T09:30:00-04:00
+created_via: cli
+reason: "Managing MSFT calls manually for now."
+
+target:
+  kind: position_scope
+  symbol: MSFT
+  position_type: short_call                  # Optional: short_call | short_put | long_call | long_put
+
+expires:
+  trigger: open_ended                        # open_ended: no auto-expiry, will prompt after 30 days
+
+status_history:
+  - at: 2026-05-07T09:30:00-04:00
+    status: ACTIVE
+    reason: created
+
+---
+
+# --- OVERRIDE Example ---
+# Use when: You want to change a decision parameter for this position
+
+directive_id: dir_20260507_amd_override_c4d9
+type: OVERRIDE
+status: ACTIVE
+created_at: 2026-05-07T09:30:00-04:00
+created_via: cli
+reason: "High conviction; want to ride this one further."
+
+target:
+  kind: option_position
+  identifier: "AMD  260516P00180000"
+
+parameter: take_profit_threshold             # What parameter to override
+new_value: 0.80                              # New value (any type)
+old_value: 0.50                              # Original value (for audit trail)
+
+expires:
+  trigger: position_closed
+  position_identifier: "AMD  260516P00180000"
+
+status_history:
+  - at: 2026-05-07T09:30:00-04:00
+    status: ACTIVE
+    reason: created
+
+---
+
+# --- WATCH_ONLY Example ---
+# Use when: Surface in briefing but don't generate action until trigger fires
+
+directive_id: dir_20260507_nvda_watch_d6f3
+type: WATCH_ONLY
+status: ACTIVE
+created_at: 2026-05-07T09:30:00-04:00
+created_via: cli
+reason: "Want to see daily close above $185 before entering."
+
+target:
+  kind: new_idea
+  symbol: NVDA
+  source_screener: vcp-screener
+
+expires:
+  trigger: price_above
+  symbol: NVDA
+  level: 185.00
+
+status_history:
+  - at: 2026-05-07T09:30:00-04:00
+    status: ACTIVE
+    reason: created
+
+---
+
+# --- SUPPRESS Example ---
+# Use when: Never recommend this symbol/idea
+
+directive_id: dir_20260507_baba_suppress_e7g4
+type: SUPPRESS
+status: ACTIVE
+created_at: 2026-05-07T09:30:00-04:00
+created_via: cli
+reason: "Tail-risk profile, won't trade going forward."
+
+target:
+  kind: symbol
+  symbol: BABA
+  scope: long_only                           # Optional: all | long_only (default: all)
+
+expires:
+  trigger: open_ended                        # Permanent suppression
+
+status_history:
+  - at: 2026-05-07T09:30:00-04:00
+    status: ACTIVE
+    reason: created
+
+---
+
+# Additional target examples:
+
+# Option Position (specific contract)
+# target:
+#   kind: option_position
+#   identifier: "AAPL  260619P00170000"
+
+# Position Scope (all positions in symbol/type)
+# target:
+#   kind: position_scope
+#   symbol: MSFT
+#   position_type: short_call
+
+# New Idea (screener candidate)
+# target:
+#   kind: new_idea
+#   symbol: NVDA
+#   source_screener: vcp-screener
+
+# Symbol-level (broad rule)
+# target:
+#   kind: symbol
+#   symbol: BABA
+#   scope: long_only
+
+---
+
+# Additional trigger examples:
+
+# Time-based
+# expires:
+#   trigger: time_elapsed
+#   until_date: "2026-05-22"
+
+# Event-based (earnings)
+# expires:
+#   trigger: earnings_passed
+#   symbol: AAPL
+
+# Position lifecycle
+# expires:
+#   trigger: position_closed
+#   position_identifier: "AAPL  260619P00170000"
+
+# Price levels
+# expires:
+#   trigger: price_above
+#   symbol: NVDA
+#   level: 185.00
+
+# Screener-based
+# expires:
+#   trigger: screener_drops
+#   symbol: AAPL
+#   screener_name: vcp-screener
+
+# Manual/open-ended
+# expires:
+#   trigger: open_ended

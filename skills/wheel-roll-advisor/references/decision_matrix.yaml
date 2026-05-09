@@ -1,0 +1,177 @@
+# Decision matrix for wheel-roll-advisor
+
+cells:
+  # SHORT PUT - NORMAL regime - DEEP OTM
+  - id: "PUT_NORMAL_DEEP_OTM_EXPIRY_WEEK"
+    moneyness: DEEP_OTM
+    dte_band: EXPIRY_WEEK
+    outlook: [BULLISH, NEUTRAL]
+    regime: NORMAL
+    decision: LET_EXPIRE
+    rationale: "DEEP OTM in final week. Let it expire worthless."
+
+  - id: "PUT_NORMAL_DEEP_OTM_SHORT_DTE"
+    moneyness: DEEP_OTM
+    dte_band: SHORT_DTE
+    outlook: [BULLISH, NEUTRAL]
+    regime: NORMAL
+    profit_min: 0.80
+    decision: CLOSE_FOR_PROFIT
+    rationale: "DEEP OTM with 80%+ profit. Take the win."
+
+  - id: "PUT_NORMAL_DEEP_OTM_SHORT_DTE_LOW_PROFIT"
+    moneyness: DEEP_OTM
+    dte_band: SHORT_DTE
+    outlook: [BULLISH, NEUTRAL]
+    regime: NORMAL
+    profit_max: 0.79
+    decision: WAIT
+    rationale: "DEEP OTM but low profit <80%. Hold for more decay."
+
+  - id: "PUT_NORMAL_DEEP_OTM_MID_LONG_DTE"
+    moneyness: DEEP_OTM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [BULLISH, NEUTRAL]
+    regime: NORMAL
+    profit_min: 0.50
+    decision: CLOSE_FOR_PROFIT
+    rationale: "DEEP OTM in mid/long DTE. Secure 50%+ profit."
+
+  # SHORT PUT - NORMAL regime - MODERATE OTM
+  - id: "PUT_NORMAL_MOD_OTM_TAKEPROFIT"
+    moneyness: MODERATE_OTM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_min: 0.50
+    profit_max: 0.75
+    decision: CLOSE_FOR_PROFIT
+    rationale: "Standard wheel sweet spot. Take 50-75% profit."
+
+  - id: "PUT_NORMAL_MOD_OTM_GTC"
+    moneyness: MODERATE_OTM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_min: 0.50
+    profit_max: 0.75
+    dte: null
+    decision: GTC_LIMIT_75
+    rationale: "DTE sufficient, earnings distant. Place GTC limit at 75% capture."
+
+  - id: "PUT_NORMAL_MOD_OTM_BELOW_50"
+    moneyness: MODERATE_OTM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_max: 0.49
+    decision: HOLD
+    rationale: "MODERATE OTM with low profit. Hold for more decay."
+
+  - id: "PUT_NORMAL_MOD_OTM_SHORT_DTE"
+    moneyness: MODERATE_OTM
+    dte_band: SHORT_DTE
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_min: 0.40
+    decision: CLOSE_FOR_PROFIT
+    rationale: "SHORT DTE approaching. Close at 40%+ profit."
+
+  # SHORT PUT - NORMAL regime - NEAR ATM
+  - id: "PUT_NORMAL_NEAR_ATM_ROLL_OUT"
+    moneyness: NEAR_ATM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_min: 0.30
+    profit_max: 0.50
+    decision: ROLL_OUT
+    rationale: "NEAR ATM with moderate profit. Roll out for more time."
+
+  - id: "PUT_NORMAL_NEAR_ATM_SHORT_DTE_CLOSE"
+    moneyness: NEAR_ATM
+    dte_band: [SHORT_DTE, EXPIRY_WEEK]
+    outlook: NEUTRAL
+    regime: NORMAL
+    profit_min: 0.25
+    decision: CLOSE_FOR_PROFIT
+    rationale: "NEAR ATM in expiry week. Close at 25%+ profit."
+
+  # SHORT PUT - NORMAL regime - ITM
+  - id: "PUT_NORMAL_ITM_BULLISH_ROLL_DOWN"
+    moneyness: ITM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: BULLISH
+    regime: NORMAL
+    profit_min: 0.10
+    decision: ROLL_OUT_AND_DOWN
+    rationale: "ITM but BULLISH. Roll down-and-out to defend."
+
+  - id: "PUT_NORMAL_ITM_NEUTRAL_ROLL_OUT"
+    moneyness: ITM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: NEUTRAL
+    regime: NORMAL
+    decision: ROLL_OUT
+    rationale: "ITM NEUTRAL. Roll out for time, keep strike."
+
+  - id: "PUT_NORMAL_ITM_EXPIRY_WEEK"
+    moneyness: ITM
+    dte_band: EXPIRY_WEEK
+    outlook: [BULLISH, NEUTRAL]
+    regime: NORMAL
+    profit_min: 0.10
+    decision: TAKE_ASSIGNMENT
+    rationale: "ITM in expiry week. Take assignment and sell covered call."
+
+  # SHORT PUT - CAUTION regime
+  - id: "PUT_CAUTION_MOD_OTM"
+    moneyness: MODERATE_OTM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: CAUTION
+    profit_min: 0.40
+    decision: CLOSE_FOR_PROFIT
+    rationale: "CAUTION regime. Reduce risk. Close at 40%+ profit."
+
+  # SHORT CALL - covered call
+  - id: "CALL_NORMAL_DEEP_OTM"
+    moneyness: DEEP_OTM
+    dte_band: [SHORT_DTE, EXPIRY_WEEK]
+    outlook: NEUTRAL
+    regime: NORMAL
+    profit_min: 0.50
+    decision: CLOSE_FOR_PROFIT
+    rationale: "Covered call DEEP OTM. Let expire or close at 50%."
+
+  - id: "CALL_NORMAL_NEAR_ATM_TAKE_ASSIGNMENT"
+    moneyness: NEAR_ATM
+    dte_band: [SHORT_DTE, EXPIRY_WEEK]
+    outlook: NEUTRAL
+    regime: NORMAL
+    profit_min: 0.30
+    decision: TAKE_ASSIGNMENT
+    rationale: "Covered call assigned. Roll to next month or close."
+
+  # Fallback cells for edge cases
+  - id: "PUT_NORMAL_DEEP_OTM_EXPIRY_WEEK_BEARISH"
+    moneyness: DEEP_OTM
+    dte_band: EXPIRY_WEEK
+    outlook: BEARISH
+    regime: NORMAL
+    decision: WAIT
+    rationale: "BEARISH outlook even though DEEP OTM. Wait, don't let expire just yet."
+
+  - id: "PUT_CAUTION_NEAR_ATM"
+    moneyness: NEAR_ATM
+    dte_band: [SHORT_DTE, MID_DTE]
+    outlook: NEUTRAL
+    regime: CAUTION
+    profit_min: 0.25
+    decision: CLOSE_FOR_PROFIT
+    rationale: "CAUTION regime. Close at 25% profit even if not ideal."
+
+  - id: "DEFAULT_HOLD"
+    profit_min: 0.0
+    decision: HOLD
+    rationale: "No specific rule matched. Hold position."

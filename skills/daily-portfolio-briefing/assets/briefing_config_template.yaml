@@ -1,0 +1,62 @@
+# Briefing Configuration Template
+# Copy to state/briefing_config.yaml and customize
+
+enabled_strategies:
+  - wheel              # covered calls + cash-secured puts
+  - dividend_growth    # pullback entry on dividend growers (optional)
+  - swing              # short-term mean-reversion (optional)
+
+# Screeners: which ones to run and how often
+screeners:
+  value_dividend_screener:
+    enabled: true
+    frequency: every_run    # or: weekly, monthly
+  earnings_trade_analyzer:
+    enabled: false
+    frequency: weekly
+  pead_screener:
+    enabled: false
+    frequency: weekly
+  pair_trade_screener:
+    enabled: false
+    frequency: monthly
+
+# Risk parameters
+risk:
+  max_position_pct: 0.10          # Max 10% NLV in any single name
+  max_sector_pct: 0.35            # Max 35% NLV in any sector
+  max_portfolio_risk_pct: 0.15    # Max 15% NLV at risk (stop loss) at any time
+  leverage_cap: 1.0               # 1.0 = no margin, 1.5 = 50% leverage
+
+# Account routing
+accounts:
+  - accountIdKey: "E123456"      # E*TRADE taxable account
+    type: TAXABLE
+    weight_pct: 45               # 45% of portfolio
+    enabled: true
+
+  - accountIdKey: "R789012"      # E*TRADE Roth IRA
+    type: ROTH_IRA
+    weight_pct: 30               # 30% of portfolio
+    enabled: true
+    liquidity_minimum_pct: 0.60  # Keep 60% liquid (cash)
+
+  - accountIdKey: "T345678"      # E*TRADE Traditional IRA
+    type: TRADITIONAL_IRA
+    weight_pct: 25               # 25% of portfolio
+    enabled: false
+    liquidity_minimum_pct: 0.60
+
+# Wheel strategy parameters
+wheel:
+  short_put_delta_range: [0.15, 0.30]    # Target 15-30 delta puts
+  short_call_delta_range: [0.20, 0.35]   # Target 20-35 delta calls
+  min_dte_for_roll: 21                   # Don't roll within 21 days
+  loss_trigger_multiple_monthly: 1.40    # Close at 1.40× premium paid
+  loss_trigger_multiple_weekly: 1.50     # Close at 1.50× premium paid
+
+# Output
+output:
+  output_dir: "reports/daily"
+  snapshot_dir: "state/briefing_snapshots"
+  preserve_days: 90                       # Keep snapshots for 90 days

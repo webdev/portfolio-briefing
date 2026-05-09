@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Daily portfolio briefing — runs Mon-Fri at 8:00 AM local time.
+
+  IMPORTANT: launchd's StartCalendarInterval uses LOCAL machine time. If your
+  Mac's clock is set to a non-ET timezone, adjust Hour/Minute below so 8:00
+  ET fires correctly. Alternatively set TZ in EnvironmentVariables to
+  "America/New_York" — modern macOS launchd respects this for the calendar
+  interpretation on most systems.
+
+  Install:
+    cp launchd/com.gblazer.daily-briefing.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.gblazer.daily-briefing.plist
+    launchctl enable gui/$UID/com.gblazer.daily-briefing
+
+  Uninstall:
+    launchctl bootout gui/$UID/com.gblazer.daily-briefing
+    rm ~/Library/LaunchAgents/com.gblazer.daily-briefing.plist
+
+  Run on demand (without waiting for the schedule):
+    launchctl kickstart -k gui/$UID/com.gblazer.daily-briefing
+
+  Logs land in ~/Documents/briefings/logs/briefing_YYYY-MM-DD.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gblazer.daily-briefing</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/gblazer/workspace/portfolio-briefing/skills/daily-portfolio-briefing/scripts/run_briefing_scheduled.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/gblazer/workspace/portfolio-briefing/skills/daily-portfolio-briefing</string>
+
+    <!-- Mon-Fri at 08:00 local time. Sat=7, Sun=1 are excluded by listing
+         only Mon (2) through Fri (6). -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>2</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>4</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>6</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <!-- If the Mac was asleep at 8am, run as soon as it wakes. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StartOnMount</key>
+    <false/>
+
+    <!-- Don't relaunch on crash; one shot per day is the contract. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Hard cap so a hung yfinance call cannot block tomorrow's run. -->
+    <key>ExitTimeOut</key>
+    <integer>900</integer>
+
+    <!-- Emergency stdout/stderr — the wrapper redirects too, but in case the
+         wrapper itself dies before redirection, these catch it. -->
+    <key>StandardOutPath</key>
+    <string>/Users/gblazer/Documents/briefings/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gblazer/Documents/briefings/logs/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/gblazer</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>TZ</key>
+        <string>America/New_York</string>
+        <key>PORTFOLIO_BRIEFING_REPO</key>
+        <string>/Users/gblazer/workspace/portfolio-briefing</string>
+        <key>PORTFOLIO_BRIEFING_TOKEN_FILE</key>
+        <string>/Users/gblazer/.config/portfolio-briefing/etrade_tokens.json</string>
+        <key>PORTFOLIO_BRIEFING_DELIVERY_DIR</key>
+        <string>/Users/gblazer/Documents/briefings</string>
+        <key>PORTFOLIO_BRIEFING_FETCH_WORKERS</key>
+        <string>16</string>
+    </dict>
+</dict>
+</plist>

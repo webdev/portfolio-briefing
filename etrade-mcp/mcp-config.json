@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "etrade": {
+      "command": "python",
+      "args": [
+        "-m",
+        "server.main"
+      ],
+      "cwd": "c:\\Users\\Cobratype PC\\Documents\\workspace\\etrade-mcp",
+      "env": {
+        "ETRADE_CONSUMER_KEY": "942d38f3e5bb0c53f9bec805cf479b90",
+        "ETRADE_CONSUMER_SECRET": "d3fc6c509cc4864fad72fc305cc7d5cb197180b29d607fdc3b5f92cf9a2d076a",
+        "ETRADE_ENVIRONMENT": "production"
+      }
+    }
+  }
+}

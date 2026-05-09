@@ -1,0 +1,52 @@
+# Wheel strategy parameters for decision matrix
+
+loss_stops:
+  loss_stop_monthly: 2.0        # 2.0x entry premium for DTE > 10
+  loss_stop_weekly: 1.5         # 1.5x entry premium for DTE <= 10
+  weekly_put_dte_threshold: 10
+
+defensive_roll:
+  min_dte_for_roll: 21
+  defensive_roll_profit_min: 0.50
+
+take_profit:
+  deep_otm_take_profit_pct: 0.80
+  moderate_otm_take_profit_pct: 0.50
+  near_atm_take_profit_pct: 0.40
+  itm_take_profit_pct: 0.30
+
+roll_targets:
+  delta_target_normal_iv: 0.22   # Normal IV rank (30-60)
+  delta_target_high_iv: 0.16     # High IV rank (>60)
+  delta_max_normal_iv: 0.30
+  delta_max_high_iv: 0.22
+  min_oi_for_roll: 100
+  max_spread_pct_for_roll: 0.05
+  min_net_credit_pct: 0.10
+  min_net_credit_abs: 0.25
+  max_stress_loss_multiple: 3.0
+
+liquidity_gates:
+  min_bid_ask_spread_pct: 0.01
+  min_volume: 5
+
+earnings_guards:
+  earnings_guard_dte_max: 30
+  earnings_guard_window_days: 7
+  earnings_guard_profit_pct: 0.50
+
+iv_thresholds:
+  low_iv_threshold: 30
+  high_iv_threshold: 60
+  extreme_iv_threshold: 80
+
+dte_bands:
+  expiry_week_max: 7
+  short_dte_max: 21
+  mid_dte_max: 120
+  long_dte_min: 121
+
+moneyness_delta:
+  deep_otm_max_delta: 0.10
+  moderate_otm_max_delta: 0.25
+  near_atm_max_delta: 0.50

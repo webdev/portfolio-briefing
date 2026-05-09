@@ -1,0 +1,44 @@
+# Tail-risk names that get conservative treatment
+
+chinese_adrs:
+  - BIDU
+  - BABA
+  - JD
+  - NIO
+  - PDD
+  - NTES
+  - TME
+  - BILI
+  - LI
+  - XPEV
+  - VIPS
+  - IQ
+  - TCOM
+  - TAL
+  - EDU
+  - YUMC
+  - ZH
+  - FUTU
+  - TIGR
+
+binary_biotech:
+  - NVAX
+  - OCGN
+  - INO
+  - VXRT
+  - BNGO
+  - SAVA
+  - AXSM
+
+crypto_proxy:
+  - MARA
+  - RIOT
+  - MSTR
+  - HOOD
+  - BITO
+
+meme_high_borrow:
+  - GME
+  - AMC
+  - BBBY
+  - BBIG

@@ -1,0 +1,32 @@
+{
+  "decision": "CLOSE_FOR_PROFIT",
+  "matrixCell": "PUT_NORMAL_MOD_OTM_TAKEPROFIT",
+  "rationale": "Standard wheel sweet spot; 69% profit captured at 42 DTE. Take the gain.",
+  "rollTarget": null,
+  "warnings": [],
+  "nextReviewDate": "2026-05-14",
+  "position": {
+    "symbol": "AAPL",
+    "positionType": "SHORT_PUT",
+    "optionType": "PUT",
+    "strikePrice": 170.0,
+    "expirationDate": "2026-06-19",
+    "quantity": 1,
+    "entryPrice": 4.85,
+    "currentMid": 1.5,
+    "delta": -0.22,
+    "daysToExpiry": 42,
+    "dayChange": -0.8,
+    "ivRank": 38,
+    "underlyingPrice": 181.2,
+    "outlook": "BULLISH"
+  },
+  "state": {
+    "moneyness": "MODERATE_OTM",
+    "dteBand": "MID_DTE",
+    "ivRegime": "NORMAL",
+    "profitCapturedPct": 0.691,
+    "outlook": "BULLISH",
+    "regime": "NORMAL"
+  }
+}

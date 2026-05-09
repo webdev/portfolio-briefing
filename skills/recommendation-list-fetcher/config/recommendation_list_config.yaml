@@ -1,0 +1,121 @@
+# Recommendation List Fetcher Configuration Template
+#
+# Copy this file to config/recommendation_list_config.yaml and fill in your values.
+# The skill will use this config to:
+# - Fetch from the Google Sheet
+# - Map columns to recommendation fields
+# - Resolve company names to tickers
+# - Normalize ratings to canonical enums
+# - Cache and refresh appropriately
+
+source:
+  # URL to the public CSV export endpoint.
+  # The sheet must be shared "anyone with the link can view" for this to work.
+  # See the skill documentation for how to set up sheet sharing.
+  url: "https://docs.google.com/spreadsheets/d/12Fs_d8Zr4sKnoCxb5EaEbe2FciXIGPVTFGM9iehZq3M/gviz/tq?tqx=out:csv"
+
+  # Sheet ID extracted from the URL (for logging only)
+  sheet_id: "12Fs_d8Zr4sKnoCxb5EaEbe2FciXIGPVTFGM9iehZq3M"
+
+  # Row number where data starts (1-indexed). Row 1 is header; data starts row 2.
+  data_starts_at_row: 2
+
+column_mapping:
+  # Column letter (A, B, C, etc.) for each field.
+  # The sheet's columns A-G are:
+  # A = Company Name, B = Rating, C = Date Updated,
+  # D = 2026 Price Target, E = 2026 As-of Date,
+  # F = 2027 Price Target, G = 2027 As-of Date
+  name: A
+  recommendation: B
+  date_updated: C
+  price_target_2026: D
+  price_target_2026_asof: E
+  price_target_2027: F
+  price_target_2027_asof: G
+
+ticker_resolution:
+  # Manual ticker overrides for company names that don't map cleanly to tickers.
+  # These are checked FIRST before yfinance lookup.
+  # Add entries here if a company name doesn't resolve correctly.
+  manual_overrides:
+    "Alphabet": GOOG
+    "Meta Platforms": META
+    "Taiwan Semi": TSM
+    "British American Tob.": BTI
+    "Eli Lilly": LLY
+    "Pinduoduo": PDD
+    "Mercadolibre": MELI
+    "Booking Holdings": BKNG
+    "The Trade Desk": TTD
+    "Procter & Gamble": PG
+    "Keurig Dr Pepper": KDP
+    "Unite Parsel Service": UPS
+    "Lumen Tech": LUMN
+    "Luminar Tech": LAZR
+    "S&P Global": SPGI
+    "Corning": GLW
+    "Exxon": XOM
+    "Cameco": CCJ
+    "PACCAR": PCAR
+    "Carnival Cruise Line": CCL
+    "Royal Caribbean Cruise": RCL
+    "Deer": DE
+
+  # Path to persistent name→ticker cache.
+  # This avoids redundant yfinance API calls.
+  cache_path: "state/cache/ticker_map.json"
+
+  # Fall back to yfinance search if name not in overrides or cache.
+  use_yfinance_fallback: true
+
+normalization:
+  # Mapping from rating string (as it appears in the sheet) to numeric tier.
+  # Tiers: 5=strongest, 0=weakest.
+  # Note: strip whitespace before matching (e.g., "Top 15 Stock " → "Top 15 Stock").
+  rating_tiers:
+    "Top Stock to Buy": 5
+    "Top 15 Stock": 4
+    "Buy": 3
+    "Borderline Buy": 2
+    "Hold/ Market Perform": 1
+    "Sell": 0
+
+  # Mapping from numeric tier to canonical recommendation enum.
+  # These enums are used downstream by daily-portfolio-briefing.
+  tier_to_recommendation:
+    5: STRONG_BUY
+    4: BUY
+    3: BUY
+    2: WEAK_BUY
+    1: HOLD
+    0: SELL
+
+  data_hygiene:
+    # Strip leading/trailing whitespace from all fields.
+    strip_whitespace_all_fields: true
+
+    # Skip rows where any field contains "#REF!" (Excel error sentinel).
+    drop_ref_errors: true
+
+    # Date formats to try when parsing. First match wins.
+    accepted_date_formats:
+      - "%m/%d/%Y"   # 5/6/2026
+      - "%m/%d/%y"   # 5/6/26
+      - "%Y-%m-%d"   # 2026-05-06
+
+freshness:
+  # Archive (skip) recommendations older than this many days.
+  max_age_days: 30
+
+  # Tag recommendations as "aging" if older than this many days.
+  # The briefing may surface aging recommendations with a caution note.
+  warn_age_days: 14
+
+caching:
+  # Cache the sheet fetch results for this many minutes.
+  # Prevents hitting Google Sheets too frequently.
+  cache_for_minutes: 60
+
+  # Path to the recommendation list cache.
+  cache_path: "state/cache/recommendation_list.json"
