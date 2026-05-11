@@ -246,9 +246,13 @@ def render_watch_with_commentary(
             if not commentary and review.get("rationale"):
                 lines.append(f"  - {review.get('rationale')}")
 
-            # Always show cell for auditability
+            # Cell ID humanized (raw cell preserved in JSON sidecar for audit)
             if cell:
-                lines.append(f"  - cell: `{cell}`")
+                # Import locally to avoid circular import
+                from render.panels import _humanize_matrix_cell
+                human = _humanize_matrix_cell(cell)
+                if human:
+                    lines.append(f"  - {human}")
 
             # Roll target (legacy single-target)
             roll = review.get("roll_target")

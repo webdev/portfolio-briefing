@@ -202,11 +202,21 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4) -> list[s
 
     actionable_prefixes = ("BUY", "CSP")
 
+    # Group themes by their `group:` field for visual hierarchy in the report.
+    # Preserves YAML ordering within each group.
+    current_group: str | None = None
     for theme_key, results in results_by_theme.items():
         if not results:
             continue
         meta = themes_meta.get(theme_key, {})
         title = meta.get("name", theme_key)
+        group = meta.get("group")
+
+        # Render group divider when entering a new group
+        if group and group != current_group:
+            lines.append(f"### ━━━ {group} ━━━")
+            lines.append("")
+            current_group = group
         # Only actionable picks
         actionable = [
             r for r in results

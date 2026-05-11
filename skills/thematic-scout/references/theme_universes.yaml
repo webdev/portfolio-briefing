@@ -2,83 +2,94 @@
 #
 # Each theme has:
 #   name      — human label rendered in the report
+#   group     — optional parent grouping (e.g. "AI Buildout") for the renderer
 #   anchors   — tickers to analyze (curated list of leaders + emerging names)
 #   etfs      — relevant ETFs (rendered as benchmarks in the report)
 #   notes     — one-line thematic context
 #
-# Add/edit themes here without code changes. Anchors can be added/removed as
-# the thematic landscape shifts.
+# Order in this file is the order in the report. The first five themes
+# below are the "AI Buildout" pillars (Semis → Memory → Photonics → Data
+# Centers → Power). Quantum and Cybersecurity follow as adjacent themes.
 
 themes:
-  semis_ai:
-    name: "Semiconductors & AI"
+  semis:
+    name: "Semis"
+    group: "The AI Buildout"
     anchors:
       - NVDA   # AI compute leader
       - AMD    # GPU + datacenter
-      - AVGO   # AI ASIC + networking
+      - INTC   # foundry comeback + foundational CPU
+      - ASML   # EUV lithography monopoly
       - TSM    # foundry monopoly
       - ARM    # IP licensing for AI inference
-      - ASML   # EUV lithography monopoly
+      - AVGO   # AI ASIC + networking
       - MRVL   # custom ASIC
+      - QCOM   # mobile + automotive + edge
+      - TXN    # analog / power management
       - SMCI   # AI server builder
     etfs: [SMH, SOXX, QQQ]
     notes: "Hyperscaler capex cycle, Claude / GPT compute demand"
 
-  memory:
-    name: "Memory (DRAM / NAND)"
+  memory_storage:
+    name: "Memory & Storage"
+    group: "The AI Buildout"
     anchors:
-      - MU     # micron — HBM + DRAM
-      - WDC    # western digital — NAND + HDD
-      - STX    # seagate — HDD
       - SNDK   # SanDisk parent (re-spin)
+      - MU     # micron — HBM + DRAM
+      - STX    # seagate — HDD
+      - WDC    # western digital — NAND + HDD
     etfs: []
-    notes: "HBM ramp for AI, NAND price recovery"
+    notes: "HBM ramp for AI, NAND price recovery, hyperscale storage"
 
-  nuclear:
-    name: "Nuclear Energy"
+  photonics_optics:
+    name: "Photonics & Optics"
+    group: "The AI Buildout"
     anchors:
-      - CCJ    # cameco — uranium miner
-      - BWXT  # nuclear components
-      - NRG    # diversified power w/ nuclear
-      - VST    # vistra — nuclear + gas baseload
-      - CEG    # constellation — pure-play nuclear
-      - OKLO   # small modular reactor (SMR) startup
-      - SMR    # NuScale — SMR
-      - NNE    # Nano Nuclear Energy
-      - LEU    # Centrus Energy — uranium enrichment
-    etfs: [URA, NLR]
-    notes: "AI datacenter power demand → nuclear renaissance"
-
-  powergrid_infra:
-    name: "Powergrid & Infrastructure"
-    anchors:
-      - VRT    # vertiv — datacenter cooling/power
-      - GEV    # GE Vernova — grid + turbines
-      - ETN    # eaton — power management
-      - EMR    # emerson — automation
-      - ABB    # ABB — robotics + power
-      - HUBB   # hubbell — utility equipment
-      - PWR    # quanta services — utility construction
-      - MMM    # 3M — diversified industrial (legacy)
-      - JCI    # johnson controls — building tech
-    etfs: [XLI, PAVE]
-    notes: "Datacenter buildout + grid modernization"
-
-  optical_ai:
-    name: "Optical AI / Networking"
-    anchors:
-      - COHR   # coherent — optical components
+      - NOK    # nokia — optical networking infra
       - LITE   # lumentum — optical modules
-      - FN     # fabrinet — contract manufacturing for optics
+      - COHR   # coherent — optical components
       - AAOI   # applied optoelectronics
+      - GLW    # corning — fiber + glass
       - CIEN   # ciena — optical networking
-      - ANET   # arista — cloud networking
-      - NVDA   # also relevant (NVLink optical)
+      - FN     # fabrinet — contract manufacturing for optics
     etfs: []
     notes: "AI cluster interconnect demand (CPO, co-packaged optics)"
 
+  ai_data_centers:
+    name: "AI Data Centers"
+    group: "The AI Buildout"
+    anchors:
+      - NBIS   # nebius — Yandex-spinoff AI cloud
+      - IREN   # iris energy — miner → AI hosting
+      - CRWV   # coreweave — AI hyperscaler
+      - CIFR   # cipher mining — miner / AI infra
+      - WULF   # terawulf — miner / AI hosting
+    etfs: []
+    notes: "Bitcoin miners pivoting to AI infrastructure / GPU hosting"
+
+  power:
+    name: "Power"
+    group: "The AI Buildout"
+    anchors:
+      - CEG    # constellation — pure-play nuclear baseload
+      - BE     # bloom energy — solid oxide fuel cells
+      - VRT    # vertiv — datacenter cooling/power
+      - NVTS   # navitas — GaN/SiC power semis
+      - OKLO   # small modular reactor (SMR)
+      - UUUU   # energy fuels — uranium miner
+      - GEV    # GE Vernova — grid + turbines
+      - LEU    # centrus energy — uranium enrichment
+      - EOSE   # eos energy — zinc-based grid storage
+      - SMR    # NuScale — SMR
+      - ETN    # eaton — power management
+    etfs: [URA, NLR, XLU]
+    notes: "Datacenter power demand → nuclear renaissance, grid buildout"
+
+  # Adjacent themes (not part of AI Buildout but worth tracking)
+
   quantum:
     name: "Quantum Computing"
+    group: "Adjacent"
     anchors:
       - IONQ   # trapped-ion
       - RGTI   # rigetti — superconducting
@@ -90,6 +101,7 @@ themes:
 
   cybersecurity:
     name: "Cybersecurity"
+    group: "Adjacent"
     anchors:
       - CRWD   # crowdstrike — endpoint
       - PANW   # palo alto — platform

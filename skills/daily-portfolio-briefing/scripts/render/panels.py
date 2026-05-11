@@ -8,6 +8,81 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
+
+# --------------------------------------------------------------------------
+# Matrix cell ID → human label translation
+# --------------------------------------------------------------------------
+# The wheel-roll-advisor's decision matrix emits cell IDs like
+# `PUT_NORMAL_MOD_OTM_BELOW_50`. These are great for audit but ugly for
+# daily reading. This helper turns them into emoji + plain-English labels.
+# The raw cell ID is still preserved in the JSON sidecar for audit.
+
+def _humanize_matrix_cell(cell_id: str | None) -> str | None:
+    """Return an emoji-prefixed human label for a matrix cell ID.
+
+    Returns None if cell_id is None/empty. Returns the raw ID wrapped in
+    code-ticks if no friendly label is known (so unknown cells are still
+    visible — better than silently hiding).
+    """
+    if not cell_id:
+        return None
+    cell = cell_id.upper().strip()
+
+    # Default rules (regime fallbacks + generic hold)
+    if cell == "DEFAULT_HOLD":
+        return "🤝 Hold — no specific rule triggered"
+    if cell == "DEFAULT_NORMAL":
+        return "🟢 Normal market regime"
+    if cell == "DEFAULT_CAUTION":
+        return "🟡 Caution regime — defensive bias"
+    if cell == "DEFAULT_RISK_OFF":
+        return "🔴 Risk-off — close & defend"
+    if cell == "STUB_HOLD":
+        return "🤝 Hold (no live data for review)"
+    if cell == "DATA_UNAVAILABLE":
+        return "❓ Data unavailable — verify at broker"
+    if cell.startswith("DIRECTIVE_"):
+        # User-set directive override (e.g. DIRECTIVE_SUPPRESS)
+        kind = cell.replace("DIRECTIVE_", "").replace("_", " ").lower()
+        return f"📌 Directive override ({kind})"
+
+    # Parse structured cells: TYPE_REGIME_MONEYNESS_QUAL
+    parts = cell.split("_")
+    side = parts[0] if parts else ""
+    regime = parts[1] if len(parts) > 1 else ""
+
+    # Build the human label compositionally
+    side_label = {"PUT": "short put", "CALL": "short call"}.get(side, side.lower())
+    regime_label = {
+        "NORMAL": "",   # don't decorate the typical case
+        "CAUTION": " (caution regime)",
+        "RISK": " (risk-off)",
+    }.get(regime, "")
+
+    cell_rest = "_".join(parts[2:]) if len(parts) > 2 else ""
+
+    # Common cell patterns
+    if "DEEP_ITM" in cell_rest:
+        return f"🔴 {side_label} deep ITM{regime_label} — roll or accept assignment"
+    if "NEAR_ATM" in cell_rest:
+        return f"🟡 {side_label} near-ATM{regime_label} — watch / consider close"
+    if "MOD_OTM_BELOW_50" in cell_rest:
+        return f"🟢 {side_label} moderately OTM, < 50% captured{regime_label} — hold for decay"
+    if "MOD_OTM_ABOVE_50" in cell_rest:
+        return f"💰 {side_label} moderately OTM, ≥ 50% captured{regime_label} — consider closing winner"
+    if "DEEP_OTM_BELOW_50" in cell_rest:
+        return f"🟢 {side_label} deep OTM, < 50% captured{regime_label} — let theta work"
+    if "DEEP_OTM_ABOVE_50" in cell_rest:
+        return f"💰 {side_label} deep OTM, ≥ 50% captured{regime_label} — close winner"
+    if "ATM" in cell_rest:
+        return f"🟡 {side_label} at-the-money{regime_label} — assignment risk"
+
+    # Unknown structured cell — emit the human-readable parts we have
+    if side_label:
+        return f"• {side_label}{regime_label} ({cell})"
+    # Fall back to raw ID (so unknowns are still surfaced for debug)
+    return f"• `{cell}`"
+
 # Wire in the yield-calculator, defensive-collar-advisor, wheel-roll-advisor, wash-sale-tracker, trade-validator
 _SKILLS_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_SKILLS_ROOT / "yield-calculator" / "scripts"))
@@ -181,7 +256,9 @@ def render_market_context(regime_data: dict, quotes: dict) -> list:
 
     if triggered:
         rule = triggered[0]
-        lines.append(f"- Regime trigger: `{rule.get('rule_id')}` — {rule.get('rationale')}")
+        # Drop the raw rule_id — the rationale already says everything the user
+        # needs in plain English. Raw ID stays in the JSON sidecar for audit.
+        lines.append(f"- Regime trigger: {rule.get('rationale')}")
 
     if (regime_data or {}).get("stickiness_applied"):
         lines.append(f"- Stickiness: {regime_data.get('sticky_hold_reason')}")
@@ -1664,8 +1741,9 @@ def render_watch(equity_reviews: list, options_reviews: list) -> list:
                 lines.append(f"  - entry ${entry:.2f} / mid ${mid:.2f} ({pl_pct:+.0f}% captured)")
             if rationale:
                 lines.append(f"  - {rationale}")
-            if cell:
-                lines.append(f"  - cell: `{cell}`")
+            human = _humanize_matrix_cell(cell)
+            if human:
+                lines.append(f"  - {human}")
             roll = review.get("roll_target")
             if roll:
                 lines.append(f"  - roll target: {roll.get('strike')} exp {roll.get('expiration')} for ${roll.get('expectedNetCredit', 0):.2f} credit")
