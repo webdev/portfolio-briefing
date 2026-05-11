@@ -1,0 +1,74 @@
+# Prioritization rules for capital-planner. Deterministic — same inputs → same tier.
+#
+# Tiers:
+#   1 - CRITICAL: must do (left-tail protection, profit-locking, free-collateral-now).
+#   2 - IMPORTANT: should do (concentration relief, GOOD-EV opens, credit rolls).
+#   3 - OPTIONAL: may do (MARGINAL EV, long-term CSPs ranked within budget).
+#   4 - DEFER:    do not act now (BLOCKED, weak rec, over concentration cap).
+
+concentration:
+  cap_pct: 10.0          # Per-name NLV cap (hard rule)
+  near_cap_pct: 8.0      # Soft warning — defer adding more
+  target_pct: 5.0        # Default target weight per holding
+
+stress_coverage:
+  red_threshold: 0.50    # Below this, hedges become CRITICAL
+  yellow_threshold: 0.70
+
+profit_capture:
+  early_close_min_pct: 0.30  # ≥30% capture → close-winner CRITICAL on short-dated
+
+ltcg:
+  rate: 0.238            # 20% LTCG + 3.8% NIIT
+
+actions:
+  CLOSE:
+    base_tier: 2
+    promote_to_critical_if_capture_pct_at_or_above: 0.30
+    promote_to_critical_if_dte_at_or_below: 14   # short-dated winners
+
+  HEDGE:
+    base_tier: 3
+    promote_to_critical_if_coverage_below: 0.50
+
+  TRIM:
+    base_tier: 2
+    promote_to_critical_if_weight_pct_at_or_above: 12.0  # severe breach
+
+  ROLL:
+    base_tier: 3
+    # Credit rolls are tier 2 (free cash + cap headroom)
+    promote_to_important_if_credit_received: true
+    # Earnings inside window → defer
+    defer_if_earnings_inside_dte: 14
+
+  NEW_CSP:        # Pullback CSP — short-dated income
+    base_tier: 3
+    promote_to_important_if_validator_verdict: GOOD
+
+  NEW_CC:         # Pullback covered call
+    base_tier: 3
+    promote_to_important_if_validator_verdict: GOOD
+
+  LT_CSP:         # Long-dated CSP from long-term-opportunity-advisor
+    base_tier: 3
+    skip_if_weight_pct_at_or_above: 10.0      # over cap
+    defer_if_weight_pct_at_or_above: 8.0      # near cap
+    skip_if_third_party_rec_in: ["HOLD", "SELL", "UNDERPERFORM", "STRONG_SELL"]
+
+  LT_LEAP:        # Long-dated CALL (LEAP) for stock replacement
+    base_tier: 3
+    skip_if_weight_pct_at_or_above: 6.0       # already loaded — don't add LEAPs
+    skip_if_third_party_rec_in: ["HOLD", "SELL"]
+
+  LT_ADD:         # Long-term equity add (3-12mo)
+    base_tier: 3
+    skip_if_weight_pct_at_or_above: 8.0
+
+  LT_TRIM:        # Long-term equity trim (3-12mo)
+    # Same priority as concentration trim — this is risk reduction
+    base_tier: 2
+    promote_to_critical_if_weight_pct_at_or_above: 12.0
+
+  LT_EXIT:        # Long-term equity exit (third-party SELL or thesis broken)
+    base_tier: 1                              # always critical — thesis is broken

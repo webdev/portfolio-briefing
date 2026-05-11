@@ -66,6 +66,8 @@ def aggregate_briefing(
     directives_expired: list,
     snapshot_dir: Path,
     long_term_opportunities: list | None = None,
+    capital_plan: dict | None = None,
+    scout_payload: dict | None = None,
 ) -> tuple:
     """
     Aggregate all step outputs into final briefing markdown and JSON.
@@ -153,6 +155,36 @@ def aggregate_briefing(
     if long_term_opportunities:
         from steps.long_term_opportunities import render_long_term_opportunities
         lines.extend(render_long_term_opportunities(long_term_opportunities))
+
+    # NEW (Wave 26): Thematic Scout — research across themes (semis/nuclear/etc)
+    if scout_payload:
+        from steps.thematic_research import render_scout_section
+        lines.extend(render_scout_section(scout_payload, max_per_theme=4))
+
+    # NEW (Wave 24): Capital plan — re-run capital-planner here with full
+    # analytics (hedge_book + stress coverage) AND the rendered action list
+    # so it can extract closes/rolls/hedges/CSPs/trims as authored by the
+    # renderer. This supersedes the upstream pass in run_briefing.py.
+    try:
+        from steps.capital_plan import build_capital_plan_step
+        full_capital_plan = build_capital_plan_step(
+            balance=snapshot_data.get("balance", {}),
+            positions=snapshot_data.get("positions", []),
+            equity_reviews=equity_reviews,
+            options_reviews=options_reviews,
+            new_ideas=new_ideas,
+            long_term_opportunities=long_term_opportunities or [],
+            analytics=analytics,
+            recommendations_list=snapshot_data.get("recommendations_list"),
+            action_list_lines=action_list_lines,
+        )
+    except Exception as e:
+        import sys as _sys, traceback as _tb
+        print(f"[aggregate] capital plan re-run failed: {e}", file=_sys.stderr)
+        _tb.print_exc()
+        full_capital_plan = capital_plan
+    if full_capital_plan and full_capital_plan.get("markdown"):
+        lines.extend(full_capital_plan["markdown"])
 
     # NEW: Add Strategy Upgrades panel
     upgrades = compute_strategy_upgrades(snapshot_data, equity_reviews, options_reviews, config)

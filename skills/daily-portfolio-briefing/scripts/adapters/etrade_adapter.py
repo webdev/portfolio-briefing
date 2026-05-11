@@ -179,11 +179,17 @@ def _flatten_option_position(p: Dict[str, Any], acct_desc: str) -> Dict[str, Any
 
 def fetch_etrade_snapshot(
     accounts_filter: Optional[List[str]] = None,
+    account_desc_whitelist: Optional[List[str]] = None,
 ) -> EtradeSnapshot:
     """Pull a real portfolio snapshot from E*TRADE.
 
     accounts_filter: if provided, only include accounts whose accountIdKey is
     in this list. Default: all ACTIVE accounts.
+
+    account_desc_whitelist: if provided, only include accounts whose
+    accountDesc matches (case-insensitive, exact match). Use this when the
+    user wants to scope the briefing to a specific named account, e.g.
+    ["INDIVIDUAL"]. Filters AFTER the accounts_filter step.
     """
     from datetime import datetime
     warnings = []
@@ -226,12 +232,22 @@ def fetch_etrade_snapshot(
     }
     all_positions = []
 
+    # Normalize the desc whitelist once
+    desc_whitelist_norm = (
+        {d.strip().upper() for d in account_desc_whitelist}
+        if account_desc_whitelist else None
+    )
+
     for raw_acct in raw_acct_list:
         if raw_acct.get("accountStatus") != "ACTIVE":
             continue
         acct_key = raw_acct["accountIdKey"]
         if accounts_filter and acct_key not in accounts_filter:
             continue
+        if desc_whitelist_norm is not None:
+            desc = (raw_acct.get("accountDesc") or "").strip().upper()
+            if desc not in desc_whitelist_norm:
+                continue
         acct = _flatten_account(raw_acct)
         flat_accounts.append(acct)
         acct_type = raw_acct.get("accountType")

@@ -22,7 +22,61 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     # Partition by type
     strangles = [u for u in upgrades if u.get("type") == "covered_strangle"]
     collars = [u for u in upgrades if u.get("type") == "collar"]
+    new_ccs = [u for u in upgrades if u.get("type") == "write_covered_call"]
     sublots = [u for u in upgrades if u.get("type") == "sublot_completion"]
+
+    # === NEW COVERED CALLS ===
+    if new_ccs:
+        from datetime import date, timedelta
+        lines.append(f"### Write Covered Calls ({len(new_ccs)})")
+        lines.append("")
+        for cc in new_ccs:
+            symbol = cc.get("underlying")
+            shares = cc.get("shares_held")
+            contracts = cc.get("contracts_writable")
+            price = cc.get("current_price")
+            strike = cc.get("target_strike")
+            dte = cc.get("target_dte", 35)
+            premium_per_share = cc.get("est_premium_per_share")
+            premium_total = cc.get("est_premium_total")
+            annualized = cc.get("est_annualized_pct")
+            weight = cc.get("current_weight_pct")
+            earnings_blocked = cc.get("earnings_blocked")
+            earnings_date = cc.get("earnings_date")
+            bid = cc.get("bid") or 0
+            ask = cc.get("ask") or 0
+            chain_source = cc.get("chain_source", "estimate_broker_unreachable")
+            target_exp = (date.today() + timedelta(days=dte)).strftime("%a %b %d '%y")
+
+            badge = "⛔ DEFER (earnings inside window)" if earnings_blocked else "✅ READY TO WRITE"
+            lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}")
+            lines.append(
+                f"  - SELL {contracts}× {symbol} ${strike:g}C exp ~{target_exp} "
+                f"({dte} DTE, ~6% OTM, ~0.30 delta)"
+            )
+            if earnings_blocked:
+                lines.append(
+                    f"  - ⚠ Earnings on {earnings_date} — defer writing until after the print "
+                    f"to avoid binary gap risk."
+                )
+            elif chain_source == "etrade_live" and bid and ask:
+                spread_pct = ((ask - bid) / premium_per_share * 100) if premium_per_share else 0
+                lines.append(
+                    f"  - Premium: ${premium_per_share:.2f}/share (bid ${bid:.2f} / mid "
+                    f"${premium_per_share:.2f} / ask ${ask:.2f}, spread {spread_pct:.0f}%) "
+                    f"× 100 × {contracts} = **${premium_total:,.0f}** (~{annualized:.0f}% annualized)"
+                )
+                lines.append(f"  - **Source:** Live E*TRADE chain")
+            else:
+                lines.append(
+                    f"  - Est. premium: ${premium_per_share:.2f}/share × 100 × {contracts} = "
+                    f"**${premium_total:,.0f}** (~{annualized:.0f}% annualized)"
+                )
+                lines.append(
+                    f"  - ⚠ E*TRADE chain unreachable — premium is rule-of-thumb estimate. "
+                    f"Verify live bid/ask at broker before placing."
+                )
+            lines.append("")
 
     # === COVERED STRANGLES ===
     if strangles:

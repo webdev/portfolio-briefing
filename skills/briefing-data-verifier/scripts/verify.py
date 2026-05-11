@@ -28,10 +28,17 @@ _LIVE_INDICATORS = [
     r"Buy-to-Close.*current mid",  # roll close-leg with real mid
 ]
 
-# Patterns that mark an action as stub-derived.
+# Patterns that mark an action as stub-derived. These should ONLY match text
+# the renderer emits when it had no chain access — they must NOT match
+# legitimate descriptive prose on a live-backed action.
+#
+# History: "would re-acquire 100 shares @ -X% below spot" was a stub marker
+# when the pullback-CSP code computed strikes from a formula. The current
+# renderer pulls real chain strikes and keeps that text as descriptive
+# context — so we no longer treat it as a stub indicator. Live attribution
+# is now verified by the "Source: Live E*TRADE chain" marker alone.
 _STUB_INDICATORS = [
-    r"would re-acquire 100 shares @ -\d+% below spot",  # pullback CSP formula text
-    r"premium.*~\$\d+\.\d+",                            # "~$X.XX" formula prefix
+    r"premium.*~\$\d+\.\d+",  # "premium ~$X.XX" formula-style estimate (no real chain price)
 ]
 
 

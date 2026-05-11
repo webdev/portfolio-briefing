@@ -40,6 +40,8 @@ from steps.review_equities import review_equities
 from steps.review_options import review_options
 from steps.new_ideas import generate_new_ideas
 from steps.long_term_opportunities import generate_long_term_opportunities_step
+from steps.thematic_research import run_thematic_research
+from steps.capital_plan import build_capital_plan_step
 from steps.consistency_check import check_consistency
 from steps.aggregate import aggregate_briefing
 from steps.quality_gate import run_quality_gate
@@ -97,6 +99,11 @@ def main():
         action="store_true",
         help="Skip the delivery copy step (default: deliver to ~/Documents/briefings/)",
     )
+    parser.add_argument(
+        "--refresh-scout",
+        action="store_true",
+        help="Force a fresh thematic-scout research run (default uses 24h cache)",
+    )
 
     args = parser.parse_args()
 
@@ -122,6 +129,9 @@ def main():
         # Step 1.6: Fetch recommendations
         print("[Step 1.6] Fetching third-party recommendations...")
         recommendations_list = fetch_recommendations(snapshot_dir)
+        # Stash on the snapshot so downstream skills (capital-planner) can read it
+        # without re-loading from disk.
+        # Stashed after snapshot_inputs runs; see Step 2.
 
         # Step 2: Snapshot inputs
         print("[Step 2] Snapshotting inputs...")
@@ -130,6 +140,8 @@ def main():
             etrade_fixture=args.etrade_fixture,
             etrade_live=args.etrade_live,
         )
+        # Make recommendations available to downstream skills via snapshot_data
+        snapshot_data["recommendations_list"] = recommendations_list
 
         # Step 3: Classify regime
         print("[Step 3] Classifying regime...")
@@ -171,6 +183,32 @@ def main():
         )
         print(f"  Surfaced {len(long_term_ops)} long-term opportunity signal(s)")
 
+        # Step 6.6: Thematic scout (cached 24h to keep the daily briefing fast)
+        print("[Step 6.6] Running thematic scout (cached 24h)...")
+        recs_map = {}
+        held_weights = {}
+        nlv = float(snapshot_data.get("balance", {}).get("accountValue", 0) or 0)
+        for r in (recommendations_list or []):
+            t = r.get("ticker")
+            rec = r.get("recommendation")
+            if t and rec:
+                recs_map[str(t).upper()] = str(rec).upper()
+        for p in (snapshot_data.get("positions") or []):
+            if p.get("assetType") != "EQUITY":
+                continue
+            sym = (p.get("symbol") or "").upper()
+            qty = float(p.get("qty", 0) or 0)
+            price = float(p.get("price", 0) or 0)
+            if sym and qty > 0 and price > 0 and nlv > 0:
+                held_weights[sym] = held_weights.get(sym, 0) + (qty * price / nlv * 100)
+        scout_payload = run_thematic_research(
+            snapshot_dir=snapshot_dir,
+            recs_map=recs_map,
+            held_weights=held_weights,
+            refresh=args.refresh_scout,
+            ttl_hours=24,
+        )
+
         # Step 7: Consistency check
         print("[Step 7] Day-over-day consistency check...")
         consistency_report, flagged_inconsistencies = check_consistency(
@@ -179,6 +217,31 @@ def main():
             options_reviews,
             snapshot_dir,
         )
+
+        # Step 7.5: Capital plan — aggregate every recommendation's cash flow,
+        # rank by tier, filter long-term ideas by concentration. Runs after
+        # all advisors have produced their recommendations and before render.
+        # The analytics dict comes from inside aggregate_briefing's compute_analytics
+        # call, so we build a minimal one here. (Future refactor: hoist the
+        # analytics call out of aggregate_briefing.)
+        print("[Step 7.5] Building capital plan...")
+        capital_plan_dict = build_capital_plan_step(
+            balance=snapshot_data.get("balance", {}),
+            positions=snapshot_data.get("positions", []),
+            equity_reviews=equity_reviews,
+            options_reviews=options_reviews,
+            new_ideas=new_ideas,
+            long_term_opportunities=long_term_ops,
+            analytics=None,  # populated inside aggregate_briefing — re-runs there
+            recommendations_list=recommendations_list,
+        )
+        if capital_plan_dict:
+            print(
+                f"  Capital plan: starting ${capital_plan_dict['starting_cash']:,.0f} → "
+                f"projected ${capital_plan_dict['ending_cash_projected']:,.0f} "
+                f"({capital_plan_dict['active_actions']} active, "
+                f"{capital_plan_dict['skipped_actions']} skipped)"
+            )
 
         # Step 8: Aggregate and render
         print("[Step 8] Aggregating and rendering briefing...")
@@ -196,6 +259,8 @@ def main():
             directives_expired,
             snapshot_dir,
             long_term_opportunities=long_term_ops,
+            capital_plan=capital_plan_dict,
+            scout_payload=scout_payload,
         )
 
         # Step 9: Quality gate

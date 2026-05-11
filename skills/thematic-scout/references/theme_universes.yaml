@@ -1,0 +1,115 @@
+# Thematic universes for the thematic-scout skill.
+#
+# Each theme has:
+#   name      — human label rendered in the report
+#   anchors   — tickers to analyze (curated list of leaders + emerging names)
+#   etfs      — relevant ETFs (rendered as benchmarks in the report)
+#   notes     — one-line thematic context
+#
+# Add/edit themes here without code changes. Anchors can be added/removed as
+# the thematic landscape shifts.
+
+themes:
+  semis_ai:
+    name: "Semiconductors & AI"
+    anchors:
+      - NVDA   # AI compute leader
+      - AMD    # GPU + datacenter
+      - AVGO   # AI ASIC + networking
+      - TSM    # foundry monopoly
+      - ARM    # IP licensing for AI inference
+      - ASML   # EUV lithography monopoly
+      - MRVL   # custom ASIC
+      - SMCI   # AI server builder
+    etfs: [SMH, SOXX, QQQ]
+    notes: "Hyperscaler capex cycle, Claude / GPT compute demand"
+
+  memory:
+    name: "Memory (DRAM / NAND)"
+    anchors:
+      - MU     # micron — HBM + DRAM
+      - WDC    # western digital — NAND + HDD
+      - STX    # seagate — HDD
+      - SNDK   # SanDisk parent (re-spin)
+    etfs: []
+    notes: "HBM ramp for AI, NAND price recovery"
+
+  nuclear:
+    name: "Nuclear Energy"
+    anchors:
+      - CCJ    # cameco — uranium miner
+      - BWXT  # nuclear components
+      - NRG    # diversified power w/ nuclear
+      - VST    # vistra — nuclear + gas baseload
+      - CEG    # constellation — pure-play nuclear
+      - OKLO   # small modular reactor (SMR) startup
+      - SMR    # NuScale — SMR
+      - NNE    # Nano Nuclear Energy
+      - LEU    # Centrus Energy — uranium enrichment
+    etfs: [URA, NLR]
+    notes: "AI datacenter power demand → nuclear renaissance"
+
+  powergrid_infra:
+    name: "Powergrid & Infrastructure"
+    anchors:
+      - VRT    # vertiv — datacenter cooling/power
+      - GEV    # GE Vernova — grid + turbines
+      - ETN    # eaton — power management
+      - EMR    # emerson — automation
+      - ABB    # ABB — robotics + power
+      - HUBB   # hubbell — utility equipment
+      - PWR    # quanta services — utility construction
+      - MMM    # 3M — diversified industrial (legacy)
+      - JCI    # johnson controls — building tech
+    etfs: [XLI, PAVE]
+    notes: "Datacenter buildout + grid modernization"
+
+  optical_ai:
+    name: "Optical AI / Networking"
+    anchors:
+      - COHR   # coherent — optical components
+      - LITE   # lumentum — optical modules
+      - FN     # fabrinet — contract manufacturing for optics
+      - AAOI   # applied optoelectronics
+      - CIEN   # ciena — optical networking
+      - ANET   # arista — cloud networking
+      - NVDA   # also relevant (NVLink optical)
+    etfs: []
+    notes: "AI cluster interconnect demand (CPO, co-packaged optics)"
+
+  quantum:
+    name: "Quantum Computing"
+    anchors:
+      - IONQ   # trapped-ion
+      - RGTI   # rigetti — superconducting
+      - QBTS   # d-wave — annealing
+      - IBM    # superconducting (one of many bets)
+      - HON    # honeywell — Quantinuum stake
+    etfs: [QTUM]
+    notes: "Early stage; high vol, mostly thematic"
+
+  cybersecurity:
+    name: "Cybersecurity"
+    anchors:
+      - CRWD   # crowdstrike — endpoint
+      - PANW   # palo alto — platform
+      - ZS     # zscaler — SASE
+      - S      # sentinelone — endpoint challenger
+      - NET    # cloudflare — edge + zero trust
+      - OKTA   # identity
+      - FTNT   # fortinet — firewalls + SASE
+      - CYBR   # cyberark — privileged access
+    etfs: [HACK, CIBR]
+    notes: "Cloud-native security shift, SASE/zero trust"
+
+# Verdict thresholds — same logic as long-term-opportunity-advisor but tuned
+# for outbound research (slightly more permissive on WATCH).
+verdict:
+  rsi_oversold: 35
+  rsi_overheated: 75
+  drawdown_oversold_pct: 10
+  drawdown_thesis_broken_pct: 30
+  sma_within_pct: 5
+  csp_target_otm_pct: 10
+  csp_target_dte: 35
+  iv_rank_elevated: 50

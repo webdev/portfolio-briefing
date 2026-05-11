@@ -224,24 +224,36 @@ def tax_cpa_check(md: str) -> PersonaResult:
     """Verify wash-sale checks, earnings checks, LTCG costs, account routing, tax savings in impact."""
     result = PersonaResult(name="tax_cpa", score=100)
 
-    # Look for NEW CSP recommendations
-    new_csp_pattern = r'(NEW|EXECUTE).*(?:CSP|cash-secured put|sell.*put).*?(?:\n\n|$)'
-    new_csps = re.findall(new_csp_pattern, md, re.IGNORECASE | re.DOTALL)
-
-    if new_csps:
-        # Check for wash-sale line
-        if not re.search(r'Wash-sale check:', md):
-            result.issues.append(
-                CheckResult("critical", "NEW CSP found but no 'Wash-sale check:' line present")
-            )
+    # Look for PULLBACK CSP / NEW CSP action items (these MUST have wash-sale
+    # + earnings check lines). The old regex used .*sell.*put with re.DOTALL
+    # which matched too greedily across unrelated sections. Now we match the
+    # explicit action headline AND verify the check lines appear within the
+    # same action block (≈ next 12 lines).
+    action_line_re = re.compile(
+        r"^\s*\d+\.\s+\*\*(PULLBACK CSP|NEW CSP)\*\*", re.MULTILINE
+    )
+    lines_of_md = md.splitlines()
+    for m in action_line_re.finditer(md):
+        # Compute which markdown line index this is at
+        head_line_idx = md[:m.start()].count("\n")
+        block = "\n".join(lines_of_md[head_line_idx: head_line_idx + 12])
+        if not re.search(r"Wash-sale check:", block):
+            result.issues.append(CheckResult(
+                "critical",
+                f"{m.group(1)} action found but no 'Wash-sale check:' line in its block"
+            ))
             result.score -= 30
-
-        # Check for earnings check
-        if not re.search(r'Earnings check:', md):
-            result.issues.append(
-                CheckResult("critical", "NEW CSP found but no 'Earnings check:' line present")
-            )
+            break  # one report is enough
+    for m in action_line_re.finditer(md):
+        head_line_idx = md[:m.start()].count("\n")
+        block = "\n".join(lines_of_md[head_line_idx: head_line_idx + 12])
+        if not re.search(r"Earnings check:", block):
+            result.issues.append(CheckResult(
+                "critical",
+                f"{m.group(1)} action found but no 'Earnings check:' line in its block"
+            ))
             result.score -= 30
+            break
 
     # Look for ROLL actions and verify earnings check
     if re.search(r'(EXECUTE ROLL|DEFENSIVE ROLL)', md, re.IGNORECASE):

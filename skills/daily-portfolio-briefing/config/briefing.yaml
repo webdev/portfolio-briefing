@@ -1,6 +1,14 @@
 # Briefing Configuration Template
 # Copy to state/briefing_config.yaml and customize
 
+# Account scope. The briefing pipeline analyzes ONLY accounts whose
+# accountDesc matches one of these entries (case-insensitive, exact match).
+# The user has multiple E*TRADE accounts (Joint, Individual Brokerage,
+# INDIVIDUAL, IRAs) but currently only INDIVIDUAL is in scope — see CLAUDE.md.
+# To widen later, add more entries (e.g. ["INDIVIDUAL", "ROTH IRA"]).
+account_desc_whitelist:
+  - INDIVIDUAL
+
 enabled_strategies:
   - wheel              # covered calls + cash-secured puts
   - dividend_growth    # pullback entry on dividend growers (optional)
@@ -43,6 +51,27 @@ core_positions:
   - ADBE
   - AMZN
   - META
+  # Add TSLA here too if you want to treat it as core. Without it, a
+  # third-party SELL rec on TSLA will still surface EXIT as Tier 1.
+
+# Concentration caps. Two-tier system:
+#   concentration_cap_pct       — non-core trim trigger (default 10%)
+#   core_concentration_cap_pct  — soft cap for core holdings: only "roll
+#                                 covered calls up" is suggested, never sell
+#   core_runaway_cap_pct        — hard cap on core holdings: at this point
+#                                 the system flags "REVIEW CORE" with full
+#                                 option menu (CC roll / partial sale / collar)
+concentration_cap_pct: 10
+core_concentration_cap_pct: 18
+core_runaway_cap_pct: 22
+
+# Long-term-opportunity-advisor target weights:
+#   default_target_weight_pct — non-core (5%). LT TRIM triggers at 1.5× = 7.5%
+#   core_target_weight_pct    — core (12%). LT TRIM triggers at 1.5× = 18%
+#                                Prevents mega-cap conviction holdings from
+#                                being flagged as overweight at normal sizes.
+default_target_weight_pct: 5
+core_target_weight_pct: 12
 
 # Tax assumptions for the LTCG-cost estimates above.
 # Effective LTCG rate = federal LTCG (20%) + NIIT (3.8%) for high-income.

@@ -138,6 +138,78 @@ def _is_tail_risk_name(symbol: str) -> bool:
     return symbol in tail_risk
 
 
+def _is_likely_mutual_fund(symbol: str) -> bool:
+    """Mutual funds use 5-letter tickers ending in X (no options trade on them).
+
+    We skip these in covered-call recommendations — there's no listed
+    options chain to write against.
+    """
+    if not symbol:
+        return False
+    s = symbol.upper().strip()
+    return len(s) == 5 and s.endswith("X") and s.isalpha()
+
+
+# Cached module reference for the etrade-chain-fetcher skill
+_ETRADE_FETCHER_MODULE = None
+_ETRADE_FETCHER_CACHE = None
+
+
+def _load_chain_fetcher():
+    """Load and cache the etrade-chain-fetcher skill module."""
+    global _ETRADE_FETCHER_MODULE, _ETRADE_FETCHER_CACHE
+    if _ETRADE_FETCHER_MODULE is not None:
+        return _ETRADE_FETCHER_MODULE, _ETRADE_FETCHER_CACHE
+
+    import importlib.util as _ilu
+    target = (
+        Path(__file__).resolve().parents[3]
+        / "etrade-chain-fetcher" / "scripts" / "fetch.py"
+    )
+    if not target.exists():
+        return None, None
+    spec = _ilu.spec_from_file_location("etrade_chain_fetcher", target)
+    if spec is None or spec.loader is None:
+        return None, None
+    mod = _ilu.module_from_spec(spec)
+    sys.modules["etrade_chain_fetcher"] = mod
+    spec.loader.exec_module(mod)
+    if not mod.is_available():
+        return None, None
+    _ETRADE_FETCHER_MODULE = mod
+    _ETRADE_FETCHER_CACHE = mod.ChainCache()
+    return mod, _ETRADE_FETCHER_CACHE
+
+
+def _etrade_call_quote(
+    symbol: str,
+    spot: float,
+    target_otm_pct: float = 6.0,
+    target_dte: int = 35,
+) -> dict | None:
+    """Pull a call quote via the canonical E*TRADE chain fetcher.
+
+    Returns {strike, bid, mid, ask, delta, expiration, source} or None if
+    E*TRADE is unavailable.
+    """
+    mod, cache = _load_chain_fetcher()
+    if mod is None:
+        return None
+    exp_date = mod.choose_expiration(
+        symbol=symbol, target_dte=target_dte, tolerance_days=14, cache=cache
+    )
+    if exp_date is None:
+        return None
+    return mod.find_strike_at_otm_pct(
+        symbol=symbol,
+        expiration=exp_date,
+        otm_pct=target_otm_pct,
+        opt_type="CALL",
+        spot=spot,
+        cache=cache,
+    )
+
+
 def compute_strategy_upgrades(
     snapshot_data: dict,
     equity_reviews: list,
@@ -380,6 +452,142 @@ def compute_strategy_upgrades(
                 "saves": round(saved, 2),
             },
             "rationale": f"Protect {symbol} ${unrealized_gain:,.0f} unrealized gain; floor @ ${strike:.0f}",
+        }
+        upgrades.append(upgrade)
+
+    # === Type D: Write Covered Call (NEW position) ===
+    # For equity positions with >= 100 shares and NO existing short call,
+    # propose writing a CC. Without this, holdings transition from "sub-lot
+    # completion in progress" → 100+ shares → silently drop out of the panel.
+    # The user has unused income capacity in those shares; surface it.
+
+    for equity_pos in positions:
+        if equity_pos.get("assetType") != "EQUITY":
+            continue
+
+        symbol = equity_pos.get("symbol")
+        if not symbol:
+            continue
+
+        qty = equity_pos.get("qty", 0)
+        price = equity_pos.get("price", 0)
+        if qty < 100 or price <= 0:
+            continue
+
+        if _is_tail_risk_name(symbol):
+            continue
+
+        # Skip mutual funds — no options chains listed
+        if _is_likely_mutual_fund(symbol):
+            continue
+
+        # Skip if a short call already exists on this name
+        if _find_short_call(positions, symbol):
+            continue
+
+        # Per-account share check. A CC must be written against a 100-share
+        # round lot held WITHIN A SINGLE ACCOUNT (the broker can't combine
+        # lots across accounts for short-call coverage). The aggregate qty
+        # might be ≥100 across two accounts but neither has a writeable lot.
+        accounts_breakdown = equity_pos.get("accountsBreakdown") or []
+        max_qty_in_one_account = qty  # default when no breakdown available
+        if accounts_breakdown:
+            import re as _re
+            per_account_qtys = []
+            for entry in accounts_breakdown:
+                m = _re.search(r":\s*(\d+(?:\.\d+)?)\s*sh", entry)
+                if m:
+                    per_account_qtys.append(float(m.group(1)))
+            if per_account_qtys:
+                max_qty_in_one_account = max(per_account_qtys)
+
+        if max_qty_in_one_account < 100:
+            # Aggregate qty looked like 100+ but no single account holds a lot
+            # → CC isn't writeable. Skip silently.
+            continue
+
+        # Number of contracts we COULD write — capped by the largest single-
+        # account lot, NOT the aggregate. Avoids proposing a 2-contract CC
+        # when the largest single-account lot only holds 105 shares.
+        contracts_writable = int(max_qty_in_one_account // 100)
+        if contracts_writable < 1:
+            continue
+
+        # Target window
+        target_dte = 35
+        target_exp_date = date.today() + timedelta(days=target_dte)
+
+        # Pull real E*TRADE chain via the canonical fetcher. NEVER yfinance.
+        chain_quote = _etrade_call_quote(
+            symbol=symbol, spot=price, target_otm_pct=6.0, target_dte=target_dte
+        )
+
+        if chain_quote:
+            target_strike = chain_quote["strike"]
+            premium_per_share = chain_quote["mid"] or chain_quote.get("bid") or 0
+            bid = chain_quote.get("bid", 0)
+            ask = chain_quote.get("ask", 0)
+            actual_exp = chain_quote.get("expiration") or target_exp_date.isoformat()
+            try:
+                actual_exp_date = date.fromisoformat(actual_exp)
+                actual_dte = (actual_exp_date - date.today()).days
+            except ValueError:
+                actual_dte = target_dte
+            chain_source = "etrade_live"
+        else:
+            # E*TRADE unavailable — emit rule-of-thumb estimate AND flag
+            target_strike = round(price * 1.06 / 5) * 5
+            if target_strike <= price:
+                target_strike = round(price * 1.08 / 5) * 5
+            premium_per_share = price * 0.015  # ~1.5% of spot
+            bid = ask = 0
+            actual_dte = target_dte
+            chain_source = "estimate_broker_unreachable"
+
+        premium_total = premium_per_share * 100 * contracts_writable
+
+        # Earnings check (still useful even if chain fetched OK)
+        earnings_str = earnings_calendar.get(symbol)
+        earnings_blocked = False
+        if earnings_str:
+            try:
+                earn_date = date.fromisoformat(earnings_str)
+                if date.today() <= earn_date <= target_exp_date:
+                    earnings_blocked = True
+            except ValueError:
+                pass
+
+        annualized = (
+            (premium_per_share / price) * (365 / max(actual_dte, 1)) * 100
+            if price > 0 else 0
+        )
+
+        upgrade = {
+            "type": "write_covered_call",
+            "underlying": symbol,
+            "shares_held": int(qty),
+            "contracts_writable": contracts_writable,
+            "current_price": round(price, 2),
+            "target_strike": float(target_strike),
+            "target_dte": actual_dte,
+            "est_premium_per_share": round(premium_per_share, 2),
+            "est_premium_total": round(premium_total, 0),
+            "est_annualized_pct": round(annualized, 1),
+            "bid": round(bid, 2),
+            "ask": round(ask, 2),
+            "chain_source": chain_source,
+            "current_weight_pct": round(qty * price / nlv * 100, 1) if nlv else 0,
+            "earnings_blocked": earnings_blocked,
+            "earnings_date": earnings_str if earnings_blocked else None,
+            "rationale": (
+                f"Hold {int(qty)} shares of {symbol} with no covered call open. "
+                f"Writing {contracts_writable}× ${target_strike:g}C ({actual_dte} DTE, "
+                f"~6% OTM) generates ~${premium_total:,.0f} premium "
+                f"(~{annualized:.0f}% annualized). "
+                + ("⚠ Earnings inside the contract window — defer until after print."
+                   if earnings_blocked else
+                   "No earnings inside window — safe to write.")
+            ),
         }
         upgrades.append(upgrade)
 

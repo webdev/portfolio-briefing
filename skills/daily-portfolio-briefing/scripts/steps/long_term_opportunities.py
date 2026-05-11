@@ -126,12 +126,22 @@ def generate_long_term_opportunities_step(
             third_party_recs[ticker.upper()] = str(rec).upper()
 
     # Target weights — config["target_weights"] is the canonical source.
-    # Fall back to a flat 5% per holding so the system is usable without
-    # explicit per-ticker config.
+    # Fall back to a flat 5% per holding (non-core) or 12% (core).
+    # Core names get a higher target so the 1.5× TRIM trigger doesn't fire
+    # at 7.5% NLV (which is normal for mega-cap conviction holdings).
     target_weights_cfg = (config or {}).get("target_weights", {}) or {}
+    core_tickers_set = set((config or {}).get("core_positions", []) or [])
+    default_core_target = float((config or {}).get("core_target_weight_pct", 12.0))
+    default_target = float((config or {}).get("default_target_weight_pct", 5.0))
+
     target_weights: dict = {}
     for sym in positions_by_ticker:
-        target_weights[sym] = float(target_weights_cfg.get(sym, 5.0))
+        if sym in target_weights_cfg:
+            target_weights[sym] = float(target_weights_cfg[sym])
+        elif sym in core_tickers_set:
+            target_weights[sym] = default_core_target
+        else:
+            target_weights[sym] = default_target
 
     # Cash-on-hand check for LONG_DATED_CSP (need collateral)
     cash = float(balance.get("cash", 0) or 0)
@@ -162,7 +172,311 @@ def generate_long_term_opportunities_step(
         return []
 
     # Convert dataclasses to plain dicts for downstream JSON-ability + rendering
-    return [op.to_dict() for op in opportunities]
+    op_dicts = [op.to_dict() for op in opportunities]
+
+    # Filter: don't propose TRIM on core holdings. The action-list section
+    # of the renderer has its own core-aware trim path (rolls covered calls
+    # up instead of selling); the long-term advisor's generic "weight > 1.5×
+    # target" trigger should defer to that for core names.
+    filtered: list = []
+    for op in op_dicts:
+        if op.get("kind") == "TRIM" and op.get("ticker") in core_tickers_set:
+            continue
+        filtered.append(op)
+    op_dicts = filtered
+
+    # Snap each LONG_DATED_CSP / LEAP_CALL to a real chain expiration so the
+    # briefing renders a concrete date instead of "~75 DTE".
+    chains = snapshot_data.get("chains", {}) or {}
+    _enrich_long_dated_dates(op_dicts, chains, target_dte_csp=75, target_dte_leap=365)
+    # Pull REAL premium/bid/ask from live yfinance chains for each LT_CSP so
+    # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
+    _enrich_with_live_premiums(op_dicts)
+    return op_dicts
+
+
+# ---------------------------------------------------------------------------
+# Expiration date enrichment
+# ---------------------------------------------------------------------------
+
+def _enrich_long_dated_dates(
+    op_dicts: list,
+    chains: dict,
+    target_dte_csp: int = 75,
+    target_dte_leap: int = 365,
+    chain_match_tolerance_days: int = 21,
+) -> None:
+    """For each LONG_DATED_CSP / LEAP_CALL, replace '~N DTE' with a real
+    expiration date.
+
+    Selection rules:
+      1. If the snapshot has a chain expiration within `chain_match_tolerance_days`
+         of the target DTE, use it (Friday preferred over Thursday).
+      2. Otherwise use the 3rd Friday of the target month — every listed
+         equity option has this standard monthly expiration.
+
+    The tolerance prevents snapping to a too-distant chain expiration (e.g.,
+    when we only fetched chains for held positions and the available
+    expirations are 6 months away from the target).
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+
+    # Group chain expirations by ticker (chain keys are TICKER_YYYY-MM-DD)
+    chain_exps_by_ticker: dict[str, list[str]] = {}
+    for key in chains.keys():
+        if "_" not in key:
+            continue
+        ticker, exp = key.split("_", 1)
+        try:
+            date.fromisoformat(exp)  # validate
+        except ValueError:
+            continue
+        chain_exps_by_ticker.setdefault(ticker.upper(), []).append(exp)
+    for t in chain_exps_by_ticker:
+        chain_exps_by_ticker[t] = sorted(chain_exps_by_ticker[t])
+
+    for op in op_dicts:
+        kind = (op.get("kind") or "").upper()
+        if kind == "LONG_DATED_CSP":
+            target_dte = target_dte_csp
+            placeholder = "~75 DTE"
+        elif kind == "LEAP_CALL":
+            target_dte = target_dte_leap
+            placeholder = "~365 DTE"
+        else:
+            continue
+
+        ticker = (op.get("ticker") or "").upper()
+        target_date = today + timedelta(days=target_dte)
+
+        chosen = None
+
+        # Option 1: real chain expiration within tolerance, Friday preferred.
+        if ticker in chain_exps_by_ticker:
+            candidates = []
+            for e in chain_exps_by_ticker[ticker]:
+                d = date.fromisoformat(e)
+                if d < today:
+                    continue
+                distance = abs((d - target_date).days)
+                if distance > chain_match_tolerance_days:
+                    continue
+                # Friday=4. Prefer Friday over weekday for cleaner ticket.
+                weekday_penalty = 0 if d.weekday() == 4 else 3
+                candidates.append((distance + weekday_penalty, e))
+            if candidates:
+                candidates.sort()
+                chosen = candidates[0][1]
+
+        # Option 2: algorithmic — 3rd Friday of target month
+        if not chosen:
+            chosen = _third_friday_of_month(target_date)
+
+        actual_dte = (date.fromisoformat(chosen) - today).days
+        pretty = date.fromisoformat(chosen).strftime("%a %b %d '%y")
+
+        date_phrase = f"exp {pretty} ({actual_dte} DTE)"
+        if op.get("concrete_trade"):
+            op["concrete_trade"] = op["concrete_trade"].replace(placeholder, date_phrase)
+        if op.get("rationale"):
+            op["rationale"] = op["rationale"].replace(
+                f"{target_dte}-DTE horizon", f"{actual_dte}-DTE horizon (expires {pretty})"
+            )
+        op["target_expiration"] = chosen
+        op["target_dte"] = actual_dte
+
+
+def _enrich_with_live_premiums(op_dicts: list) -> None:
+    """Fetch real put-chain bid/mid/ask via the etrade-chain-fetcher skill.
+
+    Per project rule: chain data for tradeable recommendations MUST come from
+    E*TRADE, not yfinance. If E*TRADE is unavailable we DO NOT fall back to
+    yfinance — instead the yield_or_cost line is tagged with "(est, broker
+    unreachable)" so the user knows the premium is a guess.
+
+    Runs E*TRADE chain fetches in parallel — typically ~2-4s for 8 chains.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import date as _date_class
+
+    # Load the etrade-chain-fetcher skill module by absolute path (no name
+    # collision risk since this is its own module).
+    import importlib.util as _ilu
+    _fetcher_path = (
+        Path(__file__).resolve().parents[3]
+        / "etrade-chain-fetcher" / "scripts" / "fetch.py"
+    )
+    if not _fetcher_path.exists():
+        print("  [warn] etrade-chain-fetcher not found; LT_CSP premiums stay as estimates",
+              file=sys.stderr)
+        return
+    spec = _ilu.spec_from_file_location("etrade_chain_fetcher", _fetcher_path)
+    if spec is None or spec.loader is None:
+        return
+    fetcher = _ilu.module_from_spec(spec)
+    sys.modules["etrade_chain_fetcher"] = fetcher
+    spec.loader.exec_module(fetcher)
+
+    if not fetcher.is_available():
+        print(f"  [warn] E*TRADE chain fetcher unavailable: {fetcher.availability_reason()}",
+              file=sys.stderr)
+        # Tag every LT_CSP yield_or_cost as estimate
+        for op in op_dicts:
+            if (op.get("kind") or "").upper() == "LONG_DATED_CSP":
+                if op.get("yield_or_cost") and "(est" not in op["yield_or_cost"]:
+                    op["yield_or_cost"] += " — _est, broker unreachable_"
+        return
+
+    targets = []
+    for op in op_dicts:
+        kind = (op.get("kind") or "").upper()
+        if kind != "LONG_DATED_CSP":
+            continue
+        ticker = op.get("ticker") or ""
+        exp = op.get("target_expiration")
+        import re as _re
+        sm = _re.search(r"\$(\d+(?:\.\d+)?)P\b", op.get("concrete_trade", ""))
+        if not (ticker and exp and sm):
+            continue
+        target_strike = float(sm.group(1))
+        targets.append((op, ticker, exp, target_strike))
+
+    if not targets:
+        return
+
+    # Shared cache so we don't refetch the same (ticker, expiration) tuple
+    chain_cache = fetcher.ChainCache()
+
+    def _fetch_put(ticker: str, exp: str, target_strike: float) -> dict | None:
+        try:
+            exp_date = _date_class.fromisoformat(exp)
+        except ValueError:
+            return None
+        # Use spot-aware target via OTM-pct strike finder, OR exact strike
+        # if it's in the chain. quote_contract handles the exact lookup.
+        q = fetcher.quote_contract(
+            symbol=ticker,
+            strike=target_strike,
+            expiration=exp_date,
+            opt_type="PUT",
+            cache=chain_cache,
+        )
+        if q:
+            return q
+        # Strike not listed exactly — fall back to closest-strike on the chain
+        chain = fetcher.get_chain(
+            symbol=ticker,
+            expiration=exp_date,
+            strike_near=target_strike,
+            n_strikes=20,
+            chain_type="PUT",
+            cache=chain_cache,
+        )
+        if not chain or not chain.get("puts"):
+            return None
+        best = min(chain["puts"], key=lambda r: abs(r.strike - target_strike))
+        from etrade_chain_fetcher import _row_to_dict  # type: ignore
+        return _row_to_dict(best, expiration=exp_date, opt_type="PUT")
+
+    fetched: dict = {}
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="lt-prem") as ex:
+        future_to_op = {
+            ex.submit(_fetch_put, ticker, exp, strike): (op, ticker, strike)
+            for (op, ticker, exp, strike) in targets
+        }
+        for fut in as_completed(future_to_op):
+            op, ticker, requested_strike = future_to_op[fut]
+            try:
+                data = fut.result(timeout=12)
+            except Exception:
+                data = None
+            if data:
+                fetched[id(op)] = data
+
+    for (op, ticker, exp, requested_strike) in targets:
+        data = fetched.get(id(op))
+        if not data:
+            # Mark estimate as such
+            if op.get("yield_or_cost") and "(est)" not in op["yield_or_cost"]:
+                op["yield_or_cost"] = op["yield_or_cost"].replace("~$", "~$") + " — _premium is rule-of-thumb estimate; verify at broker_"
+            continue
+
+        actual_strike = data["strike"]
+        bid = data["bid"]
+        mid = data["mid"]
+        ask = data["ask"]
+        premium_per_share = mid or bid  # prefer mid
+        if premium_per_share <= 0:
+            continue
+        premium_total = premium_per_share * 100
+        collateral = actual_strike * 100
+        annualized = (premium_per_share / actual_strike) * (365 / max(op.get("target_dte", 75), 1)) * 100
+
+        # Update concrete_trade strike if snapped to a different strike
+        import re as _re
+        if abs(actual_strike - requested_strike) > 0.01:
+            new_strike_str = f"${int(actual_strike) if actual_strike == int(actual_strike) else actual_strike}P"
+            old_strike_str = f"${int(requested_strike) if requested_strike == int(requested_strike) else requested_strike}P"
+            op["concrete_trade"] = op["concrete_trade"].replace(old_strike_str, new_strike_str)
+
+        # Rewrite yield_or_cost with real numbers + chain source for transparency
+        source_tag = data.get("source", "etrade_live")
+        if bid and ask:
+            spread_pct = ((ask - bid) / mid * 100) if mid else 0
+            op["yield_or_cost"] = (
+                f"premium ${premium_total:,.0f} (mid ${mid:.2f}, "
+                f"bid ${bid:.2f} / ask ${ask:.2f}, spread {spread_pct:.0f}%) · "
+                f"~{annualized:.0f}% annualized · ${collateral:,.0f} cash collateral · "
+                f"_Source: {'Live E*TRADE chain' if source_tag == 'etrade_live' else source_tag}_"
+            )
+        else:
+            op["yield_or_cost"] = (
+                f"premium ${premium_total:,.0f} (last ${premium_per_share:.2f}) · "
+                f"~{annualized:.0f}% annualized · ${collateral:,.0f} cash collateral · "
+                f"_Source: {'Live E*TRADE chain' if source_tag == 'etrade_live' else source_tag}_"
+            )
+        # Also update rationale's "fat premium" framing if the actual premium is thin
+        if op.get("rationale") and "fat premium" in op["rationale"] and premium_total < 500:
+            op["rationale"] = op["rationale"].replace(
+                "= fat premium",
+                f"= ${premium_total:.0f} premium (thinner than the rule-of-thumb estimate — "
+                "reconsider unless you specifically want this strike)"
+            )
+        # Stash for downstream consumers (capital-planner, etc.)
+        op["live_premium_per_share"] = premium_per_share
+        op["live_bid"] = bid
+        op["live_mid"] = mid
+        op["live_ask"] = ask
+        op["live_strike"] = actual_strike
+
+
+def _third_friday_of_month(target: "date") -> str:  # noqa: F821
+    """Return the 3rd Friday of the month containing `target`, as ISO date string.
+
+    Every listed equity option has a 3rd-Friday standard monthly contract.
+    If the 3rd Friday has already passed this month, return next month's
+    3rd Friday so the contract is actually tradeable.
+    """
+    from datetime import date, timedelta
+    year, month = target.year, target.month
+    # First find the 3rd Friday of the target month
+    first_of_month = date(year, month, 1)
+    # Friday = weekday 4 (Mon=0)
+    days_to_first_friday = (4 - first_of_month.weekday()) % 7
+    third_friday = first_of_month + timedelta(days=days_to_first_friday + 14)
+    # If the 3rd Friday is in the past, roll to next month
+    today = date.today()
+    if third_friday <= today:
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+        first_of_month = date(year, month, 1)
+        days_to_first_friday = (4 - first_of_month.weekday()) % 7
+        third_friday = first_of_month + timedelta(days=days_to_first_friday + 14)
+    return third_friday.isoformat()
 
 
 def render_long_term_opportunities(opportunities: list) -> list[str]:

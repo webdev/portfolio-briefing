@@ -213,32 +213,58 @@ class TestTaxCPA:
     """Tax CPA persona checks."""
 
     def test_fail_new_csp_missing_wash_sale_check(self):
-        """Should fail when NEW CSP lacks wash-sale check."""
-        md = """NEW CSP on AAPL $150
-Earnings check: June 5
-Account: Roth
+        """Should fail when a PULLBACK CSP action block lacks wash-sale check."""
+        md = """## Today's Action List
+
+1. **PULLBACK CSP** AAPL — sell $150P exp Fri Jun 12 for $1.50 premium
+   - Earnings check: ✅ next earnings 79d away
+   - **Account:** Roth IRA
 """
         result = tax_cpa_check(md)
         assert any("Wash-sale" in issue.text for issue in result.issues)
 
     def test_fail_new_csp_missing_earnings_check(self):
-        """Should fail when NEW CSP lacks earnings check."""
-        md = """NEW CSP on AAPL $150
-Wash-sale check: clear
-Account: Roth
+        """Should fail when a PULLBACK CSP action block lacks earnings check."""
+        md = """## Today's Action List
+
+1. **PULLBACK CSP** AAPL — sell $150P exp Fri Jun 12 for $1.50 premium
+   - Wash-sale check: ✅ clear
+   - **Account:** Roth
 """
         result = tax_cpa_check(md)
         assert any("Earnings" in issue.text for issue in result.issues)
 
     def test_pass_new_csp_complete(self):
-        """Should pass with complete NEW CSP checks."""
-        md = """NEW CSP on AAPL $150
-Wash-sale check: clear (no position closed in prior 30 days)
-Earnings check: June 5 (after expiry May 28)
-Account: Roth IRA
+        """Should pass when both check lines are present in the action block."""
+        md = """## Today's Action List
+
+1. **PULLBACK CSP** AAPL — sell $150P exp Fri Jun 12 for $1.50 premium
+   - Wash-sale check: ✅ clear (no position closed in prior 30 days)
+   - Earnings check: ✅ June 5 (after expiry May 28)
+   - **Account:** Roth IRA
 """
         result = tax_cpa_check(md)
         assert not any(issue.severity == "critical" for issue in result.issues)
+
+    def test_pass_when_no_pullback_csp_present(self):
+        """Should NOT fire 'NEW CSP found...' findings when no PULLBACK CSP exists.
+
+        Regression test for the false positive that blocked the briefing when
+        only CLOSE / TRIM / HEDGE actions were present (no new short-put open).
+        The persona also has a separate ROLL earnings check — that one stays.
+        """
+        md = """## Today's Action List
+
+1. **CLOSE** AMD_PUT_385_20260626 — +41% capture
+2. **HEDGE** Buy 18× spy put $700P
+3. **TRIM** GOOG — 14.5% NLV
+"""
+        result = tax_cpa_check(md)
+        # The specific tax_cpa CSP-block findings must NOT fire here.
+        assert not any(
+            "CSP" in issue.text and ("Wash-sale" in issue.text or "Earnings check" in issue.text)
+            for issue in result.issues
+        )
 
     def test_fail_roll_missing_earnings_check(self):
         """Should fail when ROLL lacks earnings check."""

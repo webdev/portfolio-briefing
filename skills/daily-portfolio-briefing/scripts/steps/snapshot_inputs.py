@@ -452,8 +452,14 @@ def snapshot_inputs(
         # Real E*TRADE pull via the adapter
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from adapters.etrade_adapter import fetch_etrade_snapshot
-        print("  Pulling REAL holdings from E*TRADE...")
-        snap = fetch_etrade_snapshot()
+        # Honor an account-scope filter from briefing.yaml. Default scope is
+        # the single INDIVIDUAL brokerage account — the user has multiple
+        # accounts at E*TRADE (Joint, Individual Brokerage, INDIVIDUAL, IRAs)
+        # but the briefing pipeline is currently aligned only to INDIVIDUAL.
+        # See CLAUDE.md for the canonical rule.
+        account_desc_whitelist = config.get("account_desc_whitelist") or ["INDIVIDUAL"]
+        print(f"  Pulling REAL holdings from E*TRADE (scoped to: {account_desc_whitelist})...")
+        snap = fetch_etrade_snapshot(account_desc_whitelist=account_desc_whitelist)
         accounts = snap.accounts
         positions = snap.positions
         base_balance = snap.balance
