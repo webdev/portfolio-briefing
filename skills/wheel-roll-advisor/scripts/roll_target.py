@@ -100,7 +100,7 @@ def enumerate_roll_candidates(
         # Find matching candidate in chain
         matching = None
         for chain_cand in chain.get("candidates", []):
-            if (abs(float(chain_cand.get("strikePrice", 0)) - strike) < 0.01 and
+            if (abs(float(chain_cand.get("strikePrice") or 0) - strike) < 0.01 and
                 chain_cand.get("expirationDate") == exp):
                 matching = chain_cand
                 break
@@ -188,7 +188,7 @@ def select_roll_target(
 
     filtered = []
     for c in candidates:
-        cand_dte = c.get("daysToExpiry", 0)
+        cand_dte = c.get("daysToExpiry") or 0
         if cand_dte >= min_dte_for_roll:
             filtered.append(c)
 
@@ -279,7 +279,7 @@ def select_roll_target(
         return None
 
     # Step 6: Strike selection
-    target = min(stress_filtered, key=lambda x: abs(abs(x.get("delta", 0)) - delta_target))
+    target = min(stress_filtered, key=lambda x: abs(abs(x.get("delta") or 0) - delta_target))
 
     return {
         "strikePrice": target.get("strikePrice"),
@@ -288,7 +288,7 @@ def select_roll_target(
         "bidAsk": {
             "bid": target.get("bid"),
             "ask": target.get("ask"),
-            "mid": (float(target.get("bid", 0)) + float(target.get("ask", 0))) / 2,
+            "mid": (float(target.get("bid") or 0) + float(target.get("ask") or 0)) / 2,
         },
         "expectedNetCredit": target.get("expectedNetCredit"),
         "expectedNetCreditPct": target.get("expectedNetCreditPct"),
