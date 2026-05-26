@@ -27,7 +27,7 @@ themes:
       - QCOM   # mobile + automotive + edge
       - TXN    # analog / power management
       - SMCI   # AI server builder
-    etfs: [SMH, SOXX, QQQ]
+    etfs: [SMH, SOXX, QQQ, CHPX]   # CHPX = Global X AI Semiconductor & Quantum ETF (verified 2026-05-22)
     notes: "Hyperscaler capex cycle, Claude / GPT compute demand"
 
   memory_storage:
@@ -38,7 +38,7 @@ themes:
       - MU     # micron — HBM + DRAM
       - STX    # seagate — HDD
       - WDC    # western digital — NAND + HDD
-    etfs: []
+    etfs: [DRAM]   # DRAM = Roundhill Memory ETF (SK hynix, Samsung, MU, SNDK, Kioxia); verified 2026-05-22
     notes: "HBM ramp for AI, NAND price recovery, hyperscale storage"
 
   photonics_optics:
@@ -52,7 +52,7 @@ themes:
       - GLW    # corning — fiber + glass
       - CIEN   # ciena — optical networking
       - FN     # fabrinet — contract manufacturing for optics
-    etfs: []
+    etfs: []   # no dedicated photonics/optics ETF; optics names (LITE, COHR, CIEN, GLW) sit inside broad semis ETFs (SMH/SOXX)
     notes: "AI cluster interconnect demand (CPO, co-packaged optics)"
 
   ai_data_centers:
@@ -64,7 +64,7 @@ themes:
       - CRWV   # coreweave — AI hyperscaler
       - CIFR   # cipher mining — miner / AI infra
       - WULF   # terawulf — miner / AI hosting
-    etfs: []
+    etfs: [WGMI]   # WGMI = CoinShares Bitcoin Mining ETF (IREN, CIFR, WULF, CORZ); verified 2026-05-22
     notes: "Bitcoin miners pivoting to AI infrastructure / GPU hosting"
 
   power:
@@ -82,8 +82,83 @@ themes:
       - EOSE   # eos energy — zinc-based grid storage
       - SMR    # NuScale — SMR
       - ETN    # eaton — power management
-    etfs: [URA, NLR, XLU]
+    etfs: [URA, NLR, XLU, POWR, GRID]   # URA/NLR=nuclear; POWR=iShares US Power Infra, GRID=First Trust Smart Grid; verified 2026-05-22
     notes: "Datacenter power demand → nuclear renaissance, grid buildout"
+
+  applications:
+    name: "Applications"
+    group: "The AI Buildout"
+    anchors:
+      - PLTR   # palantir — AIP + enterprise/defense AI ops
+      - NOW    # servicenow — AI workflows + agentic automation
+      - PANW   # palo alto — security platform (also in cybersecurity)
+      - CRWD   # crowdstrike — endpoint (also in cybersecurity)
+      - TSM    # foundry — AI chips
+      - ARM    # IP licensing for AI inference
+      - AVGO   # AI ASIC + networking
+      - MRVL   # custom ASIC
+      - QCOM   # mobile + automotive + edge AI
+      - TXN    # analog / power management
+      - IGV    # iShares Expanded Tech-Software ETF (proxy)
+    etfs: [IGV, XLK]
+    notes: "Software + chips running AI workloads at the application layer"
+
+  networking:
+    name: "Networking"
+    group: "The AI Buildout"
+    anchors:
+      - ANET   # arista — cloud / AI cluster networking leader
+      - CSCO   # cisco — enterprise networking + Splunk
+    etfs: []   # no dedicated networking ETF; ANET/CSCO are top holdings of broad tech ETFs (XLK, QQQ)
+    notes: "Switching/routing for AI training and inference clusters"
+
+  # Ancillary themes that ride on the AI Buildout wave
+
+  ancillary_space:
+    name: "Space"
+    group: "Ancillary"
+    anchors:
+      - ASTS   # AST SpaceMobile — direct-to-cell satellites
+      - FLY    # Firefly Aerospace
+      - RKLB   # Rocket Lab — launch + Neutron
+      - PL     # Planet Labs — earth imagery + AI insights
+      - LUNR   # Intuitive Machines — lunar lander
+      - BKSY   # BlackSky — earth observation
+    etfs: [UFO, ARKX]
+    notes: "Satellite buildout + earth observation feeding AI models"
+
+  ancillary_robotics:
+    name: "Robotics"
+    group: "Ancillary"
+    anchors:
+      - TSLA   # tesla — Optimus + FSD as robotics platform
+      - PATH   # UiPath — RPA / software robots
+      - AMZN   # amazon — warehouse robotics
+    etfs: [BOTZ, ROBO]
+    notes: "Physical + software robotics"
+
+  ancillary_drones:
+    name: "Drones"
+    group: "Ancillary"
+    anchors:
+      - KTOS   # kratos defense
+      - ONDS   # ondas — small/medium drones
+      - LMT    # lockheed martin — defense primes
+      - AVAV   # AeroVironment — switchblade etc.
+      - UMAC   # unusual machines
+    etfs: [PPA, ITA]
+    notes: "Defense + commercial drones; high-IV / event-driven names"
+
+  ancillary_rare_earths:
+    name: "Rare Earths"
+    group: "Ancillary"
+    anchors:
+      - USAR   # USA Rare Earth
+      - MP     # MP Materials — rare-earth miner
+      - FCX    # Freeport-McMoRan — copper / molybdenum
+      - AA     # Alcoa — aluminum
+    etfs: [REMX]
+    notes: "Critical minerals for chips, magnets, batteries"
 
   # Adjacent themes (not part of AI Buildout but worth tracking)
 
@@ -96,7 +171,7 @@ themes:
       - QBTS   # d-wave — annealing
       - IBM    # superconducting (one of many bets)
       - HON    # honeywell — Quantinuum stake
-    etfs: [QTUM]
+    etfs: [QTUM, CHPX]   # QTUM=Defiance Quantum; CHPX=Global X AI Semiconductor & Quantum; verified 2026-05-22
     notes: "Early stage; high vol, mostly thematic"
 
   cybersecurity:

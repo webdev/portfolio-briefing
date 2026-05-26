@@ -73,6 +73,41 @@ def _load_chain_fetcher():
 
 
 # --------------------------------------------------------------------------
+# Lazy-load the intrinsic-value module (lives in daily-portfolio-briefing)
+# --------------------------------------------------------------------------
+
+_IV_MODULE = None
+
+
+def _load_intrinsic_module():
+    """Load the shared intrinsic_value module by path so the standalone scout
+    report uses the same fair-value logic (and cache) as the daily briefing."""
+    global _IV_MODULE
+    if _IV_MODULE is not None:
+        return _IV_MODULE
+    scripts_dir = _REPO_ROOT / "skills" / "daily-portfolio-briefing" / "scripts"
+    target = scripts_dir / "analysis" / "intrinsic_value.py"
+    if not target.exists():
+        return None
+    # Put the scripts dir on path so intrinsic_value's `from analysis import
+    # rsi_discipline` resolves when loaded by file path.
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    spec = importlib.util.spec_from_file_location("briefing_intrinsic_value", target)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["briefing_intrinsic_value"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"  [warn] intrinsic-value module load failed: {e}", file=sys.stderr)
+        return None
+    _IV_MODULE = mod
+    return mod
+
+
+# --------------------------------------------------------------------------
 # yfinance technical signals (same logic as snapshot_inputs._full_technicals)
 # --------------------------------------------------------------------------
 
@@ -287,7 +322,8 @@ def _verdict(
 # --------------------------------------------------------------------------
 
 def _research_ticker(ticker: str, theme: str, cfg: dict,
-                     recs_map: dict, held_weights: dict) -> ScoutResult:
+                     recs_map: dict, held_weights: dict,
+                     existing_short_puts: dict | None = None) -> ScoutResult:
     res = ScoutResult(ticker=ticker, theme=theme)
     tech = _fetch_technicals(ticker)
     if not tech:
@@ -320,8 +356,37 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
 
     # CSP entry quote when verdict warrants
     if want_csp and res.spot:
+        # Existing-put-stack guard. If the user already has ≥2 short puts on
+        # this name, OR a put at a strike near our proposed strike, don't
+        # propose another — that's concentration, not income.
+        existing = (existing_short_puts or {}).get(ticker.upper())
+        MAX_EXISTING_SHORT_PUTS = 2
+        STRIKE_OVERLAP_PCT = 0.05
+        # Compute the proposed strike before checking
+        target_strike = res.spot * (1 - cfg["csp_target_otm_pct"] / 100.0)
+
+        if existing and existing.get("count", 0) >= MAX_EXISTING_SHORT_PUTS:
+            res.verdict = "WATCH — existing puts already stacked"
+            res.rationale.append(
+                f"already {int(existing['count'])} short puts open at "
+                f"{sorted(existing['strikes'])} — adding another concentrates risk"
+            )
+        elif existing and any(
+                s > 0 and abs(target_strike - s) / s <= STRIKE_OVERLAP_PCT
+                for s in existing.get("strikes", [])
+        ):
+            overlapping = next(
+                s for s in existing["strikes"]
+                if s > 0 and abs(target_strike - s) / s <= STRIKE_OVERLAP_PCT
+            )
+            res.verdict = "WATCH — strike overlaps existing put"
+            res.rationale.append(
+                f"proposed ~${target_strike:.0f}P within "
+                f"{STRIKE_OVERLAP_PCT*100:.0f}% of existing ${overlapping:g}P "
+                f"— concentrates rather than diversifies"
+            )
         # Earnings guard: don't quote a CSP that spans imminent earnings
-        if res.days_to_earnings is not None and 0 < res.days_to_earnings <= cfg["csp_target_dte"]:
+        elif res.days_to_earnings is not None and 0 < res.days_to_earnings <= cfg["csp_target_dte"]:
             res.rationale.append(
                 f"earnings in {res.days_to_earnings}d inside target DTE — no CSP ticket"
             )
@@ -343,9 +408,13 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
 # Recommendations + held-weight inputs (optional integration with briefing)
 # --------------------------------------------------------------------------
 
-def _load_recs_and_weights() -> tuple[dict, dict]:
-    """Best-effort: pull third-party recs + held weights from the latest
-    daily-portfolio-briefing snapshot. Falls back to empty dicts."""
+def _load_recs_and_weights() -> tuple[dict, dict, dict]:
+    """Best-effort: pull third-party recs + held weights + existing short puts
+    from the latest daily-portfolio-briefing snapshot. Falls back to empty dicts.
+
+    Returns (recs_by_ticker, weights_by_ticker, existing_short_puts_by_ticker).
+    existing_short_puts shape: {ticker: {"count": int, "strikes": [float]}}
+    """
     snap_root = (
         _REPO_ROOT / "skills" / "daily-portfolio-briefing"
         / "state" / "briefing_snapshots"
@@ -373,6 +442,7 @@ def _load_recs_and_weights() -> tuple[dict, dict]:
             pass
 
     weights: dict = {}
+    existing_short_puts: dict = {}
     pos_file = latest / "positions.json"
     bal_file = latest / "balance.json"
     if pos_file.exists() and bal_file.exists():
@@ -383,16 +453,27 @@ def _load_recs_and_weights() -> tuple[dict, dict]:
             nlv = float(balance.get("accountValue", 0) or 0)
             if nlv > 0:
                 for p in positions:
-                    if p.get("assetType") != "EQUITY":
-                        continue
-                    sym = (p.get("symbol") or "").upper()
-                    qty = float(p.get("qty", 0) or 0)
-                    price = float(p.get("price", 0) or 0)
-                    if sym and qty > 0 and price > 0:
-                        weights[sym] = weights.get(sym, 0) + (qty * price / nlv * 100)
+                    if p.get("assetType") == "EQUITY":
+                        sym = (p.get("symbol") or "").upper()
+                        qty = float(p.get("qty", 0) or 0)
+                        price = float(p.get("price", 0) or 0)
+                        if sym and qty > 0 and price > 0:
+                            weights[sym] = weights.get(sym, 0) + (qty * price / nlv * 100)
+                    elif p.get("assetType") == "OPTION" and (p.get("type") or "").upper() == "PUT":
+                        qty = float(p.get("qty", 0) or 0)
+                        if qty >= 0:
+                            continue  # only short puts
+                        t = (p.get("underlying") or "").upper()
+                        if not t:
+                            continue
+                        entry = existing_short_puts.setdefault(
+                            t, {"count": 0, "strikes": []}
+                        )
+                        entry["count"] += abs(qty)
+                        entry["strikes"].append(float(p.get("strike", 0) or 0))
         except Exception:
             pass
-    return recs, weights
+    return recs, weights, existing_short_puts
 
 
 # --------------------------------------------------------------------------
@@ -412,8 +493,22 @@ _VERDICT_EMOJI = {
 }
 
 
+def _fv_note_for(iv_mod, r, fv_by_ticker, etf_set, fmp_available) -> str | None:
+    """Fair-value note for a single-stock recommendation header. None → skip."""
+    if iv_mod is None:
+        return None
+    tk = (r.ticker or "").upper()
+    if iv_mod.is_etf(tk, etf_set):
+        return iv_mod.format_fv_note(tk, r.spot, None, etf_set=etf_set)
+    if not fmp_available:
+        return None  # no FMP key — don't spam per-line n/a; footer explains
+    return iv_mod.format_fv_note(tk, r.spot, (fv_by_ticker or {}).get(tk), etf_set=etf_set)
+
+
 def _render_report(results_by_theme: dict[str, list[ScoutResult]],
-                   theme_meta: dict, generated_at: str) -> str:
+                   theme_meta: dict, generated_at: str,
+                   iv_mod=None, fv_by_ticker: dict | None = None,
+                   etf_set=None, fmp_available: bool = False) -> str:
     lines = [f"# Thematic Scout Report — {generated_at}", ""]
     lines.append(
         "_Read-only research across thematic universes. Each ticker analyzed "
@@ -457,7 +552,13 @@ def _render_report(results_by_theme: dict[str, list[ScoutResult]],
         for r in sorted(results, key=lambda x: (_bucket(x.verdict), x.ticker)):
             emoji = _VERDICT_EMOJI.get(r.verdict, "•")
             spot_str = f"${r.spot:.2f}" if r.spot else "?"
-            lines.append(f"### {emoji} {r.verdict} · `{r.ticker}` · {spot_str}")
+            header = f"### {emoji} {r.verdict} · `{r.ticker}` · {spot_str}"
+            # Fair value on actionable single-stock recommendations (BUY / CSP).
+            if r.verdict.startswith("BUY") or r.verdict.startswith("CSP"):
+                note = _fv_note_for(iv_mod, r, fv_by_ticker, etf_set, fmp_available)
+                if note:
+                    header += f"  · {note}"
+            lines.append(header)
 
             metrics = []
             if r.rsi_14 is not None:
@@ -499,6 +600,19 @@ def _render_report(results_by_theme: dict[str, list[ScoutResult]],
                 lines.append(f"- _Why:_ {'; '.join(r.rationale)}")
 
             lines.append("")
+
+    if iv_mod is not None:
+        if fmp_available:
+            lines.append(
+                "_💵 Intrinsic value (FMP DCF + analyst price targets) shown on "
+                "actionable single-stock picks; ETFs marked basket._"
+            )
+        else:
+            lines.append(
+                "_💵 Intrinsic value unavailable — FMP_API_KEY not configured; "
+                "values not fabricated (fail-closed)._"
+            )
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -544,11 +658,13 @@ def main() -> int:
         return 1
 
     # Optional inputs from latest briefing snapshot
-    recs_map, held_weights = _load_recs_and_weights()
+    recs_map, held_weights, existing_short_puts = _load_recs_and_weights()
     if recs_map:
         print(f"  Loaded {len(recs_map)} third-party recs from latest briefing snapshot")
     if held_weights:
         print(f"  Loaded {len(held_weights)} held-weight entries from latest briefing snapshot")
+    if existing_short_puts:
+        print(f"  Loaded existing short puts for {len(existing_short_puts)} tickers (put-stack guard active)")
 
     # Build flat job list
     jobs: list[tuple[str, str]] = []
@@ -570,7 +686,8 @@ def main() -> int:
     started = datetime.now()
     with ThreadPoolExecutor(max_workers=args.max_workers, thread_name_prefix="scout") as ex:
         future_to_job = {
-            ex.submit(_research_ticker, ticker, theme, verdict_cfg, recs_map, held_weights):
+            ex.submit(_research_ticker, ticker, theme, verdict_cfg,
+                      recs_map, held_weights, existing_short_puts):
                 (theme, ticker)
             for (theme, ticker) in jobs
         }
@@ -586,9 +703,37 @@ def main() -> int:
     elapsed = (datetime.now() - started).total_seconds()
     print(f"  Research complete in {elapsed:.1f}s")
 
+    # Intrinsic value (fail-closed; shares the daily-briefing 24h cache).
+    iv_mod = _load_intrinsic_module()
+    fv_map: dict = {}
+    etf_set: set = set()
+    fmp_available = False
+    if iv_mod is not None:
+        etf_set = iv_mod.default_etf_set(None)
+        fmp_key = os.getenv("FMP_API_KEY")
+        fmp_available = bool(fmp_key)
+        if fmp_key:
+            rec_tickers = {
+                r.ticker.upper()
+                for rs in results_by_theme.values() for r in rs
+                if r.ticker
+                and (r.verdict.startswith("BUY") or r.verdict.startswith("CSP"))
+                and not iv_mod.is_etf(r.ticker.upper(), etf_set)
+            }
+            if rec_tickers:
+                cache_path = (_REPO_ROOT / "skills" / "daily-portfolio-briefing"
+                              / "state" / "intrinsic_value_cache.json")
+                fv_map = iv_mod.get_fair_values(
+                    sorted(rec_tickers), cache_path=cache_path, api_key=fmp_key,
+                )
+
     # Render
     generated_at = datetime.now().strftime("%A, %B %d, %Y · %I:%M %p")
-    md = _render_report(results_by_theme, themes_cfg, generated_at)
+    md = _render_report(
+        results_by_theme, themes_cfg, generated_at,
+        iv_mod=iv_mod, fv_by_ticker=fv_map, etf_set=etf_set,
+        fmp_available=fmp_available,
+    )
 
     # Output
     if args.output:

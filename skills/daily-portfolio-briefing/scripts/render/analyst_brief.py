@@ -5,7 +5,24 @@ Deterministic output: CLOSE winners, urgent ROLLs, earnings warnings, stress cov
 concentration fixes, and SKIPs. No LLM call.
 """
 
+import sys
 from datetime import datetime
+from pathlib import Path
+
+try:
+    from analysis import rsi_discipline
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from analysis import rsi_discipline
+
+
+def _rsi_suffix(ticker_or_contract: str, technicals: dict) -> str:
+    """Side-agnostic RSI tag for an analyst-brief header (e.g. ' · RSI 41')."""
+    if not ticker_or_contract:
+        return ""
+    underlying = ticker_or_contract.split("_")[0] if "_" in ticker_or_contract else ticker_or_contract
+    rsi = rsi_discipline.rsi_for(underlying, technicals)
+    return f"  · {rsi_discipline.tag(rsi)}" if rsi is not None else ""
 
 
 def _format_exp(exp_str: str) -> str:
@@ -44,6 +61,7 @@ def render_analyst_brief(
     confidence = regime_data.get("confidence", "MEDIUM")
     nlv = snapshot_data.get("balance", {}).get("accountValue", 0)
     cash = snapshot_data.get("balance", {}).get("cash", 0)
+    technicals = snapshot_data.get("technicals", {}) or {}
 
     lines.append(f"**Portfolio regime:** {regime} (confidence {confidence})")
     lines.append(f"**NLV:** ${nlv:,.0f} | **Cash:** ${cash:,.0f}")
@@ -79,7 +97,7 @@ def render_analyst_brief(
             exp_pretty = _format_exp(exp)
             mid = opt_rev.get("current_mid", 0)
             limit_price = max(0.01, mid * 1.05)  # Buy at mid + 5% for quick fill; ensures profit
-            lines.append(f"**{contract} — CLOSE**")
+            lines.append(f"**{contract} — CLOSE**{_rsi_suffix(contract, technicals)}")
             lines.append(
                 f"- **REASON:** +{capture:.0f}% profit captured, {opt_rev.get('days_to_expiry')}d DTE — lock theta gain early."
             )
@@ -108,7 +126,7 @@ def render_analyst_brief(
             exp = opt_rev.get("expiration")
             exp_pretty = _format_exp(exp)
             rationale = opt_rev.get("rationale", "")
-            lines.append(f"**{contract} — {rec}**")
+            lines.append(f"**{contract} — {rec}**{_rsi_suffix(contract, technicals)}")
             lines.append(f"- **REASON:** {rationale}")
             roll_target = opt_rev.get("roll_target")
             if roll_target:
@@ -144,7 +162,7 @@ def render_analyst_brief(
         lines.append("")
         for opt_rev, days_to_earnings in earnings_warnings:
             contract = opt_rev.get("contract")
-            lines.append(f"**{contract}**")
+            lines.append(f"**{contract}**{_rsi_suffix(contract, technicals)}")
             lines.append(f"- Earnings in {max(0, days_to_earnings)}d before or at expiration")
             lines.append(f"- Consider closing before IV crush to lock premium")
             lines.append("")
@@ -175,6 +193,7 @@ def render_analyst_brief(
                     lines.append(
                         f"- **{symbol}** — frees ${collateral:,.0f} collateral, "
                         f"locks ${profit_dollars:+,.0f} profit ({profit_pct_frac*100:.0f}% capture)"
+                        f"{_rsi_suffix(symbol, technicals)}"
                     )
                     if reason:
                         lines.append(f"  - {reason}")
@@ -210,7 +229,7 @@ def render_analyst_brief(
             # Sort by collateral freed (descending) to show most impactful closes
             close_candidates.sort(key=lambda x: x["collateral_freed"], reverse=True)
             for c in close_candidates[:3]:
-                lines.append(f"- **{c['contract']}** — frees ${c['collateral_freed']:,.0f} collateral, locks +${c['profit']:+,.0f} profit ({c['capture_pct']:.0f}% capture)")
+                lines.append(f"- **{c['contract']}** — frees ${c['collateral_freed']:,.0f} collateral, locks +${c['profit']:+,.0f} profit ({c['capture_pct']:.0f}% capture){_rsi_suffix(c['contract'], technicals)}")
 
         lines.append("")
         lines.append("")
@@ -238,7 +257,7 @@ def render_analyst_brief(
                 for opt in options_reviews
             )
 
-            lines.append(f"**{ticker}**: {current_pct:.1f}% → trim to 9% NLV")
+            lines.append(f"**{ticker}**: {current_pct:.1f}% → trim to 9% NLV{_rsi_suffix(ticker, technicals)}")
 
             if has_cc:
                 lines.append(f"- **Option A** (tax-deferred): Roll up existing covered calls to higher strikes → collect premium + reduce assignment ceiling")
@@ -264,7 +283,8 @@ def render_analyst_brief(
         for idea in skipped[:5]:  # Top 5 watch-only
             ticker = idea.get("ticker", "?")
             reason = idea.get("rationale", "Not yet actionable")
-            lines.append(f"- **{ticker}**: {reason}")
+            suffix = "" if "RSI" in reason else _rsi_suffix(ticker, technicals)
+            lines.append(f"- **{ticker}**: {reason}{suffix}")
         lines.append("")
 
     lines.append("")

@@ -153,6 +153,41 @@ cells:
     decision: TAKE_ASSIGNMENT
     rationale: "Covered call assigned. Roll to next month or close."
 
+  # Covered call ITM / NEAR-ATM with time left — the stock ran toward/past the
+  # cap. Roll UP and out (raise the strike to preserve upside), do NOT re-cap at
+  # the same strike. (Replaces the inverted PUT_..._ITM logic that used to fire.)
+  - id: "CALL_NORMAL_ITM_ROLL_UP"
+    moneyness: ITM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    decision: ROLL_OUT_AND_UP
+    rationale: "Covered call ITM — stock ran past your cap. Roll UP and out to lift the cap and keep upside; don't re-cap at the same strike. Take assignment only if you're done with the shares."
+
+  - id: "CALL_NORMAL_ITM_EXPIRY_WEEK"
+    moneyness: ITM
+    dte_band: [EXPIRY_WEEK, SHORT_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    decision: ROLL_OUT_AND_UP
+    rationale: "Covered call ITM into expiry — roll UP and out to keep the shares and lift the cap, or take assignment if you're happy to sell at the strike."
+
+  - id: "CALL_NORMAL_NEAR_ATM_ROLL_UP"
+    moneyness: NEAR_ATM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    decision: ROLL_OUT_AND_UP
+    rationale: "Covered call near the strike with time left — roll UP and out for more headroom if you want to keep the shares; otherwise hold and reassess."
+
+  - id: "CALL_NORMAL_OTM_HOLD"
+    moneyness: [MODERATE_OTM, DEEP_OTM]
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH, BEARISH]
+    regime: NORMAL
+    decision: HOLD
+    rationale: "Covered call comfortably OTM with time left — hold; theta works in your favour."
+
   # Fallback cells for edge cases
   - id: "PUT_NORMAL_DEEP_OTM_EXPIRY_WEEK_BEARISH"
     moneyness: DEEP_OTM

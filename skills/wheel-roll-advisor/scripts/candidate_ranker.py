@@ -52,6 +52,8 @@ def rank_candidates(
     is_core: bool = False,
     embedded_tax_dollars: float = 0.0,
     min_credit_threshold: float = 1000.0,
+    max_tenor_days: Optional[int] = None,
+    rollup_bonus_per_pct: float = 250.0,
 ) -> tuple[Optional[dict], list[CandidateScore]]:
     """
     Rank roll candidates and return the best non-HOLD pick.
@@ -65,6 +67,14 @@ def rank_candidates(
                                calendar rolls on core positions)
         min_credit_threshold: minimum net credit to qualify (used in wheel mode);
                                core mode allows debits if they raise the cap meaningfully
+        max_tenor_days: if set, reject any candidate that extends the expiration by
+                        MORE than this many days. Stops the ranker from picking an
+                        absurd multi-year, same-strike calendar just because long-dated
+                        time value maximizes the raw credit (which caps a name for years).
+        rollup_bonus_per_pct: wheel-mode bonus per 1% of cap headroom on the new
+                              strike, so a roll-UP (higher strike, preserves upside) is
+                              preferred between comparable-credit candidates rather than
+                              always defaulting to the max-credit same-strike roll.
 
     Returns:
         (best_candidate_dict, [CandidateScore for each non-HOLD candidate])
@@ -82,6 +92,12 @@ def rank_candidates(
         dte_ext = int(c.get("dteExtension") or 0)
         net_d = float(c.get("netDollars") or 0)
         cap_buf = _cap_buffer_pct(new_strike, spot)
+
+        # Tenor cap — never surface a roll that locks the position for longer
+        # than the configured horizon (a 2.5-year same-strike calendar caps a
+        # bullish name for years just to harvest time-value premium).
+        if max_tenor_days is not None and dte_ext > max_tenor_days:
+            continue
 
         if is_core:
             # Core mode: prefer cap buffer, then dte extension, then net dollars.
@@ -110,14 +126,21 @@ def rank_candidates(
                 f"net=${net_d:+,.0f}, calendar_penalty={calendar_penalty:.0f}"
             )
         else:
-            # Wheel mode: max-credit wins. Reject debits.
+            # Wheel mode: credit-driven, but prefer a roll-UP. Reject debits.
             if net_d < min_credit_threshold:
                 continue
-            buffer_score = 0
+            # Roll-up preference: add a bonus for cap headroom on the new strike,
+            # so between comparable-credit candidates we raise the strike (keep
+            # upside) instead of always re-capping at the same strike for max
+            # credit. Credit still dominates large differences.
+            buffer_score = max(0.0, cap_buf) * rollup_bonus_per_pct
             dte_score = 0
             credit_score = net_d
-            composite = net_d
-            explanation = f"wheel: net=${net_d:+,.0f} (max-credit rule)"
+            composite = net_d + buffer_score
+            explanation = (
+                f"wheel: net=${net_d:+,.0f} + rollup_bonus={buffer_score:.0f} "
+                f"(cap_buf {cap_buf:+.1f}%)"
+            )
 
         cs = CandidateScore(
             candidate_id=c.get("id", "?"),

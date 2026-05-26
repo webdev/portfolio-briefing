@@ -20,6 +20,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
+try:
+    from analysis import rsi_discipline
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from analysis import rsi_discipline
+
 
 @dataclass
 class StrategyUpgrade:
@@ -234,6 +240,11 @@ def compute_strategy_upgrades(
     chains = snapshot_data.get("chains", {})
     earnings_calendar = snapshot_data.get("earnings_calendar", {})
     quotes = snapshot_data.get("quotes", {})
+    technicals = snapshot_data.get("technicals", {}) or {}
+
+    # RSI discipline thresholds. params IS the full briefing config here.
+    rsi_th = rsi_discipline.load_thresholds(params)
+    rsi_gate_on = rsi_th.get("enabled", True)
 
     nlv = balance.get("accountValue", 0)
     if nlv <= 0:
@@ -306,9 +317,21 @@ def compute_strategy_upgrades(
         call_price = short_call.get("currentMid") or short_call.get("premiumReceived", 0)
         call_total = call_price * 100 * call_qty
 
+        # RSI discipline — the strangle leg being ADDED is a short PUT, so route
+        # through the central hook (overbought RSI > 70 → removed). The existing
+        # covered call is unaffected (management, not a new open).
+        rsi_val = rsi_discipline.rsi_for(symbol, technicals)
+        rv = rsi_discipline.hook("put", rsi_val, rsi_th)
+
         upgrade = {
             "type": "covered_strangle",
             "underlying": symbol,
+            "rsi_14": rsi_val,
+            "rsi_tag": rv.tag,
+            "rsi_note": rv.reason,
+            "rsi_decision": rv.decision,
+            "rsi_badge": rv.badge,
+            "rsi_blocked": bool(rsi_gate_on and rv.removed),
             "current_calls": f"{call_qty}x ${short_call.get('strike')}C exp {call_exp}",
             "proposed": {
                 "action": "SELL_TO_OPEN",
@@ -425,9 +448,14 @@ def compute_strategy_upgrades(
         with_collar_gain = max(gain_at_drop, (strike - cost_basis) * qty)
         saved = max(0, with_collar_gain - gain_at_drop)
 
+        # Collar buys a protective put — defensive management, not a new short
+        # open, so RSI is shown for context but never gates.
+        _collar_rsi = rsi_discipline.rsi_for(symbol, technicals)
         upgrade = {
             "type": "collar",
             "underlying": symbol,
+            "rsi_14": _collar_rsi,
+            "rsi_tag": rsi_discipline.tag(_collar_rsi),
             "shares_held": int(qty),
             "current_unrealized_gain": round(unrealized_gain, 2),
             "gain_pct": round(gain_pct * 100, 1),
@@ -562,9 +590,23 @@ def compute_strategy_upgrades(
             if price > 0 else 0
         )
 
+        # RSI discipline — a brand-new covered call written into an OVERSOLD
+        # tape (RSI < 35) caps the name right before a likely bounce. Route
+        # through the central hook (removed → footer; favored → promoted).
+        # (Rolling an existing CC is management and never gated here.)
+        rsi_val = rsi_discipline.rsi_for(symbol, technicals)
+        rv = rsi_discipline.hook("call", rsi_val, rsi_th)
+        rsi_cc_blocked = bool(rsi_gate_on and rv.removed)
+
         upgrade = {
             "type": "write_covered_call",
             "underlying": symbol,
+            "rsi_14": rsi_val,
+            "rsi_tag": rv.tag,
+            "rsi_note": rv.reason,
+            "rsi_decision": rv.decision,
+            "rsi_badge": rv.badge,
+            "rsi_blocked": rsi_cc_blocked,
             "shares_held": int(qty),
             "contracts_writable": contracts_writable,
             "current_price": round(price, 2),
@@ -619,6 +661,12 @@ def compute_strategy_upgrades(
         if post_buy_weight > concentration_cap:
             continue
 
+        # RSI discipline — completing a sub-lot BUYS shares, so route through
+        # the buy gate: overbought (RSI > 70) → removed (don't chase); pullback
+        # → promoted. Mutual funds (no RSI) just pass through un-annotated.
+        _buy_rsi = rsi_discipline.rsi_for(symbol, technicals)
+        rv = rsi_discipline.hook("buy", _buy_rsi, rsi_th)
+
         upgrade = {
             "type": "sublot_completion",
             "underlying": symbol,
@@ -627,6 +675,12 @@ def compute_strategy_upgrades(
             "current_price": round(price, 2),
             "cost": round(cost, 2),
             "post_buy_weight_pct": round(post_buy_weight * 100, 1),
+            "rsi_14": _buy_rsi,
+            "rsi_tag": rv.tag,
+            "rsi_note": rv.reason,
+            "rsi_decision": rv.decision,
+            "rsi_badge": rv.badge,
+            "rsi_blocked": bool(rsi_gate_on and rv.removed),
             "rationale": f"Complete 100-share lot @ ${price:.2f} -> enable covered calls",
         }
         upgrades.append(upgrade)

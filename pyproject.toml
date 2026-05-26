@@ -1,0 +1,32 @@
+[project]
+name = "portfolio-briefing"
+version = "0.1.0"
+description = "Daily portfolio briefing pipeline + trading skills for an E*TRADE wheel strategy."
+readme = "README.md"
+# The codebase uses PEP 604 union syntax (`float | None`) and modern typing, so
+# it requires Python 3.10+. Running under 3.9 fails at import. The pinned
+# interpreter (.python-version) is 3.12 to match the wheelhouz target.
+requires-python = ">=3.10"
+dependencies = [
+    "pyetrade>=1.1.0",   # E*TRADE OAuth 1.0a + market/account API (briefing + chain fetcher)
+    "yfinance>=0.2.40",  # technicals: RSI(14), IV-rank proxy, SMA, drawdown, earnings dates
+    "pyyaml>=6.0",       # config/rules YAML (briefing.yaml, prioritization_rules.yaml, etc.)
+    "requests>=2.31.0",  # HTTP (recommendation-list fetcher; transitive E*TRADE/yfinance dep)
+    "httpx>=0.27",       # HTTP client used by the recommendation-list fetcher
+    "structlog>=24.1",   # structured logging (recommendation-list fetcher)
+    "python-dotenv>=1.0",# load .env (E*TRADE consumer creds + FMP_API_KEY) into the environment
+]
+
+[project.optional-dependencies]
+# Intrinsic value (FMP DCF + analyst targets) uses only the stdlib (urllib), so
+# no extra runtime dep is required — just the FMP_API_KEY environment variable.
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.uv]
+# This repo is a collection of runnable skills/scripts, not an installable
+# package — uv manages the environment but does not build/install the project.
+package = false

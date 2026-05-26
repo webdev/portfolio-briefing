@@ -134,5 +134,45 @@ def test_vrt_diagonal_up_with_credit_beats_calendar():
     assert best["id"] == "D", "VRT diagonal-up D dominates calendar B in core mode"
 
 
+def test_tenor_cap_rejects_long_dated_calendar():
+    """With a tenor cap, the 728-day same-strike LEAP (C) is rejected; the
+    shorter credit roll (B, +28d) is surfaced instead."""
+    cands = _nvda_candidates()
+    best, _ = rank_candidates(cands, spot=215.38, is_core=False, max_tenor_days=120)
+    assert best is not None and best["id"] == "B", \
+        f"tenor cap should drop C and pick B, got {best and best['id']}"
+
+
+def test_tenor_cap_falls_back_to_hold_when_only_long_qualifies():
+    """SMH-style: the only credit candidate over the threshold is a 911-day
+    calendar; with a tenor cap nothing qualifies → HOLD (best is None)."""
+    cands = [
+        {"id": "A"},
+        {"id": "B", "netDollars": 90, "dteExtension": 8,
+         "instruction": {"sell_strike": 595}, "current_strike": 595},
+        {"id": "C", "netDollars": 14275, "dteExtension": 911,
+         "instruction": {"sell_strike": 595}, "current_strike": 595},
+        {"id": "D", "netDollars": -1515, "dteExtension": 0,
+         "instruction": {"sell_strike": 645}, "current_strike": 595},
+    ]
+    best, _ = rank_candidates(cands, spot=580.40, is_core=False,
+                              min_credit_threshold=1000.0, max_tenor_days=120)
+    assert best is None, f"only a 911-day calendar qualifies → HOLD, got {best and best['id']}"
+
+
+def test_wheel_mode_prefers_rollup_between_comparable_credits():
+    """Two candidates with equal credit and tenor but different strikes — the
+    roll-UP (higher strike, more cap headroom) is preferred."""
+    cands = [
+        {"id": "A"},
+        {"id": "SAME", "netDollars": 2000, "dteExtension": 30,
+         "instruction": {"sell_strike": 100}, "current_strike": 100},
+        {"id": "UP", "netDollars": 2000, "dteExtension": 30,
+         "instruction": {"sell_strike": 110}, "current_strike": 100},
+    ]
+    best, _ = rank_candidates(cands, spot=100.0, is_core=False, max_tenor_days=120)
+    assert best["id"] == "UP", f"roll-up should win the tie, got {best['id']}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

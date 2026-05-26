@@ -164,7 +164,25 @@ def derive_state(
 
 def row_matches(row: Dict[str, Any], state: DerivedState) -> bool:
     """Check if a matrix row matches the derived state."""
-    
+
+    # PUT/CALL side gate. Rows are side-specific via their id prefix
+    # (``PUT_*`` applies to short puts, ``CALL_*`` to short calls); rows with an
+    # explicit ``position_type``/``option_type`` field use that. Rows without a
+    # side marker (DEFAULT_HOLD, guardrails) apply to either side. Without this,
+    # a covered CALL matches the first PUT row whose moneyness/DTE/outlook/IV
+    # align — inverting ITM logic (the SMH_CALL → PUT_..._ITM_NEUTRAL_ROLL_OUT bug).
+    pos = (state.position_type or "").upper()
+    state_side = "CALL" if "CALL" in pos else ("PUT" if "PUT" in pos else "")
+    row_side = (row.get("position_type") or row.get("option_type") or "").upper()
+    if not row_side:
+        rid = (row.get("id") or "").upper()
+        if rid.startswith("PUT_") or rid.startswith("PUT "):
+            row_side = "PUT"
+        elif rid.startswith("CALL_") or rid.startswith("CALL "):
+            row_side = "CALL"
+    if row_side and state_side and row_side != state_side:
+        return False
+
     # Moneyness
     if "moneyness" in row:
         row_moneyness = row.get("moneyness")

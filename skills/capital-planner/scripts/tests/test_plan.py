@@ -340,19 +340,31 @@ def test_full_briefing_scenario():
     assert t1_kinds.count("TRIM") == 2
     assert "LT_EXIT" in t1_kinds
 
-    # Tier 2: VRT credit roll, NEW_CSP VRT (GOOD verdict)
+    # Tier 2: VRT credit roll only. The VRT NEW_CSP is NO LONGER here —
+    # coverage is 0.48× (< 0.50× floor), so the new-put gate blocks it. This is
+    # exactly the contradiction the gate fixes: the plan must not surface a new
+    # put while stress coverage is critical (the same condition that promoted
+    # the HEDGE to Tier 1 above).
     t2_kinds = [a.kind for a in by_tier[2]]
     assert "ROLL" in t2_kinds
-    assert "NEW_CSP" in t2_kinds
+    assert "NEW_CSP" not in t2_kinds
 
-    # Tier 3: MSFT debit roll, META LT_CSP, MU LT_CSP
+    # Tier 3: MSFT debit roll only. META + MU LT_CSPs are gated out on coverage.
     t3_tickers = sorted(a.ticker for a in by_tier[3])
-    assert "META" in t3_tickers
-    assert "MU" in t3_tickers
     assert "MSFT" in t3_tickers  # debit roll
+    assert "META" not in t3_tickers
+    assert "MU" not in t3_tickers
 
-    # Skipped: GOOG LT_CSP (over cap), MSFT LT_CSP (near cap), AMD LT_CSP (HOLD), NVDA roll (earnings)
+    # Skipped: the new-put gate (coverage 0.48×) catches VRT NEW_CSP + META/MU
+    # LT_CSP; existing reasons catch GOOG (over cap), MSFT (near cap), AMD (HOLD);
+    # NVDA roll deferred on earnings.
     skipped_summary = [(a.kind, a.ticker, a.skip_reason) for a in plan.skipped_actions]
+    assert any(k == "NEW_CSP" and t == "VRT" and "stress coverage 0.48×" in (r or "")
+               for k, t, r in skipped_summary)
+    assert any(k == "LT_CSP" and t == "META" and "stress coverage 0.48×" in (r or "")
+               for k, t, r in skipped_summary)
+    assert any(k == "LT_CSP" and t == "MU" and "stress coverage 0.48×" in (r or "")
+               for k, t, r in skipped_summary)
     assert any(k == "LT_CSP" and t == "GOOG" for k, t, _ in skipped_summary)
     assert any(k == "LT_CSP" and t == "MSFT" for k, t, _ in skipped_summary)
     assert any(k == "LT_CSP" and t == "AMD"  for k, t, _ in skipped_summary)
@@ -361,17 +373,16 @@ def test_full_briefing_scenario():
     # Cash flow sanity check — closes free $114,250 + trims $114,490 = ≥$228K
     assert plan.total_collateral_freed >= 228_000
 
-    # Net cash including all LT_CSPs that pass filters:
-    #   closes:      +$109,437  (114,250 freed - 4,813 BTC)
-    #   trims:       +$114,490  (sells GOOG + NVDA shares)
-    #   rolls:       −$1,232    (MSFT -$2,360 + VRT +$1,128, NVDA skipped)
-    #   hedge:       −$13,277
-    #   new CSP VRT: −$29,025   (collat $30k − premium $975)
-    #   LT_CSP META: −$53,476   (collat $55k − premium $1,524)
-    #   LT_CSP MU:   −$65,133   (collat $67k − premium $1,867)
-    # = +$61,784 (positive — closes + trims pay for LT CSPs)
-    assert plan.net_cash_change > 60_000
-    assert plan.net_cash_change < 70_000
+    # Net cash — with all new puts gated out, the plan is now strongly
+    # cash-positive (closes + trims, minus the two rolls + hedge):
+    #   closes:  +$109,405  (114,250 freed − 4,345 BTC)
+    #   trims:   +$114,490
+    #   rolls:   −$1,232     (MSFT −$2,360 + VRT +$1,128; NVDA skipped)
+    #   hedge:   −$13,277
+    #   new puts: $0         (VRT CSP + META/MU LT CSP all gated on coverage)
+    # ≈ +$209,886
+    assert plan.net_cash_change > 200_000
+    assert plan.net_cash_change < 220_000
 
 
 def test_format_capital_plan_md_renders_all_sections():
@@ -405,6 +416,86 @@ def test_format_capital_plan_md_renders_all_sections():
     assert "GOOG" in txt
     assert "META" in txt
     assert "$152,979" in txt
+
+
+# ---------------------------------------------------------------------------
+# New-put exposure gate — coverage + concentration
+# ---------------------------------------------------------------------------
+
+def _new_csp_idea(ticker="ARM", strike=120, premium=900, contracts=1):
+    return {"ticker": ticker, "strike": strike, "premium": premium,
+            "contracts": contracts, "collateral": strike * 100 * contracts}
+
+
+def test_new_csp_skipped_when_coverage_below_floor():
+    plan = build_capital_plan(
+        balance=_balance(),
+        positions=[],
+        new_ideas=[_new_csp_idea()],
+        coverage_ratio=0.40,  # below 0.50 red threshold
+    )
+    assert not any(a.kind == "NEW_CSP" for a in plan.actions)
+    skipped = [a for a in plan.skipped_actions if a.kind == "NEW_CSP"]
+    assert len(skipped) == 1
+    assert "stress coverage 0.40×" in skipped[0].skip_reason
+    assert skipped[0].tier == 4
+
+
+def test_new_csp_skipped_when_concentration_breached():
+    # ARM already 8% NLV; a $12,000 collateral CSP pushes projected to ~9.2%...
+    # use a bigger strike so projected crosses 10%.
+    plan = build_capital_plan(
+        balance=_balance(),
+        positions=_positions({"ARM": 8.0}),
+        new_ideas=[_new_csp_idea(strike=300, premium=1500)],  # $30k collateral = +3% NLV
+        coverage_ratio=0.80,  # healthy — only concentration should bite
+    )
+    skipped = [a for a in plan.skipped_actions if a.kind == "NEW_CSP"]
+    assert len(skipped) == 1
+    assert "ARM" in skipped[0].skip_reason
+    assert "% NLV" in skipped[0].skip_reason
+    assert skipped[0].tier == 4
+
+
+def test_new_csp_allowed_when_coverage_and_concentration_ok():
+    plan = build_capital_plan(
+        balance=_balance(),
+        positions=_positions({"ARM": 2.0}),
+        new_ideas=[_new_csp_idea(strike=120, premium=900)],  # $12k = +1.2% → ~3.2%
+        coverage_ratio=0.80,
+    )
+    active = [a for a in plan.actions if a.kind == "NEW_CSP"]
+    assert len(active) == 1
+    assert active[0].skip_reason is None
+
+
+def test_new_csp_no_coverage_data_still_checks_concentration():
+    # coverage_ratio None → coverage gate can't fire; concentration still does.
+    plan = build_capital_plan(
+        balance=_balance(),
+        positions=_positions({"ARM": 9.0}),
+        new_ideas=[_new_csp_idea(strike=200, premium=1200)],  # $20k = +2% → ~11%
+        coverage_ratio=None,
+    )
+    skipped = [a for a in plan.skipped_actions if a.kind == "NEW_CSP"]
+    assert len(skipped) == 1
+    assert "cap" in skipped[0].skip_reason
+
+
+def test_lt_csp_gated_on_coverage():
+    plan = build_capital_plan(
+        balance=_balance(),
+        positions=[],
+        long_term_opportunities=[{
+            "kind": "LONG_DATED_CSP", "ticker": "TSM",
+            "concrete_trade": "SELL 1x TSM 180P Jan'27",
+            "yield_or_cost": "~$2000 premium · $18,000 cash collateral",
+        }],
+        coverage_ratio=0.30,
+    )
+    skipped = [a for a in plan.skipped_actions if a.kind == "LT_CSP"]
+    assert len(skipped) == 1
+    assert "stress coverage 0.30×" in skipped[0].skip_reason
 
 
 if __name__ == "__main__":

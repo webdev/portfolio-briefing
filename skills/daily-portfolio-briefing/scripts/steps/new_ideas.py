@@ -21,6 +21,12 @@ from pathlib import Path
 
 from adapters.etrade_market import get_option_chain, get_option_expirations
 
+try:
+    from analysis import rsi_discipline
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from analysis import rsi_discipline
+
 # How many top recs to fetch chains for (one chain fetch per ticker is slow)
 MAX_CONCRETE_IDEAS = 3
 PER_TICKER_TIMEOUT_S = 8
@@ -312,6 +318,13 @@ def generate_new_ideas(
     candidate_count = 0
     quotes = snapshot_data.get("quotes", {})
 
+    # RSI discipline — a new cash-secured put is a put-sale, so RSI overbought
+    # (>70) is a hard block (thinnest premium right before a reversal can whip
+    # the stock down through the strike). Annotate every idea with its RSI.
+    technicals = snapshot_data.get("technicals", {}) or {}
+    rsi_th = rsi_discipline.load_thresholds(config)
+    rsi_gate_on = rsi_th.get("enabled", True)
+
     for rec in ranked:
         if candidate_count >= MAX_CONCRETE_IDEAS:
             break
@@ -340,6 +353,12 @@ def generate_new_ideas(
         idea = _build_concrete_idea(rec, spot, ticker)
         ticker_elapsed = _time.monotonic() - ticker_start
 
+        # Look up RSI(14) for this underlying once and route through the central
+        # hook (a new CSP is a put-sale). Used for both the gate (actionable
+        # ideas) and annotation (watch-only ideas).
+        rsi_val = rsi_discipline.rsi_for(ticker, technicals)
+        rv = rsi_discipline.hook("put", rsi_val, rsi_th)
+
         if idea is None:
             # No tradable contract found — surface as watch-only idea so the user knows
             ideas.append({
@@ -351,8 +370,25 @@ def generate_new_ideas(
                 "raw_recommendation": rec.get("raw_recommendation", ""),
                 "rec_age_days": rec.get("age_days", 0),
                 "score": rec.get("rating_tier", 0),
+                "rsi_14": rsi_val,
+                "rsi_tag": rv.tag,
             })
         else:
+            # Annotate every actionable idea with its RSI read.
+            idea["rsi_14"] = rsi_val
+            idea["rsi_tag"] = rv.tag
+            idea["rsi_note"] = rv.reason
+            idea["rsi_decision"] = rv.decision
+            idea["rsi_badge"] = rv.badge
+            if rsi_gate_on and rv.removed:
+                # Overbought → demote to watch-only (no actionable put-sale).
+                idea["instruction"] = None
+                idea["source"] = "recommendation_list_rsi_blocked"
+                idea["rsi_blocked"] = True
+                idea["rationale"] = (
+                    f"{rec.get('raw_recommendation', '')} — {rv.reason} "
+                    f"(would have sold ${idea.get('strike')}P)"
+                )
             ideas.append(idea)
 
         candidate_count += 1

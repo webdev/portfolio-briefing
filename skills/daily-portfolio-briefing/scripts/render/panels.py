@@ -95,6 +95,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Add adapters path for etrade_market
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adapters"))
 
+from analysis import rsi_discipline  # noqa: E402  (scripts dir on sys.path above)
+
 try:
     from yield_formulas import (  # type: ignore
         compute_csp_yield,
@@ -727,14 +729,33 @@ def render_action_list(
             (_opt_type_gate == "PUT" and _moneyness < 1.03)
             or (_opt_type_gate == "CALL" and _moneyness > 0.97)
         )
+        # Genuine assignment risk = actually AT/PAST the strike, not merely within
+        # the loose 3% buffer band.
+        genuinely_itm = (
+            (_opt_type_gate == "PUT" and 0 < _moneyness <= 1.0)
+            or (_opt_type_gate == "CALL" and _moneyness >= 1.0)
+        )
+        # DEFER TO THE POSITION'S OWN ADVISOR. If the wheel-roll-advisor
+        # explicitly recommends HOLD (recommendation == HOLD, or its recommended
+        # candidate is "A" = don't roll), the loose NEAR_ATM / 3%-buffer trigger
+        # must NOT override it — surfacing EXECUTE ROLL here would contradict the
+        # ROLL ANALYSIS table's own recommendation. Only an explicit ROLL rec,
+        # genuine ITM, or an at-strike short-dated/earnings position overrides a
+        # HOLD. (See CLAUDE.md "Challenge every recommendation — multi-perspective".)
+        advisor_says_hold = (
+            "HOLD" in advisor_rec
+            or rev.get("recommended_candidate_id") == "A"
+            or advisor_rec in ("", "WAIT", "WATCH")
+        )
         defensive = (
             "ROLL" in advisor_rec
             or "DEEP_ITM" in matrix_cell
-            or "NEAR_ATM" in matrix_cell
-            or position_at_or_past_strike
+            or genuinely_itm
             or (position_at_or_past_strike and 0 < _dte <= 14)
             or (position_at_or_past_strike
                 and _days_to_earn is not None and 0 < _days_to_earn <= 14)
+            or (not advisor_says_hold
+                and ("NEAR_ATM" in matrix_cell or position_at_or_past_strike))
         )
         if not defensive:
             # Quietly skip — Watch panel still shows the ROLL ANALYSIS table
@@ -773,10 +794,17 @@ def render_action_list(
                         embedded_tax = embedded_gain * ltcg_rate_local
                     break
 
+        # Tenor cap — don't surface a roll that locks the cap for years just to
+        # harvest long-dated time value. Core names (rolled year after year) may
+        # extend longer than wheel names.
+        _roll_cfg = (config_local.get("roll") or {})
+        _max_action_tenor = int(_roll_cfg.get("max_action_tenor_days", 120))
+        _max_tenor_for_pos = _max_action_tenor * 3 if is_core else _max_action_tenor
         best, _scores = rank_candidates(
             candidates, spot=underlying_spot or cur_strike_for_rank,
             is_core=is_core, embedded_tax_dollars=embedded_tax,
             min_credit_threshold=ROLL_CREDIT_THRESHOLD,
+            max_tenor_days=_max_tenor_for_pos,
         )
         if best:
             credit = best.get("netDollars", 0)
@@ -846,14 +874,33 @@ def render_action_list(
                 old_strike=cur_strike,
             )
 
-            # Headline
+            # Headline — option-type aware. For CALLs, higher strike = more
+            # cap headroom (defensive). For PUTs, higher strike = closer to
+            # ATM = MORE assignment risk (offensive, not defensive). Don't
+            # mislabel.
             is_calendar = (cur_strike == new_strike)
+            is_put = opt_type == "PUT"
+            higher_strike = new_strike > cur_strike
+
+            if is_put and higher_strike and not is_calendar:
+                # Surfacing a put-roll UP would guarantee/accelerate assignment.
+                # Skip this candidate entirely — the ranker shouldn't have
+                # surfaced it as a defensive move in the first place.
+                seen_contracts.add(contract)
+                continue
+
             if is_calendar:
                 roll_label = "Calendar roll (same strike, longer date)"
-            elif new_strike > cur_strike:
+            elif higher_strike:
+                # CALL only at this point (puts handled above)
                 roll_label = "Diagonal up-and-out (raises cap)"
             else:
-                roll_label = "Diagonal roll"
+                # Lower strike: for CALLs this is offensive (lowers cap), for
+                # PUTs this is defensive (further OTM = less assignment risk)
+                roll_label = (
+                    "Diagonal down-and-out (reduces assignment risk)"
+                    if is_put else "Diagonal down-and-out (lowers cap — offensive)"
+                )
             credit_label = (f"+${credit:,.0f} net credit"
                             if credit >= 0 else f"−${abs(credit):,.0f} net debit (paying for cushion)")
             items.append(
@@ -1034,6 +1081,14 @@ def render_action_list(
             n += 1
 
     # ---- 4. Matrix-recommended actions on remaining options (non-HOLD/non-WAIT) ----
+    # Per CLAUDE.md (Core holdings — no force-sell): for SHORT CALLs on a
+    # ticker in core_positions, NEVER recommend CLOSE. The user has explicitly
+    # said they roll core CCs year after year and don't want to realize the
+    # short-call loss. Pivot CLOSE → DEFENSIVE ROLL UP-AND-OUT.
+    core_tickers_actionable = set((
+        (snapshot_data or {}).get("_config", {}) or {}
+    ).get("core_positions", []) or [])
+
     actionable_decisions = {"CLOSE", "CLOSE_FOR_PROFIT", "ROLL_OUT", "ROLL_OUT_AND_DOWN",
                             "ROLL_OUT_AND_UP", "TAKE_ASSIGNMENT", "LET_EXPIRE"}
     for rev in options_reviews:
@@ -1041,6 +1096,163 @@ def render_action_list(
         if contract in seen_contracts:
             continue
         rec = rev.get("recommendation")
+
+        # CORE override: a CLOSE on a SHORT CALL of a core holding is wrong.
+        # Skip the CLOSE rendering — the upstream DEFENSIVE ROLL section
+        # (block #3) already would have surfaced a roll path if the matrix
+        # had recommended one. If block #3 didn't surface, render a stub
+        # here explaining why we won't CLOSE and pointing at the roll table.
+        opt_type = (rev.get("type") or "").upper()
+        underlying = rev.get("underlying") or contract.split("_")[0]
+        is_core_short_call = (
+            opt_type == "CALL"
+            and float(rev.get("qty", 0) or 0) < 0
+            and underlying in core_tickers_actionable
+        )
+        if is_core_short_call and rec in ("CLOSE", "CLOSE_FOR_PROFIT") and "GUARDRAIL_LOSS_STOP" in (rev.get("matrix_cell_id") or ""):
+            qty_local = abs(float(rev.get("qty", 0) or 0))
+            cur_local = float(rev.get("current_mid", 0) or 0)
+            ent_local = float(rev.get("entry_price", 0) or 0)
+            loss_dollars = (ent_local - cur_local) * 100.0 * qty_local if ent_local else 0
+            cur_strike_local = float(rev.get("strike") or 0)
+
+            # Pull real chain quotes via the canonical etrade-chain-fetcher
+            # for two roll candidates:
+            #   1. Same-strike +1yr calendar roll (max income, cap unchanged)
+            #   2. +$15-strike diagonal up +1yr (smaller credit, more cap)
+            same_strike_quote = None
+            up_strike_quote = None
+            up_strike_value = cur_strike_local + 15 if cur_strike_local else 0
+            try:
+                import importlib.util as _ilu
+                fetcher_path = Path(__file__).resolve().parents[3] / "etrade-chain-fetcher" / "scripts" / "fetch.py"
+                if fetcher_path.exists():
+                    spec = _ilu.spec_from_file_location("etrade_chain_fetcher", fetcher_path)
+                    mod = _ilu.module_from_spec(spec)
+                    sys.modules["etrade_chain_fetcher"] = mod
+                    spec.loader.exec_module(mod)
+                    if mod.is_available():
+                        cache = mod.ChainCache()
+                        # ±60 day tolerance for the 1-year roll target — equity
+                        # chains often have quarterly LEAPS rather than every
+                        # week, so a 30-day window can miss.
+                        target_exp = mod.choose_expiration(
+                            symbol=underlying, target_dte=365, tolerance_days=60, cache=cache,
+                        )
+                        if target_exp and cur_strike_local:
+                            same_strike_quote = mod.quote_contract(
+                                symbol=underlying, strike=cur_strike_local,
+                                expiration=target_exp, opt_type="CALL", cache=cache,
+                            )
+                            up_strike_quote = mod.quote_contract(
+                                symbol=underlying, strike=up_strike_value,
+                                expiration=target_exp, opt_type="CALL", cache=cache,
+                            )
+            except Exception:
+                pass
+
+            items.append(
+                f"{n}. **DEFENSIVE ROLL (core override)** {contract} — "
+                f"loss-stop triggered at ${cur_local:.2f}, but {underlying} is a core "
+                f"holding (policy: do NOT close; roll up-and-out year after year)"
+            )
+            items.append(
+                f"   - **Why:** Closing would realize a ${abs(loss_dollars):,.0f} short-term "
+                f"loss AND leave the {qty_local:.0f}00 shares uncapped. For core "
+                f"holdings with large embedded LTCG gains, the right move is a "
+                f"diagonal-up or same-strike calendar roll."
+            )
+
+            # Concrete order tickets with real bid/mid/ask
+            if same_strike_quote:
+                exp_iso = same_strike_quote["expiration"]
+                exp_pretty = exp_iso
+                try:
+                    exp_pretty = datetime.strptime(exp_iso, "%Y-%m-%d").strftime("%a %b %d '%y")
+                except Exception:
+                    pass
+                sto_bid = same_strike_quote["bid"]
+                sto_mid = same_strike_quote["mid"]
+                sto_ask = same_strike_quote["ask"]
+                net_per_share = sto_mid - cur_local
+                net_total = net_per_share * 100 * qty_local
+                items.append(
+                    f"   - **Option A (same-strike calendar, max income):** "
+                    f"BTC {int(qty_local)}× {underlying} ${cur_strike_local:g}C @ ${cur_local:.2f} mid; "
+                    f"STO {int(qty_local)}× {underlying} ${cur_strike_local:g}C exp **{exp_pretty}** "
+                    f"@ ${sto_mid:.2f} mid (bid ${sto_bid:.2f} / ask ${sto_ask:.2f}). "
+                    f"Net **{'+' if net_total >= 0 else '−'}${abs(net_total):,.0f} {'credit' if net_total >= 0 else 'debit'}** "
+                    f"({net_per_share:+.2f}/share). Cap stays ${cur_strike_local:g}."
+                )
+            if up_strike_quote and up_strike_value:
+                exp_iso = up_strike_quote["expiration"]
+                exp_pretty = exp_iso
+                try:
+                    exp_pretty = datetime.strptime(exp_iso, "%Y-%m-%d").strftime("%a %b %d '%y")
+                except Exception:
+                    pass
+                sto_bid = up_strike_quote["bid"]
+                sto_mid = up_strike_quote["mid"]
+                sto_ask = up_strike_quote["ask"]
+                net_per_share = sto_mid - cur_local
+                net_total = net_per_share * 100 * qty_local
+                items.append(
+                    f"   - **Option B (diagonal up-and-out, +${int(up_strike_value-cur_strike_local)} cap):** "
+                    f"BTC {int(qty_local)}× {underlying} ${cur_strike_local:g}C @ ${cur_local:.2f} mid; "
+                    f"STO {int(qty_local)}× {underlying} ${up_strike_value:g}C exp **{exp_pretty}** "
+                    f"@ ${sto_mid:.2f} mid (bid ${sto_bid:.2f} / ask ${sto_ask:.2f}). "
+                    f"Net **{'+' if net_total >= 0 else '−'}${abs(net_total):,.0f} {'credit' if net_total >= 0 else 'debit'}** "
+                    f"({net_per_share:+.2f}/share). Cap rises to ${up_strike_value:g}."
+                )
+            if same_strike_quote or up_strike_quote:
+                items.append(f"   - **Source:** Live E*TRADE chain")
+            else:
+                items.append(
+                    f"   - ⚠ E*TRADE chain unavailable for roll candidates — "
+                    f"verify quotes at broker before placing."
+                )
+            items.append(
+                f"   - **Tax framing:** rolling defers the realized loss; assignment "
+                f"at a higher strike means larger LTCG but on more cash."
+            )
+            seen_contracts.add(contract)
+            n += 1
+            continue
+
+        # A ROLL is a TWO-leg trade. Block #3 renders rolls that have priced
+        # candidates; if we reach here the matrix recommended a roll but no live
+        # target was available — render a roll DIRECTIVE, never a bare
+        # buy-to-close (which reads as a close and gives up the shares/cap).
+        _ROLL_DECISIONS = {"ROLL_OUT", "ROLL_OUT_AND_UP", "ROLL_UP_AND_OUT", "ROLL_OUT_AND_DOWN"}
+        if rec in _ROLL_DECISIONS:
+            qty = abs(float(rev.get("qty", 0) or 0))
+            cur_mid = float(rev.get("current_mid", 0) or 0)
+            up = ("UP" in rec)
+            down = ("DOWN" in rec)
+            direction = ("UP and out — raise the strike to preserve upside" if up
+                         else "DOWN and out — lower the strike to cut assignment risk" if down
+                         else "OUT in time — keep the strike")
+            new_side = "higher" if up else "lower" if down else "same"
+            items.append(f"{n}. **{rec}** {contract} — roll {direction}")
+            items.append(
+                f"   - **Why:** Decision matrix triggered `{rev.get('matrix_cell_id', '?')}` "
+                f"(regime + DTE + moneyness)."
+            )
+            items.append(
+                f"   - **Order (two legs):** Buy-to-Close {int(qty)}× {contract} (current mid "
+                f"${cur_mid:.2f}) **and** Sell-to-Open {int(qty)}× a {new_side}-strike call further "
+                f"out — pick the target from the **ROLL ANALYSIS** table / live chain. Do NOT place "
+                f"the buy-to-close on its own (that closes the position and gives up the cap)."
+            )
+            if up:
+                items.append(
+                    "   - Prefer a strike above spot for headroom and a tenor ≤120 days; "
+                    "a same-strike roll just re-caps you at today's level."
+                )
+            seen_contracts.add(contract)
+            n += 1
+            continue
+
         if rec in actionable_decisions:
             rationale = (rev.get("rationale") or "")[:140]
             # Derive a real buy-to-close ticket for CLOSE_FOR_PROFIT using the
@@ -1340,7 +1552,7 @@ def render_action_list(
                 # Approx protected delta-shares: contracts × |delta| × 100; with 0.20 delta SPY puts
                 protected_notional = (contracts or 0) * 0.20 * 100 * float(strike or 0)
                 items.append(
-                    f"{n}. **HEDGE** Buy {contracts}× {instr.replace('_', ' ').lower()} "
+                    f"{n}. **HEDGE** Buy {contracts}× {instr.split('_')[0].upper()} put "
                     f"${strike}P {exp_str} (~${cost_f:,.0f}; coverage {cov:.0%} → target 10%)"
                 )
                 # Yield via yield-calculator skill
@@ -1489,6 +1701,9 @@ def render_action_list(
         ledger_path = config_local.get("wash_sale_ledger_path")
         ec_today = (snapshot_data or {}).get("earnings_calendar", {}) or {}
         as_of_iso = date_str or datetime.now().strftime("%Y-%m-%d")
+        csp_technicals = (snapshot_data or {}).get("technicals", {}) or {}
+        csp_rsi_th = rsi_discipline.load_thresholds(config_local)
+        csp_rsi_gate_on = csp_rsi_th.get("enabled", True)
 
         # Pre-compute existing short-put exposure per ticker. We need this to
         # avoid stacking a 3rd put on a name that already has 2 layered short
@@ -1544,6 +1759,20 @@ def render_action_list(
                         f"${existing['total_collateral']:,.0f}. Stacking another "
                         f"layered put compounds assignment risk on a single name."
                     ),
+                })
+                continue
+
+            # RSI discipline gate. A pullback CSP is a put-sale; an overbought
+            # RSI (>70) blocks the new open (thin premium right before a
+            # reversal can whip the stock through the strike). Surface in the
+            # transparency footer rather than the action list.
+            _csp_rsi = rsi_discipline.rsi_for(ticker, csp_technicals)
+            _csp_rsi_assess = rsi_discipline.assess(_csp_rsi, "put", csp_rsi_th)
+            if csp_rsi_gate_on and _csp_rsi_assess.blocked:
+                _filtered_csps.append({
+                    "ticker": ticker,
+                    "verdict": "RSI_BLOCK",
+                    "reason": _csp_rsi_assess.reason,
                 })
                 continue
 
@@ -1656,8 +1885,9 @@ def render_action_list(
     #   (a) Trade-validator POOR/BLOCK verdicts (negative EV)
     #   (b) Existing-put-stack: skip names where user already has ≥2 short puts
     if _filtered_csps:
-        validator_rejects = [c for c in _filtered_csps if c.get("verdict") != "SKIPPED"]
+        validator_rejects = [c for c in _filtered_csps if c.get("verdict") not in ("SKIPPED", "RSI_BLOCK")]
         stack_skips = [c for c in _filtered_csps if c.get("verdict") == "SKIPPED"]
+        rsi_blocks = [c for c in _filtered_csps if c.get("verdict") == "RSI_BLOCK"]
         items.append("")
         if validator_rejects:
             names = ", ".join(
@@ -1668,14 +1898,26 @@ def render_action_list(
                 f"(negative expected value): {names}. Premium is too thin or strike too "
                 f"close to spot — wait for a better setup._"
             )
+        if rsi_blocks:
+            for c in rsi_blocks:
+                items.append(
+                    f"_📊 PULLBACK CSP {c['ticker']} blocked — {c.get('reason', 'RSI overbought')}_"
+                )
         if stack_skips:
             for c in stack_skips:
                 items.append(
                     f"_📚 PULLBACK CSP {c['ticker']} skipped — {c.get('reason', 'put-stack guard')}_"
                 )
 
-    if items:
-        lines.extend(items)
+    # RSI discipline display: append a side-aware RSI tag to every numbered
+    # action line. Annotate a display copy so the summary card still parses the
+    # un-annotated originals.
+    _rsi_tech = (snapshot_data or {}).get("technicals", {}) or {}
+    _rsi_th = rsi_discipline.load_thresholds(config_local)
+    display_items = rsi_discipline.annotate_action_lines(items, _rsi_tech, _rsi_th)
+
+    if display_items:
+        lines.extend(display_items)
     else:
         lines.append("- No urgent actions today. Hold and watch.")
 
@@ -1685,7 +1927,7 @@ def render_action_list(
         lines.append("")
         lines.append(fresh_warn)
 
-    # Append the total-impact summary card
+    # Append the total-impact summary card (uses un-annotated items)
     lines.extend(render_summary_card(items, snapshot_data))
 
     lines.append("")
@@ -1793,7 +2035,9 @@ def render_opportunities(new_ideas: list) -> list:
             label = f"**{ticker}**"
             if name and name != ticker:
                 label += f" — {name}"
-            lines.append(f"#### {label} (spot ${spot:.2f}{target_str})")
+            promo = " ✅ RSI favourable" if idea.get("rsi_decision") == "promote" else (
+                f" {idea.get('rsi_badge')}" if idea.get("rsi_badge") else "")
+            lines.append(f"#### {label} (spot ${spot:.2f}{target_str}){promo}")
             lines.append("")
             lines.append(
                 f"**SELL TO OPEN** {ticker} {exp_pretty} **${strike:g} PUT** "
@@ -1815,6 +2059,10 @@ def render_opportunities(new_ideas: list) -> list:
                 f"- Liquidity: OI {oi}, spread {spread:.1f}%"
                 + (f", IV {iv:.0f}%" if iv else "")
             )
+            if idea.get("rsi_14") is not None:
+                lines.append(
+                    f"- **RSI:** {idea.get('rsi_tag')} — {idea.get('rsi_note', '')}"
+                )
             rec_label = idea.get("raw_recommendation", "")
             age = idea.get("rec_age_days", 0)
             if rec_label:
@@ -1832,7 +2080,10 @@ def render_opportunities(new_ideas: list) -> list:
                 label = f"**{ticker}**"
                 if name and name != ticker:
                     label += f" ({name})"
-                lines.append(f"- {label}: {idea.get('rationale', '')}")
+                rsi_suffix = ""
+                if idea.get("rsi_14") is not None and "RSI" not in idea.get("rationale", ""):
+                    rsi_suffix = f"  · {idea.get('rsi_tag')}"
+                lines.append(f"- {label}: {idea.get('rationale', '')}{rsi_suffix}")
             lines.append("")
 
     return lines

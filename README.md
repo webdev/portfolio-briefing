@@ -58,22 +58,27 @@ backed by real chain data, not synthesized strikes.
 git clone git@github.com:webdev/portfolio-briefing.git
 cd portfolio-briefing
 
-# 2. Install Python deps (3.10+)
-pip install pyetrade yfinance python-dotenv structlog pyyaml
+# 2. Install deps with uv (pins Python 3.12 via .python-version + uv.lock).
+#    Install uv first if needed: https://docs.astral.sh/uv/getting-started/
+uv sync
+#    (Fallback without uv, needs Python 3.10+:
+#       pip install pyetrade yfinance structlog pyyaml requests)
 
 # 3. Set up E*TRADE consumer credentials
 cp .env.example .env
 # Edit .env, paste in your ETRADE_CONSUMER_KEY and ETRADE_CONSUMER_SECRET
 # from https://us.etrade.com/etx/ris/apikey
+# (Optional) export FMP_API_KEY=... to enable intrinsic-value (DCF + analyst
+# targets) on every single-stock recommendation.
 
 # 4. One-time interactive OAuth (opens browser, asks for verifier code)
-cd skills/daily-portfolio-briefing/scripts
-python3 etrade_auth.py
+uv run python skills/daily-portfolio-briefing/scripts/etrade_auth.py
 # Tokens saved to ~/.config/portfolio-briefing/etrade_tokens.json
 
-# 5. Run a briefing
-cd ..
-python3 scripts/run_briefing.py --config config/briefing.yaml --etrade-live
+# 5. Run a briefing — from the skill dir so reports/ + state/ land there.
+#    (uv walks up to find the repo-root project, so the venv is still used.)
+cd skills/daily-portfolio-briefing
+uv run python scripts/run_briefing.py --etrade-live --refresh-scout
 # Output lands at:
 #   reports/daily/briefing_YYYY-MM-DD.md (in-repo)
 #   ~/Documents/briefings/latest.md      (delivery)

@@ -5,7 +5,39 @@ For each option position, detect meaningful scenarios and generate 0-3 short not
 Patterns: earnings imminent, profit captured, ITM covered calls, etc.
 """
 
+import sys
 from datetime import datetime
+from pathlib import Path
+
+try:
+    from analysis import rsi_discipline
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from analysis import rsi_discipline
+
+
+def _rsi_management_note(rsi: float | None, opt_type: str, qty: float) -> str | None:
+    """Disciplined RSI read for an EXISTING short option (never a gate).
+
+    Short PUT: oversold/falling momentum pushes the stock toward the strike
+    (assignment risk rising); overbought means the put is safe.
+    Short CALL: overbought/extended pushes toward the cap (covered-call
+    assignment, which keeps premium + strike gain); oversold means it's safe.
+    """
+    if rsi is None or qty >= 0:  # only short positions
+        return None
+    opt_type = (opt_type or "").upper()
+    if opt_type == "PUT":
+        if rsi <= 30:
+            return f"RSI {rsi:.0f} (oversold) — momentum is pressing toward your short-put strike; watch support / assignment risk."
+        if rsi >= 70:
+            return f"RSI {rsi:.0f} (overbought) — well clear of your short-put strike; theta working in your favour."
+    elif opt_type == "CALL":
+        if rsi >= 70:
+            return f"RSI {rsi:.0f} (overbought) — stock extended toward your call strike; assignment keeps premium + strike gain (roll up to keep shares)."
+        if rsi <= 30:
+            return f"RSI {rsi:.0f} (oversold) — short call is safe; little near-term cap risk."
+    return None
 
 
 def _get_earnings_days_away(underlying: str, snapshot_data: dict) -> int | None:
@@ -172,6 +204,7 @@ def render_watch_with_commentary(
         markdown lines ready to concatenate
     """
     lines = ["## Watch / Portfolio Review", ""]
+    technicals = (snapshot_data or {}).get("technicals", {}) or {}
 
     if equity_reviews:
         lines.append("### Equities")
@@ -183,7 +216,9 @@ def render_watch_with_commentary(
             pl_pct = review.get("pl_pct", 0) * 100
             rec = review.get("recommendation")
             third_party = review.get("third_party_rec")
-            lines.append(f"- **{ticker}** @ ${price:.2f} — {weight:.1f}% ({pl_pct:+.1f}%) → **{rec}**")
+            _eq_rsi = rsi_discipline.rsi_for(ticker, technicals)
+            _eq_rsi_suffix = f"  · {rsi_discipline.tag(_eq_rsi)}" if _eq_rsi is not None else ""
+            lines.append(f"- **{ticker}** @ ${price:.2f} — {weight:.1f}% ({pl_pct:+.1f}%) → **{rec}**{_eq_rsi_suffix}")
             if third_party:
                 lines.append(f"  - {third_party}")
         lines.append("")
@@ -202,6 +237,8 @@ def render_watch_with_commentary(
             entry = review.get("entry_price")
             cell = review.get("matrix_cell_id")
             qty = review.get("qty", 0)
+            underlying = review.get("underlying") or (contract.split("_")[0] if contract and "_" in contract else "")
+            opt_rsi = rsi_discipline.rsi_for(underlying, technicals)
 
             # Compute P&L for the entire position: (entry − mid) × 100 × |qty|.
             # This is from a SHORT seller's perspective: positive = profit.
@@ -229,6 +266,8 @@ def render_watch_with_commentary(
                         header += f" exp {exp}"
                 if dte is not None:
                     header += f", {dte}d left"
+            if opt_rsi is not None:
+                header += f"  · {rsi_discipline.tag(opt_rsi)}"
 
             lines.append(header)
 
@@ -236,6 +275,11 @@ def render_watch_with_commentary(
             if pl_dollars is not None and pl_pct is not None:
                 lines.append(f"  P&L: +${pl_dollars:,.0f} ({pl_pct:+.0f}%) | {dte}d left" if pl_dollars > 0
                             else f"  P&L: ${pl_dollars:,.0f} ({pl_pct:.0f}%) | {dte}d left")
+
+            # Disciplined RSI read for this short position (context, never a gate)
+            rsi_note = _rsi_management_note(opt_rsi, opt_type, qty)
+            if rsi_note:
+                lines.append(f"  • {rsi_note}")
 
             # Commentary
             commentary = generate_commentary(review, snapshot_data, equity_reviews)

@@ -105,3 +105,24 @@ def test_derive_state_deep_otm():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_row_matches_side_gate_put_row_rejects_call_state():
+    """A PUT matrix row must NOT match a short-CALL state (the SMH_CALL →
+    PUT_..._ITM_NEUTRAL_ROLL_OUT inversion bug)."""
+    from decision_walker import row_matches, DerivedState
+    call_state = DerivedState(
+        position_type="SHORT_CALL", moneyness="ITM", dte_band="MID_DTE",
+        profit_captured_pct=0.0, iv_regime="NORMAL", outlook="NEUTRAL",
+        regime="NORMAL", delta=0.5, dte=23, current_mid=30.0, entry_price=16.9,
+        strike_price=595.0, underlying_price=597.0,
+    )
+    put_row = {"id": "PUT_NORMAL_ITM_NEUTRAL_ROLL_OUT", "moneyness": "ITM",
+               "outlook": "NEUTRAL", "regime": "NORMAL", "dte_band": ["MID_DTE", "LONG_DTE"]}
+    assert row_matches(put_row, call_state) is False
+    call_row = {"id": "CALL_NORMAL_ITM_ROLL_UP", "moneyness": "ITM",
+                "outlook": ["NEUTRAL", "BULLISH"], "regime": "NORMAL",
+                "dte_band": ["MID_DTE", "LONG_DTE"]}
+    assert row_matches(call_row, call_state) is True
+    # DEFAULT_HOLD (no side prefix) applies to either side
+    assert row_matches({"id": "DEFAULT_HOLD", "profit_min": 0.0}, call_state) is True

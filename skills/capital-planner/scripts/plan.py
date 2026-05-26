@@ -802,6 +802,75 @@ def extract_actions_from_action_list(lines: list[str], rules: dict | None = None
 
 
 # --------------------------------------------------------------------------
+# New-put exposure gate — coverage + concentration
+#
+# The Capital Plan must not surface a NEW put (NEW_CSP / LT_CSP) that the rest
+# of the briefing forbids. Two hard gates, mirroring the Red Flags / wheelhouz
+# rules so the plan can't contradict them:
+#   1. Stress coverage: if cash ÷ put-obligation is below the red threshold
+#      (0.50×), do not add NEW put obligation — the book can't cover what it
+#      already has.
+#   2. Concentration: a NEW put locks collateral that, if assigned, becomes
+#      shares. existing_weight% + new_collateral/NLV must stay under the
+#      per-name cap (10% NLV).
+# Existing-position management (CLOSE/ROLL/TRIM/HEDGE) is never gated here.
+# --------------------------------------------------------------------------
+
+_NEW_PUT_KINDS = {"NEW_CSP", "LT_CSP"}
+
+
+def _apply_new_put_gate(
+    action: CapitalAction,
+    *,
+    weights: dict[str, float],
+    nlv: float,
+    coverage_ratio: float | None,
+    rules: dict,
+) -> CapitalAction:
+    """Set skip_reason + tier=4 on a NEW put that breaches coverage/concentration.
+
+    No-op for non-new-put kinds and for actions already skipped upstream.
+    """
+    if action.kind not in _NEW_PUT_KINDS:
+        return action
+    if action.skip_reason:  # already filtered by an upstream classifier
+        return action
+
+    gate = (rules.get("new_put_gate") or {})
+    red = gate.get(
+        "coverage_floor",
+        ((rules.get("stress_coverage") or {}).get("red_threshold", 0.50)),
+    )
+    cap_pct = gate.get(
+        "concentration_cap_pct",
+        ((rules.get("concentration") or {}).get("cap_pct", 10.0)),
+    )
+
+    # 1) Coverage gate — only enforceable when we know the ratio.
+    if coverage_ratio is not None and coverage_ratio < red:
+        action.tier = 4
+        action.skip_reason = (
+            f"stress coverage {coverage_ratio:.2f}× < {red:.2f}× — "
+            f"no new put obligation until covered"
+        )
+        return action
+
+    # 2) Concentration gate — existing weight + new collateral as % of NLV.
+    if nlv > 0:
+        existing = action.weight_pct
+        if existing is None:
+            existing = weights.get(action.ticker, 0.0)
+        projected = existing + (action.new_collateral_locked / nlv * 100.0)
+        if projected >= cap_pct:
+            action.tier = 4
+            action.skip_reason = (
+                f"would put {action.ticker} at ~{projected:.1f}% NLV "
+                f"(> {cap_pct:.0f}% cap) if assigned"
+            )
+    return action
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -897,6 +966,15 @@ def build_capital_plan(
     # 4) Hedges as structured fallback (only if not already from action list)
     if not any(a.kind == "HEDGE" for a in raw_actions):
         raw_actions.extend(_classify_hedge(hedge_recs or [], coverage_ratio, rules))
+
+    # 5) New-put exposure gate — coverage + concentration. A NEW_CSP / LT_CSP
+    # that breaches the stress-coverage floor or the per-name cap is demoted to
+    # skipped so the plan never contradicts the Red Flags / concentration rules.
+    for a in raw_actions:
+        _apply_new_put_gate(
+            a, weights=weights, nlv=nlv,
+            coverage_ratio=coverage_ratio, rules=rules,
+        )
 
     # Split into active vs skipped
     for a in raw_actions:

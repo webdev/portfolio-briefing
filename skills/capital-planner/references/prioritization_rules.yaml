@@ -15,6 +15,13 @@ stress_coverage:
   red_threshold: 0.50    # Below this, hedges become CRITICAL
   yellow_threshold: 0.70
 
+# New-put exposure gate. A NEW_CSP / LT_CSP is demoted to Skipped when it would
+# breach either bar — so the Capital Plan can never recommend a new put that the
+# Red Flags / concentration rules forbid elsewhere in the briefing.
+new_put_gate:
+  coverage_floor: 0.50         # No new put obligation when stress coverage < this
+  concentration_cap_pct: 10.0  # existing weight + new collateral must stay under this
+
 profit_capture:
   early_close_min_pct: 0.30  # ≥30% capture → close-winner CRITICAL on short-dated
 

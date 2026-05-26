@@ -187,6 +187,7 @@ def main():
         print("[Step 6.6] Running thematic scout (cached 24h)...")
         recs_map = {}
         held_weights = {}
+        existing_short_puts: dict = {}
         nlv = float(snapshot_data.get("balance", {}).get("accountValue", 0) or 0)
         for r in (recommendations_list or []):
             t = r.get("ticker")
@@ -194,17 +195,28 @@ def main():
             if t and rec:
                 recs_map[str(t).upper()] = str(rec).upper()
         for p in (snapshot_data.get("positions") or []):
-            if p.get("assetType") != "EQUITY":
-                continue
-            sym = (p.get("symbol") or "").upper()
-            qty = float(p.get("qty", 0) or 0)
-            price = float(p.get("price", 0) or 0)
-            if sym and qty > 0 and price > 0 and nlv > 0:
-                held_weights[sym] = held_weights.get(sym, 0) + (qty * price / nlv * 100)
+            if p.get("assetType") == "EQUITY":
+                sym = (p.get("symbol") or "").upper()
+                qty = float(p.get("qty", 0) or 0)
+                price = float(p.get("price", 0) or 0)
+                if sym and qty > 0 and price > 0 and nlv > 0:
+                    held_weights[sym] = held_weights.get(sym, 0) + (qty * price / nlv * 100)
+            elif p.get("assetType") == "OPTION" and (p.get("type") or "").upper() == "PUT":
+                # Short-put tally for the scout's put-stack guard
+                qty = float(p.get("qty", 0) or 0)
+                if qty >= 0:
+                    continue
+                t = (p.get("underlying") or "").upper()
+                if not t:
+                    continue
+                entry = existing_short_puts.setdefault(t, {"count": 0, "strikes": []})
+                entry["count"] += abs(qty)
+                entry["strikes"].append(float(p.get("strike", 0) or 0))
         scout_payload = run_thematic_research(
             snapshot_dir=snapshot_dir,
             recs_map=recs_map,
             held_weights=held_weights,
+            existing_short_puts=existing_short_puts,
             refresh=args.refresh_scout,
             ttl_hours=24,
         )
@@ -305,6 +317,41 @@ def main():
 
         print(f"\nBriefing written to: {actual_output_path}")
         print(f"Machine-readable JSON: {json_output_path}")
+
+        # Step 8.5: Per-company Candidate Research report (separate dated file).
+        # Reuses the scout's research; adds FMP valuation (cached) + RSI-gated
+        # entries. Fail-soft — never blocks the briefing.
+        try:
+            import os as _os_c
+            import shutil as _shutil_c
+            from datetime import datetime as _dt_c
+            from steps import candidate_research as _cand
+            from analysis import intrinsic_value as _iv_c
+
+            _cand_tickers = _cand.single_stock_tickers(scout_payload, config)
+            _cand_fv: dict = {}
+            _fmp_c = _os_c.getenv("FMP_API_KEY")
+            if _cand_tickers and _fmp_c:
+                _cand_fv = _iv_c.get_fair_values(
+                    _cand_tickers,
+                    cache_path=snapshot_dir.parent / "intrinsic_value_cache.json",
+                    api_key=_fmp_c,
+                )
+            _cand_md = _cand.render_candidate_report(
+                scout_payload, fv_by_ticker=_cand_fv, config=config,
+                generated_at=_dt_c.now().strftime("%A, %B %d, %Y · %I:%M %p"),
+            )
+            _cand_path = output_path.parent / f"candidates_{today_date_str}.md"
+            _cand_path.write_text(_cand_md)
+            print(f"Candidate research: {_cand_path}")
+            if not args.no_delivery and not is_draft:
+                _deliv = (Path(args.delivery_dir).expanduser() if args.delivery_dir
+                          else Path(_os_c.getenv("PORTFOLIO_BRIEFING_DELIVERY_DIR",
+                                                 str(Path.home() / "Documents" / "briefings"))).expanduser())
+                _deliv.mkdir(parents=True, exist_ok=True)
+                _shutil_c.copy(_cand_path, _deliv / _cand_path.name)
+        except Exception as _ce:
+            print(f"  WARNING: candidate research failed: {_ce}", file=sys.stderr)
 
         if is_draft:
             print(f"\nWARNING: Briefing marked as DRAFT due to quality gate issues.")

@@ -18,6 +18,12 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+try:
+    from analysis import rsi_discipline
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from analysis import rsi_discipline
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _SCOUT_SCRIPT = _REPO_ROOT / "skills" / "thematic-scout" / "scripts" / "scout.py"
@@ -64,6 +70,7 @@ def run_thematic_research(
     snapshot_dir: Path,
     recs_map: dict | None = None,
     held_weights: dict | None = None,
+    existing_short_puts: dict | None = None,
     refresh: bool = False,
     ttl_hours: int = 24,
 ) -> dict | None:
@@ -109,6 +116,7 @@ def run_thematic_research(
 
     recs_map = recs_map or {}
     held_weights = held_weights or {}
+    existing_short_puts = existing_short_puts or {}
 
     # Build job list
     jobs: list[tuple[str, str]] = []
@@ -122,7 +130,8 @@ def run_thematic_research(
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="scout") as ex:
         future_to_job = {
             ex.submit(
-                scout._research_ticker, ticker, theme, verdict_cfg, recs_map, held_weights
+                scout._research_ticker, ticker, theme, verdict_cfg,
+                recs_map, held_weights, existing_short_puts
             ): (theme, ticker)
             for (theme, ticker) in jobs
         }
@@ -162,18 +171,335 @@ def run_thematic_research(
     return payload
 
 
-def render_scout_section(payload: dict | None, max_per_theme: int = 4) -> list[str]:
+# --------------------------------------------------------------------------
+# Market-read helpers (deterministic — synthesize a "what's happening" read
+# from the technicals the scout already computed: spot, rsi_14, iv_rank,
+# sma_200, drawdown_pct, fivedayret_pct). No network, no LLM.
+# --------------------------------------------------------------------------
+
+def _vs_sma_pct(r: dict) -> float | None:
+    sma = r.get("sma_200")
+    spot = r.get("spot")
+    if sma and spot:
+        return (spot - sma) / sma * 100.0
+    return None
+
+
+def _trend_phrase(r: dict) -> str | None:
+    pct = _vs_sma_pct(r)
+    if pct is None:
+        return None
+    if pct >= 15:
+        return f"well above 200-SMA (+{pct:.0f}%)"
+    if pct >= 0:
+        return f"above 200-SMA (+{pct:.0f}%)"
+    if pct > -10:
+        return f"below 200-SMA ({pct:.0f}%)"
+    return f"well below 200-SMA ({pct:.0f}%)"
+
+
+def _rsi_phrase(rsi: float | None) -> str | None:
+    if rsi is None:
+        return None
+    if rsi >= 70:
+        return f"RSI {rsi:.0f} overbought"
+    if rsi >= 60:
+        return f"RSI {rsi:.0f} strong"
+    if rsi >= 45:
+        return f"RSI {rsi:.0f} neutral"
+    if rsi >= 35:
+        return f"RSI {rsi:.0f} soft"
+    return f"RSI {rsi:.0f} oversold"
+
+
+def _highs_phrase(r: dict) -> str | None:
+    dd = r.get("drawdown_pct")
+    if dd is None:
+        return None
+    if dd <= 3:
+        return "at/near 52w highs"
+    if dd <= 10:
+        return f"{dd:.0f}% off highs"
+    if dd <= 25:
+        return f"{dd:.0f}% pullback"
+    return f"{dd:.0f}% drawdown"
+
+
+def _setup_label(r: dict) -> str:
+    """One-word characterization of the ticker's market posture."""
+    rsi = r.get("rsi_14")
+    dd = r.get("drawdown_pct")
+    five = r.get("fivedayret_pct")
+    vs_sma = _vs_sma_pct(r)
+    # Extended: strong + stretched, near highs
+    if rsi is not None and rsi >= 70 and (dd is None or dd <= 6):
+        return "Extended"
+    # Breaking out: moving up hard and near highs
+    if five is not None and five >= 4 and (dd is not None and dd <= 8):
+        return "Breaking out"
+    # Oversold bounce candidate
+    if rsi is not None and rsi < 35:
+        return "Oversold"
+    if dd is not None and dd >= 25:
+        return "Deep pullback"
+    if five is not None and five <= -4:
+        return "Selling off"
+    if rsi is not None and rsi >= 55 and (vs_sma is None or vs_sma >= 0):
+        return "Trending up"
+    if vs_sma is not None and vs_sma < -10:
+        return "Downtrend"
+    return "Range-bound"
+
+
+def _market_setup_read(r: dict) -> str:
+    """Synthesize 'Label: trend, RSI, position-vs-highs[, IV]' for one ticker."""
+    bits = [p for p in (_trend_phrase(r), _rsi_phrase(r.get("rsi_14")), _highs_phrase(r)) if p]
+    iv = r.get("iv_rank")
+    if iv is not None and iv >= 60:
+        bits.append(f"IV rank {iv:.0f} (rich premium)")
+    body = ", ".join(bits)
+    return f"{_setup_label(r)}: {body}" if body else _setup_label(r)
+
+
+def _action_read(r: dict) -> str:
+    """Translate a ticker's state into an entry/exit/manage verdict — NO state
+    is left merely descriptive (see CLAUDE.md 'Everything actionable'). Read
+    asymmetrically per the RSI discipline: overbought blocks new buys/CSPs but
+    favours covered-call writing / trimming; the pullback zone favours entry;
+    a falling knife warns. Generic across holding status (entry if you don't
+    own it, manage/exit if you do)."""
+    rsi = r.get("rsi_14")
+    iv = r.get("iv_rank")
+    dd = r.get("drawdown_pct")
+    rich = " (rich IV)" if (iv is not None and iv >= 60) else ""
+
+    # Thesis-broken: deep drawdown with no strength → review/exit, not a fresh entry.
+    if dd is not None and dd >= 30 and (rsi is None or rsi < 45):
+        return "thesis check — deep drawdown without strength; if held, review/trim, not a fresh entry"
+    if rsi is None:
+        return "no RSI read — confirm momentum before entering or exiting"
+    if rsi >= 70:
+        return f"overheated — no new buy/CSP (chasing); if held, WRITE COVERED CALLS{rich} or TRIM into strength"
+    if rsi >= 60:
+        return f"extended — wait for a pullback to enter; if held, covered calls attractive{rich}"
+    if rsi >= 50:
+        return "neutral-to-firm — no entry edge yet; hold/monitor"
+    if rsi >= 35:
+        return "pullback zone — favourable for a CSP/BUY entry; confirm support"
+    if rsi >= 25:
+        return "oversold — entry favoured but momentum weak; size small / confirm a base"
+    return "falling knife (RSI <25) — wait for stabilization before entry; if held, stay defensive"
+
+
+def _action_tag(rsi: float | None) -> str:
+    """Compact entry/exit verb for the theme-pulse leader (concise form of
+    _action_read)."""
+    if rsi is None:
+        return "verify"
+    if rsi >= 70:
+        return "calls/trim"      # overbought — write calls or trim, no new buy
+    if rsi >= 60:
+        return "wait"            # extended — entry on a pullback
+    if rsi >= 50:
+        return "monitor"
+    if rsi >= 35:
+        return "entry zone"      # pullback — CSP/BUY favoured
+    if rsi >= 25:
+        return "entry (small)"
+    return "falling knife"
+
+
+def _fresh_theme_meta() -> dict | None:
+    """Read theme metadata (name/group/anchors/etfs) fresh from theme_universes.yaml
+    so config edits show immediately. Returns None if the rules file isn't readable."""
+    try:
+        import yaml as _yaml
+        if _SCOUT_RULES.exists():
+            data = _yaml.safe_load(_SCOUT_RULES.read_text()) or {}
+            return data.get("themes") or None
+    except Exception:
+        return None
+    return None
+
+
+def _live_results(results_by_theme: dict) -> list[dict]:
+    """All usable results, de-duplicated by ticker.
+
+    A ticker can anchor several themes (e.g. ARM in semis + applications, AVGO
+    in semis + applications, CRWD in applications + cybersecurity). The
+    cross-theme aggregate (breadth, hottest/cooling movers, RSI posture) must
+    count each name once; the per-theme pulse below still uses the raw
+    per-theme lists so a name correctly shows up under each of its themes.
+    """
+    out = []
+    seen: set[str] = set()
+    for results in results_by_theme.values():
+        for r in results:
+            if (r.get("verdict") or "").startswith("NO DATA"):
+                continue
+            if r.get("spot") is None:
+                continue
+            tk = (r.get("ticker") or "").upper()
+            if tk in seen:
+                continue
+            seen.add(tk)
+            out.append(r)
+    return out
+
+
+def _theme_avg_5d(results: list[dict]) -> float | None:
+    vals = [r["fivedayret_pct"] for r in results
+            if r.get("fivedayret_pct") is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _render_market_pulse(results_by_theme: dict, themes_meta: dict) -> list[str]:
+    """Cross-theme narrative + hottest/cooling movers + per-theme pulse.
+
+    This is the 'learn what's going on in the market' read the user asked for:
+    it characterizes each ticker's own market setup (independent of holdings).
+    """
+    live = _live_results(results_by_theme)
+    movers = [r for r in live if r.get("fivedayret_pct") is not None]
+    if not movers:
+        return []
+
+    lines: list[str] = ["### 📊 Market Pulse", ""]
+
+    # Breadth + RSI posture across the analyzed universe
+    n = len(movers)
+    up = sum(1 for r in movers if r["fivedayret_pct"] > 0)
+    overbought = [r for r in live if (r.get("rsi_14") or 0) >= 70]
+    oversold = [r for r in live if r.get("rsi_14") is not None and r["rsi_14"] < 35]
+
+    # Per-theme average momentum → hottest / coldest theme
+    theme_avgs: list[tuple[str, float]] = []
+    for theme_key, results in results_by_theme.items():
+        avg = _theme_avg_5d([r for r in results if r.get("spot") is not None])
+        if avg is not None and results:
+            name = themes_meta.get(theme_key, {}).get("name", theme_key)
+            theme_avgs.append((name, avg))
+    theme_avgs.sort(key=lambda t: t[1], reverse=True)
+
+    breadth_pct = up / n * 100.0
+    breadth_word = ("broadly bid" if breadth_pct >= 65 else
+                    "mixed" if breadth_pct >= 40 else "broadly soft")
+    narrative = (
+        f"_Across {n} names: **{up}/{n} ({breadth_pct:.0f}%) green over the past week** "
+        f"— breadth is {breadth_word}._"
+    )
+    lines.append(narrative)
+    if theme_avgs:
+        hot = theme_avgs[0]
+        cold = theme_avgs[-1]
+        lines.append(
+            f"_Hottest theme: **{hot[0]}** ({hot[1]:+.1f}% avg 5d). "
+            f"Coldest: **{cold[0]}** ({cold[1]:+.1f}% avg 5d)._"
+        )
+    lines.append(
+        f"_RSI posture: {len(overbought)} overbought (>70), "
+        f"{len(oversold)} oversold (<35) — "
+        + ("plenty stretched, chase carefully." if len(overbought) > len(oversold)
+           else "more washed-out than frothy." if len(oversold) > len(overbought)
+           else "balanced.") + "_"
+    )
+    lines.append("")
+
+    # Hottest names (top positive movers)
+    movers.sort(key=lambda r: r["fivedayret_pct"], reverse=True)
+    hottest = [r for r in movers if r["fivedayret_pct"] > 0][:8]
+    if hottest:
+        lines.append("**🔥 Hottest names** (5-day momentum):")
+        lines.append("")
+        for r in hottest:
+            lines.append(
+                f"- 🔥 `{r['ticker']}` · ${r['spot']:.2f} · "
+                f"**{r['fivedayret_pct']:+.1f}% 5d** — {_market_setup_read(r)}"
+            )
+            lines.append(f"  - 🎬 **Action:** {_action_read(r)}")
+        lines.append("")
+
+    # Cooling / pulling back (most negative movers)
+    cooling = [r for r in reversed(movers) if r["fivedayret_pct"] < 0][:6]
+    if cooling:
+        lines.append("**🧊 Cooling / pulling back:**")
+        lines.append("")
+        for r in cooling:
+            lines.append(
+                f"- 🧊 `{r['ticker']}` · ${r['spot']:.2f} · "
+                f"**{r['fivedayret_pct']:+.1f}% 5d** — {_market_setup_read(r)}"
+            )
+            lines.append(f"  - 🎬 **Action:** {_action_read(r)}")
+        lines.append("")
+
+    # Theme-by-theme one-line pulse, grouped
+    lines.append("**Theme-by-theme pulse:**")
+    lines.append("")
+    current_group: str | None = None
+    for theme_key, results in results_by_theme.items():
+        usable = [r for r in results if r.get("spot") is not None]
+        if not usable:
+            continue
+        meta = themes_meta.get(theme_key, {})
+        name = meta.get("name", theme_key)
+        group = meta.get("group")
+        if group and group != current_group:
+            lines.append(f"_{group}_")
+            current_group = group
+        avg = _theme_avg_5d(usable)
+        leader = max(
+            (r for r in usable if r.get("fivedayret_pct") is not None),
+            key=lambda r: r["fivedayret_pct"], default=None,
+        )
+        tag = ("running hot" if (avg is not None and avg >= 2) else
+               "cooling" if (avg is not None and avg <= -2) else "mixed")
+        avg_str = f"{avg:+.1f}% avg 5d" if avg is not None else "n/a"
+        if leader is not None and leader.get("fivedayret_pct") is not None:
+            _lret = leader["fivedayret_pct"]
+            _lrsi = leader.get("rsi_14")
+            if _lrsi is not None:
+                lead_str = (f"leader `{leader['ticker']}` {_lret:+.1f}%, "
+                            f"RSI {_lrsi:.0f} → {_action_tag(_lrsi)}")
+            else:
+                lead_str = f"leader `{leader['ticker']}` {_lret:+.1f}%"
+        else:
+            lead_str = "no clear leader"
+        lines.append(f"- **{name}** — {avg_str} ({tag}); {lead_str}")
+        # Constituent companies (the curated anchors) + the ETFs that cover them.
+        anchors = meta.get("anchors") or []
+        if anchors:
+            shown = ", ".join(str(a) for a in anchors[:12])
+            extra = f" +{len(anchors) - 12} more" if len(anchors) > 12 else ""
+            lines.append(f"  - Companies: {shown}{extra}")
+        etfs = meta.get("etfs") or []
+        lines.append(
+            "  - ETFs: " + (", ".join(str(e) for e in etfs) if etfs
+                            else "— (no dedicated theme ETF; constituents sit in broad sector funds)")
+        )
+    lines.append("")
+
+    return lines
+
+
+def render_scout_section(payload: dict | None, max_per_theme: int = 4,
+                         config: dict | None = None,
+                         include_shortlist: bool = True) -> list[str]:
     """Render the thematic-research section for the daily briefing.
 
-    Compact view — only BUY / CSP ENTRY picks are shown by default. Full
-    detail (including AVOIDs and NEUTRAL/WATCH) lives in the standalone
+    Two parts:
+      1. Market Pulse — a deterministic 'what's happening across themes' read:
+         breadth, hottest/coldest theme, RSI posture, hottest & cooling movers
+         (each with its own market-setup read), and a per-theme pulse line.
+      2. Actionable shortlist — only BUY / CSP ENTRY picks, RSI-hook gated.
+
+    Full detail (including AVOIDs and NEUTRAL/WATCH) lives in the standalone
     scout report at ~/Documents/briefings/scout_DATE.md.
     """
     if not payload:
         return []
 
     lines = [
-        "## 🔭 Thematic Scout — Watchlist Across Themes",
+        "## 🔭 Thematic Scout — Market Read Across Themes",
         "",
     ]
     summary = payload.get("summary") or {}
@@ -191,16 +517,50 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4) -> list[s
         f"{len(payload.get('results_by_theme', {}))} themes._"
     )
     lines.append("")
+    if include_shortlist:
+        lines.append(
+            "_Full detail (including WATCH/AVOID) in "
+            "`~/Documents/briefings/scout_DATE.md`. Market read first, then the "
+            "actionable shortlist._"
+        )
+    else:
+        lines.append(
+            "_This is the **market read** (context, not orders): breadth, rotation, and "
+            "each name's own setup. Actionable trades are in the **🎯 Candidate Trades** "
+            "section below. Full per-company detail in `~/Documents/briefings/scout_DATE.md`._"
+        )
     lines.append(
-        "_Full detail (including WATCH/AVOID) in "
-        "`~/Documents/briefings/scout_DATE.md`. Below is the actionable shortlist._"
+        "_📋 Per-company candidate research (all theme companies — RSI-gated entries "
+        "+ FMP valuation): `~/Documents/briefings/candidates_DATE.md`._"
     )
     lines.append("")
 
-    themes_meta = payload.get("themes", {})
+    # Theme metadata (name / group / anchors / etfs) is CONFIG, not data — read
+    # it fresh from the YAML so edits (e.g. newly-verified ETFs) show on the next
+    # run without waiting for the 24h scout cache to expire. The cached payload
+    # still supplies the per-ticker results.
+    themes_meta = _fresh_theme_meta() or payload.get("themes", {})
     results_by_theme = payload.get("results_by_theme", {})
 
+    # Part 1: Market Pulse — the "what's happening across the market" read.
+    lines.extend(_render_market_pulse(results_by_theme, themes_meta))
+
+    # Part 2: Actionable shortlist (RSI-hook gated). Skipped when the daily
+    # briefing carries a richer Candidate Trades section instead (the standalone
+    # scout report / web app still renders the shortlist via the default).
+    if not include_shortlist:
+        return lines
+    lines.append("### 🎯 Actionable shortlist")
+    lines.append("")
+
     actionable_prefixes = ("BUY", "CSP")
+
+    # RSI hook: CSP entries are put-sales, BUY picks are equity buys. The hook
+    # removes RSI-unfavorable picks (overbought) into a footer and promotes
+    # favored ones. Standard wheel bands unless config overrides them.
+    rsi_th = rsi_discipline.load_thresholds(config)
+    rsi_gate_on = rsi_th.get("enabled", True)
+    rsi_removed: list[dict] = []
 
     # Group themes by their `group:` field for visual hierarchy in the report.
     # Preserves YAML ordering within each group.
@@ -233,10 +593,18 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4) -> list[s
         lines.append("")
 
         for r in actionable[:max_per_theme]:
-            emoji = "💎" if r.get("verdict", "").startswith("CSP") else "🟢"
+            verdict = r.get("verdict", "")
+            side = "put" if verdict.startswith("CSP") else "buy"
+            rv = rsi_discipline.hook(side, r.get("rsi_14"), rsi_th)
+            if rsi_gate_on and rv.removed:
+                rsi_removed.append({"ticker": r.get("ticker"), "verdict": verdict,
+                                    "reason": rv.reason})
+                continue
+            emoji = "💎" if verdict.startswith("CSP") else "🟢"
             spot = r.get("spot")
             spot_str = f"${spot:.2f}" if spot else "?"
-            lines.append(f"**{emoji} {r['verdict']} · `{r['ticker']}` · {spot_str}**")
+            promo = " ✅ RSI favourable" if rv.promoted else ""
+            lines.append(f"**{emoji} {verdict} · `{r['ticker']}` · {spot_str}**{promo}")
 
             metrics = []
             if r.get("rsi_14") is not None:
@@ -272,5 +640,12 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4) -> list[s
                 lines.append(f"  - _Why:_ {'; '.join(r['rationale'])}")
 
             lines.append("")
+
+    if rsi_removed:
+        lines.append("### ⏸ Held back by RSI")
+        lines.append("")
+        for c in rsi_removed:
+            lines.append(f"- **{c['ticker']}** ({c['verdict']}) — {c['reason']}")
+        lines.append("")
 
     return lines

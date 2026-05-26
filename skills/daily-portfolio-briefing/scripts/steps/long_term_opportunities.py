@@ -22,6 +22,12 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+try:
+    from analysis import rsi_discipline
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from analysis import rsi_discipline
+
 
 # Path to long-term-opportunity-advisor scripts. We import its `advise.py`
 # directly by file path because the repo also contains
@@ -185,6 +191,108 @@ def generate_long_term_opportunities_step(
         filtered.append(op)
     op_dicts = filtered
 
+    # Filter: respect existing short-put positions for LONG_DATED_CSP.
+    # The advisor doesn't see the user's existing short put exposure, so
+    # without this gate it can suggest stacking a 3rd put on a name where
+    # they already have 2 open, OR suggest a strike very close to an
+    # existing position (which compounds risk without diversifying).
+    MAX_EXISTING_SHORT_PUTS_PER_NAME = 2
+    STRIKE_OVERLAP_PCT = 0.05  # 5% — strikes within this range are "overlapping"
+    existing_puts_by_ticker: dict = {}
+    for p in (positions or []):
+        if p.get("assetType") != "OPTION":
+            continue
+        if (p.get("type") or "").upper() != "PUT":
+            continue
+        qty = float(p.get("qty", 0) or 0)
+        if qty >= 0:  # only short puts
+            continue
+        t = (p.get("underlying") or "").upper()
+        if not t:
+            continue
+        entry = existing_puts_by_ticker.setdefault(t, {"count": 0, "strikes": []})
+        entry["count"] += abs(qty)
+        entry["strikes"].append(float(p.get("strike", 0) or 0))
+
+    filtered_again: list = []
+    for op in op_dicts:
+        if op.get("kind") != "LONG_DATED_CSP":
+            filtered_again.append(op)
+            continue
+        t = (op.get("ticker") or "").upper()
+        existing = existing_puts_by_ticker.get(t)
+        if not existing:
+            filtered_again.append(op)
+            continue
+        # Already-stacked check
+        if existing["count"] >= MAX_EXISTING_SHORT_PUTS_PER_NAME:
+            op["skip_reason"] = (
+                f"already {int(existing['count'])} short puts open at strikes "
+                f"{sorted(existing['strikes'])} — stacking another compounds "
+                f"single-name assignment risk"
+            )
+            op["kind_when_skipped"] = "LONG_DATED_CSP"
+            op["kind"] = "SKIPPED_LT_CSP"
+            filtered_again.append(op)
+            continue
+        # Strike-overlap check: parse proposed strike from concrete_trade
+        import re as _re
+        sm = _re.search(r"\$(\d+(?:\.\d+)?)P\b", op.get("concrete_trade", ""))
+        if sm:
+            proposed_strike = float(sm.group(1))
+            for held_strike in existing["strikes"]:
+                if held_strike <= 0:
+                    continue
+                rel = abs(proposed_strike - held_strike) / held_strike
+                if rel <= STRIKE_OVERLAP_PCT:
+                    op["skip_reason"] = (
+                        f"proposed ${proposed_strike:g}P is within "
+                        f"{STRIKE_OVERLAP_PCT*100:.0f}% of existing "
+                        f"${held_strike:g}P — concentrates rather than diversifies"
+                    )
+                    op["kind_when_skipped"] = "LONG_DATED_CSP"
+                    op["kind"] = "SKIPPED_LT_CSP"
+                    break
+        filtered_again.append(op)
+    op_dicts = filtered_again
+
+    # RSI discipline — a LONG_DATED_CSP is a put-sale, so an overbought tape
+    # (RSI > 70) hard-blocks the new open, consistent with the rest of the
+    # briefing. Then annotate EVERY surviving opportunity with its RSI so the
+    # value shows on the line (added to trigger_reasons, which both the
+    # advisor's renderer and the fallback renderer print).
+    rsi_th = rsi_discipline.load_thresholds(config)
+
+    def _rsi_of(ticker: str):
+        return rsi_values.get(ticker) or rsi_values.get((ticker or "").upper())
+
+    # kind → wheel side for the gate. LONG_DATED_CSP sells a put; ADD buys
+    # shares; everything else (TRIM/EXIT/HOLD/LEAP) is management/other.
+    _SIDE_BY_KIND = {"LONG_DATED_CSP": "put", "ADD": "buy"}
+    if rsi_th.get("enabled", True):
+        for op in op_dicts:
+            side = _SIDE_BY_KIND.get((op.get("kind") or "").upper())
+            if not side or op.get("skip_reason"):
+                continue
+            a = rsi_discipline.assess(_rsi_of(op.get("ticker")), side, rsi_th)
+            if a.blocked:
+                op["skip_reason"] = a.reason
+                op["kind_when_skipped"] = (op.get("kind") or "").upper()
+                op["kind"] = "SKIPPED_RSI" if side == "buy" else "SKIPPED_LT_CSP"
+
+    for op in op_dicts:
+        rsi = _rsi_of(op.get("ticker"))
+        if rsi is None:
+            continue
+        triggers = op.setdefault("trigger_reasons", [])
+        if any("RSI" in str(x) for x in triggers):
+            continue
+        side = _SIDE_BY_KIND.get((op.get("kind") or "").upper())
+        label = rsi_discipline.tag(rsi)
+        if side and rsi_discipline.hook(side, rsi, rsi_th).promoted:
+            label = "✅ RSI favourable · " + label
+        triggers.insert(0, label)
+
     # Snap each LONG_DATED_CSP / LEAP_CALL to a real chain expiration so the
     # briefing renders a concrete date instead of "~75 DTE".
     chains = snapshot_data.get("chains", {}) or {}
@@ -246,6 +354,9 @@ def _enrich_long_dated_dates(
             target_dte = target_dte_leap
             placeholder = "~365 DTE"
         else:
+            continue
+        # Skip ones already marked as skipped (no need to enrich)
+        if op.get("skip_reason"):
             continue
 
         ticker = (op.get("ticker") or "").upper()
@@ -334,6 +445,8 @@ def _enrich_with_live_premiums(op_dicts: list) -> None:
         kind = (op.get("kind") or "").upper()
         if kind != "LONG_DATED_CSP":
             continue
+        if op.get("skip_reason"):
+            continue  # already marked as skipped — no chain fetch needed
         ticker = op.get("ticker") or ""
         exp = op.get("target_expiration")
         import re as _re
@@ -499,13 +612,18 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
     format_opportunity_md = getattr(lt, "format_opportunity_md", None) if lt else None
     LongTermOpportunity = getattr(lt, "LongTermOpportunity", None) if lt else None
 
+    # Partition into active opportunities vs ones we skipped because of
+    # existing positions / strike overlaps. Skipped ones get a compact footer.
+    active = [op for op in opportunities if not (op.get("kind") or "").startswith("SKIPPED")]
+    skipped = [op for op in opportunities if (op.get("kind") or "").startswith("SKIPPED")]
+
     lines = [
         "## 🔭 Long-Term Opportunities (3-12mo horizon)",
         "",
-        f"_{len(opportunities)} signal(s) — third-party recs × RSI × drawdown × IV rank × 200-SMA._",
+        f"_{len(active)} signal(s) — third-party recs × RSI × drawdown × IV rank × 200-SMA._",
         "",
     ]
-    for n, op in enumerate(opportunities, 1):
+    for n, op in enumerate(active, 1):
         if format_opportunity_md and LongTermOpportunity:
             try:
                 # The advisor expects a LongTermOpportunity instance; rebuild
@@ -536,6 +654,17 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
             lines.append(f"- **Yield/Cost:** {op['yield_or_cost']}")
         if op.get("source"):
             lines.append(f"- **Source:** {op['source']}")
+        lines.append("")
+
+    # Footer: surface LT_CSPs we skipped (existing-position guards or RSI gate)
+    if skipped:
+        lines.append("### ⏸ Skipped (position + RSI discipline guards)")
+        lines.append("")
+        for op in skipped:
+            ticker = op.get("ticker", "?")
+            reason = op.get("skip_reason") or "duplicate or overlapping exposure"
+            kind = (op.get("kind_when_skipped") or "LT_CSP").replace("LONG_DATED_CSP", "LT_CSP")
+            lines.append(f"- **{ticker} {kind}** — {reason}")
         lines.append("")
 
     return lines

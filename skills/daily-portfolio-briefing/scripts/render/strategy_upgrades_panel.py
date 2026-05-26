@@ -19,7 +19,20 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         lines.append("")
         return lines
 
-    # Partition by type
+    # RSI hook: anything the gate removed is held out of the actionable lists
+    # and surfaced in a footer instead. Favored names are promoted (✅ badge).
+    rsi_removed = [u for u in upgrades if u.get("rsi_blocked")]
+    upgrades = [u for u in upgrades if not u.get("rsi_blocked")]
+
+    def _promo_badge(u: dict) -> str:
+        # Trailing badge for a shown upgrade based on the RSI hook decision.
+        if u.get("rsi_decision") == "promote":
+            return " ✅ RSI favourable"
+        if u.get("rsi_badge"):
+            return f" {u.get('rsi_badge')}"
+        return ""
+
+    # Partition by type (post-RSI-removal)
     strangles = [u for u in upgrades if u.get("type") == "covered_strangle"]
     collars = [u for u in upgrades if u.get("type") == "collar"]
     new_ccs = [u for u in upgrades if u.get("type") == "write_covered_call"]
@@ -48,12 +61,17 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             chain_source = cc.get("chain_source", "estimate_broker_unreachable")
             target_exp = (date.today() + timedelta(days=dte)).strftime("%a %b %d '%y")
 
-            badge = "⛔ DEFER (earnings inside window)" if earnings_blocked else "✅ READY TO WRITE"
-            lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}")
+            if earnings_blocked:
+                badge = "⛔ DEFER (earnings inside window)"
+            else:
+                badge = "✅ READY TO WRITE"
+            lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}{_promo_badge(cc)}")
             lines.append(
                 f"  - SELL {contracts}× {symbol} ${strike:g}C exp ~{target_exp} "
                 f"({dte} DTE, ~6% OTM, ~0.30 delta)"
             )
+            if cc.get("rsi_14") is not None:
+                lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
             if earnings_blocked:
                 lines.append(
                     f"  - ⚠ Earnings on {earnings_date} — defer writing until after the print "
@@ -100,7 +118,7 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             put_total = combined.get("puts")
             total_combined = combined.get("total")
             conc = s.get("concentration_check", {})
-            blocked = conc.get("blocked")
+            conc_blocked = conc.get("blocked")
             reason = conc.get("reason")
             rationale = s.get("rationale")
 
@@ -112,11 +130,14 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             except (ValueError, TypeError):
                 exp_fmt = exp
 
-            status = "⛔ BLOCKED" if blocked else "✅ OK"
+            status = "⛔ BLOCKED" if conc_blocked else "✅ OK"
 
-            lines.append(f"**{symbol} — {current_calls} → add {qty}x ${strike:.0f}P** {status}")
+            lines.append(f"**{symbol} — {current_calls} → add {qty}x ${strike:.0f}P** {status}{_promo_badge(s)}")
 
-            if blocked:
+            if s.get("rsi_14") is not None:
+                lines.append(f"  - **RSI:** {s.get('rsi_tag')} — {s.get('rsi_note', '')}")
+
+            if conc_blocked:
                 lines.append(f"  - Current: {conc.get('current_pct', 0):.0f}% NLV | Post-action: {conc.get('post_action_pct', 0):.0f}% NLV")
                 lines.append(f"  - **BLOCKED**: {reason}")
             else:
@@ -162,6 +183,9 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
 
             lines.append(f"**{symbol} — {shares} shares, +${unrealized:,.0f} unrealized (+{gain_pct:.0f}%)** {net_zero_badge}")
 
+            if c.get("rsi_14") is not None:
+                lines.append(f"  - RSI: {c.get('rsi_tag')} (protective put — shown for context)")
+
             if call_offset > 0:
                 lines.append(f"  - Buy {qty}× ${strike:.0f}P exp {exp_fmt} (28d) @ ${cost_per:.2f} mid (δ{delta:+.2f})")
                 lines.append(f"  - Cost: ${total_cost:,.0f} | Existing CC premium offsets: ${call_offset:,.0f} → **net cost: ${net_cost:,.0f}**")
@@ -187,7 +211,9 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             cost = sub.get("cost")
             post_weight = sub.get("post_buy_weight_pct")
 
-            lines.append(f"**{symbol} — {held} shares (need {to_buy} more)**")
+            lines.append(f"**{symbol} — {held} shares (need {to_buy} more)**{_promo_badge(sub)}")
+            if sub.get("rsi_14") is not None:
+                lines.append(f"  - **RSI:** {sub.get('rsi_tag')} — {sub.get('rsi_note', '')}")
             lines.append(f"  - Current: {held} shares @ ${price:.2f} = ${held * price:,.0f} ({held / 100 * 100:.0f}% of lot)")
             lines.append(f"  - Buy {to_buy} more = ${cost:,.0f} → {held + to_buy}-share lot ({post_weight:.1f}% NLV post-buy)")
 
@@ -202,5 +228,20 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             lines.append(f"  - Est. income: ~${estimated_monthly_income:,.0f}/mo (0.30Δ 30DTE) = **${estimated_annualized:,.0f}/yr** (~{estimated_annualized/completed_lot_value*100:.1f}% annualized)")
 
             lines.append("")
+
+    # === HELD BACK BY RSI (removed by the central hook) ===
+    if rsi_removed:
+        type_label = {
+            "write_covered_call": "covered call",
+            "covered_strangle": "strangle put leg",
+            "sublot_completion": "sub-lot buy",
+        }
+        lines.append(f"### ⏸ Held back by RSI ({len(rsi_removed)})")
+        lines.append("")
+        for u in rsi_removed:
+            sym = u.get("underlying")
+            kind = type_label.get(u.get("type"), u.get("type"))
+            lines.append(f"- **{sym}** ({kind}) — {u.get('rsi_note', u.get('rsi_tag', 'RSI unfavorable'))}")
+        lines.append("")
 
     return lines

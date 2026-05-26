@@ -106,6 +106,43 @@ wheel:
   loss_trigger_multiple_monthly: 1.40    # Close at 1.40× premium paid
   loss_trigger_multiple_weekly: 1.50     # Close at 1.50× premium paid
 
+# Roll selection (action list). The action list defers to the position's own
+# wheel-roll-advisor: it never surfaces EXECUTE ROLL when the advisor recommends
+# HOLD. When a roll IS warranted, the ranker prefers roll-UP (higher strike,
+# preserves upside) and rejects candidates that extend the expiration beyond the
+# tenor cap below — so we never recommend capping a name for years just to
+# harvest long-dated time-value premium. Core names may extend 3× longer.
+roll:
+  max_action_tenor_days: 120             # reject action-list rolls longer than this (non-core)
+
+# RSI discipline — RSI(14) is shown on EVERY recommendation and hard-gates new
+# opens. Bands are read asymmetrically (overbought is bad for selling puts but
+# good for selling covered calls). The gate suppresses only NEW opens; existing
+# positions (rolls/closes/trims/collars) are annotated, never blocked. These are
+# the "standard wheel bands." See scripts/analysis/rsi_discipline.py.
+rsi_discipline:
+  enabled: true
+  put:                          # selling cash-secured puts
+    block_above: 70             # overbought → suppress new put-sales
+    caution_above: 60           # extended → warn / size down
+    favored_high: 50            # pullback sweet spot upper edge
+    favored_low: 30             # pullback sweet spot lower edge
+    falling_knife_below: 25     # momentum break → warn (dip may not hold)
+  call:                         # selling covered calls
+    favored_above: 60           # extended → rich premium, favored to write
+    caution_below: 60           # mid-range → warn (caps upside cheaply)
+    block_below: 35             # oversold → suppress new covered calls
+
+# Intrinsic value — attach a fair-value read (FMP DCF + analyst price-target
+# consensus) to EVERY single-stock recommendation. ETFs are labelled
+# "n/a — basket"; missing FMP data fails closed (no fabricated number). Requires
+# the FMP_API_KEY environment variable; without it the briefing surfaces a single
+# transparency footer. See scripts/analysis/intrinsic_value.py.
+intrinsic_value:
+  enabled: true
+  ttl_hours: 24                 # cache fair values for a day (FMP free-tier friendly)
+  etf_tickers: []               # extra ETFs to treat as baskets (merged with defaults)
+
 # Output
 output:
   output_dir: "reports/daily"

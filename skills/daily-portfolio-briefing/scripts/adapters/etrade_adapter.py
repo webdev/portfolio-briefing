@@ -117,15 +117,26 @@ def _flatten_option_position(p: Dict[str, Any], acct_desc: str) -> Dict[str, Any
     total_gain_pct = float(p.get("totalGainPct", 0))
 
     # Current mid: prefer Complete.lastTrade, fall back to derived from marketValue
-    last_trade = complete.get("lastTrade")
-    if last_trade is None:
-        # marketValue / qty / 100 — sign cancels out via abs()
-        last_trade = abs(market_value / qty) / 100 if qty else 0
-    current_mid = float(last_trade)
-
-    # Bid/ask if available
+    # Real bid/ask
     bid = complete.get("bid")
     ask = complete.get("ask")
+
+    # Current mid = midpoint of bid/ask. Falls back to lastTrade only when
+    # bid+ask aren't available. Using lastTrade as the mid is wrong because
+    # it's the price at which the contract LAST traded — on illiquid options
+    # that can be hours/days stale and far from where you could actually
+    # fill today. E*TRADE's own totalGain uses bid/ask-mid; the briefing
+    # should match that or actual closes will under-deliver expected fills.
+    last_trade = complete.get("lastTrade")
+    if bid is not None and ask is not None and float(bid) > 0 and float(ask) > 0:
+        current_mid = (float(bid) + float(ask)) / 2.0
+    elif last_trade is not None:
+        current_mid = float(last_trade)
+    elif qty:
+        # Fall back to marketValue-derived price (sign cancels via abs)
+        current_mid = abs(market_value / qty) / 100
+    else:
+        current_mid = 0.0
 
     # Greeks — only meaningful with view=COMPLETE
     delta = complete.get("delta")
