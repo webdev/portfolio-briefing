@@ -41,3 +41,15 @@ def test_select_snapshot_adapter_defaults_to_etrade():
 def test_select_snapshot_adapter_schwab():
     fn = snapshot_inputs._select_snapshot_adapter({"brokerage": "schwab"})
     assert fn.__name__ == "fetch_schwab_snapshot"
+
+
+import importlib
+
+
+def test_broker_market_reexports_by_env(monkeypatch):
+    monkeypatch.setenv("PORTFOLIO_BRIEFING_BROKER", "etrade")
+    from adapters import broker_market
+    importlib.reload(broker_market)
+    assert hasattr(broker_market, "get_option_chain")
+    assert hasattr(broker_market, "get_option_expirations")
+    assert hasattr(broker_market, "find_put_strike_near")
