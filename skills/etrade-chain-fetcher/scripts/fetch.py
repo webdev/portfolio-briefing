@@ -41,12 +41,25 @@ _ADAPTER_DIR = (
 if str(_ADAPTER_DIR) not in sys.path:
     sys.path.insert(0, str(_ADAPTER_DIR))
 
+import os
+
+def _backend_name() -> str:
+    return os.getenv("PORTFOLIO_BRIEFING_BROKER", "etrade").strip().lower()
+
+
 try:
-    from adapters.etrade_market import (  # type: ignore
-        get_option_chain as _adapter_get_chain,
-        get_option_expirations as _adapter_get_expirations,
-        OptionChainRow,
-    )
+    if _backend_name() == "schwab":
+        from adapters.schwab_market import (  # type: ignore
+            get_option_chain as _adapter_get_chain,
+            get_option_expirations as _adapter_get_expirations,
+            OptionChainRow,
+        )
+    else:
+        from adapters.etrade_market import (  # type: ignore
+            get_option_chain as _adapter_get_chain,
+            get_option_expirations as _adapter_get_expirations,
+            OptionChainRow,
+        )
 except Exception as _e:
     _adapter_get_chain = None
     _adapter_get_expirations = None
@@ -102,9 +115,9 @@ def is_available() -> bool:
 def availability_reason() -> str | None:
     """Human-readable reason why is_available() is False, or None if it's True."""
     if _import_error:
-        return f"etrade_market adapter import failed: {_import_error}"
+        return f"{_backend_name()}_market adapter import failed: {_import_error}"
     if not is_available():
-        return "etrade_market adapter not loadable"
+        return f"{_backend_name()}_market adapter not loadable"
     return None
 
 
