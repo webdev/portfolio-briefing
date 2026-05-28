@@ -255,17 +255,6 @@ class BriefingBot:
             self.trigger_run(self.allowed_id)
 
 
-def load_config() -> dict:
-    """Read the dedicated bot token + allowed id from env (loaded from .env once at import)."""
-    token = os.environ.get("TELEGRAM_BRIEFING_BOT_TOKEN", "")
-    allowed_id = os.environ.get("TELEGRAM_BRIEFING_ALLOWED_ID", "")
-    if not token:
-        raise RuntimeError("TELEGRAM_BRIEFING_BOT_TOKEN not set (see .env)")
-    if not allowed_id:
-        raise RuntimeError("TELEGRAM_BRIEFING_ALLOWED_ID not set (see .env)")
-    return {"token": token, "allowed_id": allowed_id}
-
-
 def _load_dotenv() -> None:
     """Load the repo .env into os.environ without overriding real env vars."""
     repo = Path(os.getenv("PORTFOLIO_BRIEFING_REPO", str(Path.home() / "workspace" / "portfolio-briefing")))
@@ -280,7 +269,16 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
 
-_load_dotenv()
+def load_config() -> dict:
+    """Read the dedicated bot token + allowed id from env (loaded from .env)."""
+    _load_dotenv()
+    token = os.environ.get("TELEGRAM_BRIEFING_BOT_TOKEN", "")
+    allowed_id = os.environ.get("TELEGRAM_BRIEFING_ALLOWED_ID", "")
+    if not token:
+        raise RuntimeError("TELEGRAM_BRIEFING_BOT_TOKEN not set (see .env)")
+    if not allowed_id:
+        raise RuntimeError("TELEGRAM_BRIEFING_ALLOWED_ID not set (see .env)")
+    return {"token": token, "allowed_id": allowed_id}
 
 
 def acquire_lock(lock_path) -> bool:

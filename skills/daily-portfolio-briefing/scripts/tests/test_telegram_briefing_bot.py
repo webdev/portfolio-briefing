@@ -394,7 +394,8 @@ def test_run_briefing_returns_exit_path_and_log_tail(tmp_path, monkeypatch):
     assert "l29" in tail and "l0" not in tail
 
 
-def test_load_config_reads_env(monkeypatch):
+def test_load_config_reads_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("PORTFOLIO_BRIEFING_REPO", str(tmp_path))  # no .env here
     monkeypatch.setenv("TELEGRAM_BRIEFING_BOT_TOKEN", "TOK123")
     monkeypatch.setenv("TELEGRAM_BRIEFING_ALLOWED_ID", "999")
     cfg = tb.load_config()
@@ -402,7 +403,8 @@ def test_load_config_reads_env(monkeypatch):
     assert cfg["allowed_id"] == "999"
 
 
-def test_load_config_raises_without_token(monkeypatch):
+def test_load_config_raises_without_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("PORTFOLIO_BRIEFING_REPO", str(tmp_path))  # no .env here
     monkeypatch.delenv("TELEGRAM_BRIEFING_BOT_TOKEN", raising=False)
     monkeypatch.setenv("TELEGRAM_BRIEFING_ALLOWED_ID", "999")
     try:
