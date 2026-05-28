@@ -25,3 +25,19 @@ def test_fetcher_defaults_to_etrade(monkeypatch):
     monkeypatch.delenv("PORTFOLIO_BRIEFING_BROKER", raising=False)
     mod = _load_fetch(monkeypatch, "etrade")
     assert mod._backend_name() == "etrade"
+
+
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+from steps import snapshot_inputs  # noqa: E402
+
+
+def test_select_snapshot_adapter_defaults_to_etrade():
+    fn = snapshot_inputs._select_snapshot_adapter({})
+    assert fn.__name__ == "fetch_etrade_snapshot"
+
+
+def test_select_snapshot_adapter_schwab():
+    fn = snapshot_inputs._select_snapshot_adapter({"brokerage": "schwab"})
+    assert fn.__name__ == "fetch_schwab_snapshot"
