@@ -82,9 +82,9 @@ def save_state(path, state: dict) -> None:
 def run_briefing(repo_root, delivery_dir, log_dir):
     """Run the scheduled briefing; return (exit_code, briefing_path, log_tail)."""
     script = Path(repo_root) / "skills" / "daily-portfolio-briefing" / "scripts" / "run_briefing_scheduled.sh"
+    today = datetime.now().strftime("%Y-%m-%d")
     proc = subprocess.run(["bash", str(script)])
     briefing_path = str(Path(delivery_dir) / "latest.md")
-    today = datetime.now().strftime("%Y-%m-%d")
     log_file = Path(log_dir) / f"briefing_{today}.log"
     log_tail = ""
     if log_file.exists():
@@ -290,7 +290,9 @@ def acquire_lock(lock_path) -> bool:
             pid = int(lock_path.read_text().strip())
             os.kill(pid, 0)          # raises if not alive
             return False             # a live instance holds it
-        except (ValueError, ProcessLookupError, PermissionError):
+        except PermissionError:
+            return False             # process alive but owned by another user
+        except (ValueError, ProcessLookupError):
             pass                     # stale or unreadable — reclaim
     lock_path.write_text(str(os.getpid()))
     return True
@@ -314,7 +316,7 @@ def main():
         tg=tg,
         auth=etrade_auth,
         runner=lambda: run_briefing(str(repo), delivery_dir, log_dir),
-        allowed_id=cfg["allowed_id"],
+        allowed_id=int(cfg["allowed_id"]),
         state_path=state_dir / "telegram_bot_state.json",
     )
     print(f"telegram briefing bot: polling, fires daily at "
@@ -336,6 +338,8 @@ def main():
                         f"update {u.get('update_id')}: {e}",
                         file=sys.stderr,
                     )
+            if not updates:
+                time.sleep(1)
             bot.tick(datetime.now())
         except Exception as e:        # network blips etc — never die
             print(f"telegram briefing bot: loop error: {e}", file=sys.stderr)

@@ -424,3 +424,10 @@ def test_acquire_lock_reclaims_stale(tmp_path):
     lock = tmp_path / "bot.pid"
     lock.write_text("999999999")               # almost certainly dead pid
     assert tb.acquire_lock(lock) is True
+
+
+def test_acquire_lock_blocks_when_kill_raises_permission_error(tmp_path, monkeypatch):
+    lock = tmp_path / "bot.pid"
+    lock.write_text("4242")
+    monkeypatch.setattr(tb.os, "kill", lambda pid, sig: (_ for _ in ()).throw(PermissionError()))
+    assert tb.acquire_lock(lock) is False
