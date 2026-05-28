@@ -100,7 +100,7 @@ def enumerate_roll_candidates(
         # Find matching candidate in chain
         matching = None
         for chain_cand in chain.get("candidates", []):
-            if (abs(float(chain_cand.get("strikePrice", 0)) - strike) < 0.01 and
+            if (abs(float(chain_cand.get("strikePrice") or 0) - strike) < 0.01 and
                 chain_cand.get("expirationDate") == exp):
                 matching = chain_cand
                 break
@@ -188,7 +188,7 @@ def select_roll_target(
 
     filtered = []
     for c in candidates:
-        cand_dte = c.get("daysToExpiry", 0)
+        cand_dte = c.get("daysToExpiry") or 0
         if cand_dte >= min_dte_for_roll:
             filtered.append(c)
 
@@ -211,7 +211,7 @@ def select_roll_target(
 
     delta_filtered = []
     for c in filtered:
-        cand_delta = abs(float(c.get("delta", 0)))
+        cand_delta = abs(float(c.get("delta") or 0))  # delta may be present-but-None on a chain leg
         if cand_delta <= delta_max:
             delta_filtered.append(c)
 
@@ -224,9 +224,9 @@ def select_roll_target(
 
     liquidity_filtered = []
     for c in delta_filtered:
-        oi = int(c.get("openInterest", 0))
-        bid = float(c.get("bid", 0))
-        ask = float(c.get("ask", 0))
+        oi = int(c.get("openInterest") or 0)
+        bid = float(c.get("bid") or 0)
+        ask = float(c.get("ask") or 0)
 
         if oi >= min_oi and bid > 0 and ask > 0:
             mid = (bid + ask) / 2
@@ -243,7 +243,7 @@ def select_roll_target(
 
     credit_filtered = []
     for c in liquidity_filtered:
-        bid = float(c.get("bid", 0))
+        bid = float(c.get("bid") or 0)
         close_cost = abs(float(position.get("currentMid", 0)))
         net_credit = bid - close_cost
         net_credit_pct = net_credit / entry_premium if entry_premium > 0 else 0.0
@@ -262,10 +262,10 @@ def select_roll_target(
 
     stress_filtered = []
     for c in credit_filtered:
-        strike = float(c.get("strikePrice", 0))
+        strike = float(c.get("strikePrice") or 0)
         stress_price = underlying_price * 0.90
         loss_at_stress = max(0, strike - stress_price)
-        bid_premium = float(c.get("bid", 0))
+        bid_premium = float(c.get("bid") or 0)
         new_cost = abs(float(position.get("currentMid", 0))) - bid_premium
         net_loss = loss_at_stress + new_cost
 
@@ -279,7 +279,7 @@ def select_roll_target(
         return None
 
     # Step 6: Strike selection
-    target = min(stress_filtered, key=lambda x: abs(abs(x.get("delta", 0)) - delta_target))
+    target = min(stress_filtered, key=lambda x: abs(abs(x.get("delta") or 0) - delta_target))
 
     return {
         "strikePrice": target.get("strikePrice"),
@@ -288,7 +288,7 @@ def select_roll_target(
         "bidAsk": {
             "bid": target.get("bid"),
             "ask": target.get("ask"),
-            "mid": (float(target.get("bid", 0)) + float(target.get("ask", 0))) / 2,
+            "mid": (float(target.get("bid") or 0) + float(target.get("ask") or 0)) / 2,
         },
         "expectedNetCredit": target.get("expectedNetCredit"),
         "expectedNetCreditPct": target.get("expectedNetCreditPct"),

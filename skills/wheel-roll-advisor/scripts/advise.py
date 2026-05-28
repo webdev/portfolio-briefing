@@ -137,16 +137,24 @@ def advise(
         if decision.warnings and "leap_override_applied" in decision.warnings:
             enumerate = True
 
+    # Roll enrichment is fail-soft: a chain/data glitch here must NEVER crash the
+    # advisor (a per-position crash surfaces as "advisor error" and drops the
+    # whole recommendation). On failure we keep the matrix decision and just omit
+    # the priced candidates, recording a warning.
     roll_candidates: List[RollCandidate] = []
+    roll_warnings: List[str] = []
     if enumerate:
-        roll_candidates = enumerate_roll_candidates(position, chain, params)
+        try:
+            roll_candidates = enumerate_roll_candidates(position, chain, params)
+        except Exception as _e:
+            roll_warnings.append(f"roll_enumeration_failed: {type(_e).__name__}: {_e}")
 
     # Build output
     output = {
         "decision": decision.decision,
         "matrixCell": decision.matrix_cell,
         "rationale": decision.rationale,
-        "warnings": decision.warnings or [],
+        "warnings": (decision.warnings or []) + roll_warnings,
         "nextReviewDate": (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d"),
         "position": position,
         "state": {
@@ -226,10 +234,16 @@ def advise(
             # If decision is not ROLL_, no fallback needed
             output["orderTicket"] = None
 
-    # Backward compatibility: single roll_target (best candidate if ROLL_*)
+    # Backward compatibility: single roll_target (best candidate if ROLL_*).
+    # Fail-soft for the same reason as enumeration above.
     roll_target = None
     if decision.decision.startswith("ROLL_"):
-        roll_target = select_roll_target(position, chain, params)
+        try:
+            roll_target = select_roll_target(position, chain, params)
+        except Exception as _e:
+            output["warnings"] = (output.get("warnings") or []) + [
+                f"roll_target_failed: {type(_e).__name__}: {_e}"
+            ]
     output["rollTarget"] = roll_target
 
     return output

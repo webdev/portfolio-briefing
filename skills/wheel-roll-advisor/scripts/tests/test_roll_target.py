@@ -67,3 +67,24 @@ def test_no_valid_roll_target():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_select_roll_target_handles_none_delta():
+    """A chain leg with delta (or OI/bid/ask) present-but-None must NOT crash
+    select_roll_target — the SMH_CALL_615 'advise.py exit 1' bug. The default in
+    c.get('delta', 0) only applies when the key is absent, not when it's None."""
+    import roll_target
+    position = {
+        "optionType": "CALL", "strikePrice": 615.0, "expirationDate": "2026-07-17",
+        "currentMid": 34.0, "entryPrice": 33.0, "daysToExpiry": 52, "quantity": 1,
+        "ivRank": 46.0, "underlyingPrice": 595.0,
+    }
+    chain = {"candidates": [
+        {"strikePrice": 640.0, "expirationDate": "2026-08-21", "bid": 20.0, "ask": 21.0,
+         "delta": None, "openInterest": None, "daysToExpiry": 87},
+        {"strikePrice": 660.0, "expirationDate": "2027-03-19", "bid": None, "ask": None,
+         "delta": None, "openInterest": 500, "daysToExpiry": 296},
+    ]}
+    # Must not raise (returns a target dict or None after filtering).
+    result = roll_target.select_roll_target(position, chain, {})
+    assert result is None or isinstance(result, dict)

@@ -7,7 +7,9 @@ depend on the wheelhouz repo. It provides:
   - load_tokens()                — read persisted tokens from disk
   - save_tokens()                — persist tokens to disk
   - renew_tokens()               — extend the 2-hour idle clock (no browser)
-  - authenticate_interactive()   — run the full browser OAuth flow
+  - begin_interactive()          — start the OAuth flow; returns (url, handle)
+  - complete_interactive()       — exchange a verifier code for tokens + session
+  - authenticate_interactive()   — run the full browser OAuth flow (CLI)
   - get_session()                — convenience wrapper for clients
 
 Token storage
@@ -221,21 +223,35 @@ def renew_tokens(oauth_token: str, oauth_secret: str) -> bool:
         return False
 
 
-def authenticate_interactive(sandbox: bool = False) -> ETradeSession:
-    """Run the one-time browser OAuth flow.
+def begin_interactive():
+    """Start the OAuth flow: return (authorize_url, oauth_handle).
 
-    Walks the user through:
-      1. Opens the E*TRADE authorization URL in the browser.
-      2. User logs in, accepts the app, and copies the verifier code.
-      3. We exchange the verifier for access tokens, persist them, and
-         return a built session.
-
-    Use sandbox=True only when iterating against E*TRADE's sandbox host.
-    Production briefing runs use sandbox=False.
+    The caller keeps oauth_handle and passes it to complete_interactive once the
+    user supplies the verifier code. Used by the Telegram daemon, which sends the
+    URL in one message and receives the code in another.
     """
     ck, cs = _consumer_credentials()
     oauth = pyetrade.ETradeOAuth(ck, cs)
     authorize_url = oauth.get_request_token()
+    return authorize_url, oauth
+
+
+def complete_interactive(oauth_handle: "pyetrade.ETradeOAuth", verifier: str, sandbox: bool = False) -> ETradeSession:
+    """Exchange the verifier for access tokens, persist them, return a session.
+
+    oauth_handle is a live in-memory object returned by begin_interactive;
+    it cannot be pickled or transferred across processes.
+    """
+    tokens = oauth_handle.get_access_token(verifier)
+    oauth_token = tokens["oauth_token"]
+    oauth_secret = tokens["oauth_token_secret"]
+    save_tokens(oauth_token, oauth_secret, sandbox)
+    return _build_clients(oauth_token, oauth_secret, sandbox)
+
+
+def authenticate_interactive(sandbox: bool = False) -> ETradeSession:
+    """Run the one-time browser OAuth flow (terminal/CLI path)."""
+    authorize_url, oauth = begin_interactive()
 
     print("\n=== E*TRADE OAuth ===")
     print("1. A browser window will open to E*TRADE's authorization page.")
@@ -252,12 +268,7 @@ def authenticate_interactive(sandbox: bool = False) -> ETradeSession:
     if not verifier:
         raise RuntimeError("No verifier code provided.")
 
-    tokens = oauth.get_access_token(verifier)
-    oauth_token = tokens["oauth_token"]
-    oauth_secret = tokens["oauth_token_secret"]
-
-    save_tokens(oauth_token, oauth_secret, sandbox)
-    return _build_clients(oauth_token, oauth_secret, sandbox)
+    return complete_interactive(oauth, verifier, sandbox=sandbox)
 
 
 # --------------------------------------------------------------------------
