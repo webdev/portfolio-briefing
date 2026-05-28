@@ -77,3 +77,50 @@ def test_load_state_recovers_from_corrupt(tmp_path):
     p = tmp_path / "state.json"
     p.write_text("{ not json")
     assert tb.load_state(p) == {"update_offset": 0, "last_fire_date": None}
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self):
+        self.calls = []
+        self.next_payload = {"ok": True, "result": []}
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append(("GET", url, params))
+        return _FakeResp(self.next_payload)
+
+    def post(self, url, data=None, files=None, timeout=None):
+        self.calls.append(("POST", url, data, bool(files)))
+        return _FakeResp({"ok": True, "result": {}})
+
+
+def test_client_get_updates_passes_offset():
+    sess = _FakeSession()
+    sess.next_payload = {"ok": True, "result": [{"update_id": 7}]}
+    client = tb.TelegramClient("TOK", session=sess)
+
+    result = client.get_updates(offset=5)
+
+    assert result == [{"update_id": 7}]
+    method, url, params = sess.calls[0]
+    assert method == "GET" and url.endswith("/getUpdates")
+    assert params["offset"] == 5
+
+
+def test_client_send_message_posts_text():
+    sess = _FakeSession()
+    client = tb.TelegramClient("TOK", session=sess)
+    client.send_message(123, "hello")
+    method, url, data, has_files = sess.calls[0]
+    assert method == "POST" and url.endswith("/sendMessage")
+    assert data["chat_id"] == 123 and data["text"] == "hello"

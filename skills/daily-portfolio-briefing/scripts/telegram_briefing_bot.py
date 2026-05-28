@@ -10,12 +10,15 @@ docs/superpowers/specs/2026-05-28-telegram-briefing-bot-design.md.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import requests
 
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9]{5}$")
 
@@ -74,3 +77,40 @@ def save_state(path, state: dict) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(state, indent=2))
+
+
+class TelegramClient:
+    """Thin wrapper over the Telegram Bot API (long-poll + send)."""
+
+    def __init__(self, token: str, session=None):
+        self.base = f"https://api.telegram.org/bot{token}"
+        self.session = session or requests.Session()
+
+    def get_updates(self, offset: int, timeout: int = 30):
+        r = self.session.get(
+            f"{self.base}/getUpdates",
+            params={"offset": offset, "timeout": timeout},
+            timeout=timeout + 15,
+        )
+        r.raise_for_status()
+        return r.json().get("result", [])
+
+    def send_message(self, chat_id, text: str):
+        r = self.session.post(
+            f"{self.base}/sendMessage",
+            data={"chat_id": chat_id, "text": text},
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def send_document(self, chat_id, path: str, caption: str = ""):
+        with open(path, "rb") as fh:
+            r = self.session.post(
+                f"{self.base}/sendDocument",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": fh},
+                timeout=60,
+            )
+        r.raise_for_status()
+        return r.json()
