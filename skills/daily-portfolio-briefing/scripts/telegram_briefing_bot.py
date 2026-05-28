@@ -155,3 +155,23 @@ class BriefingBot:
             "🔐 E*TRADE token expired. Tap to authorize, then send me the "
             f"5-char code:\n{url}",
         )
+
+    def run_and_deliver(self, chat_id):
+        if self.busy:
+            self.tg.send_message(chat_id, "⏳ already running, hang tight")
+            return
+        self.busy = True
+        try:
+            self.tg.send_message(chat_id, "⏳ Running your briefing…")
+            exit_code, briefing_path, log_tail = self.runner()
+            if exit_code == 0 and briefing_path and Path(briefing_path).exists():
+                md = Path(briefing_path).read_text()
+                self.tg.send_message(chat_id, extract_summary(md))
+                self.tg.send_document(chat_id, briefing_path, caption="Full briefing")
+            else:
+                self.tg.send_message(
+                    chat_id,
+                    f"⚠️ briefing failed (exit {exit_code}):\n{log_tail}",
+                )
+        finally:
+            self.busy = False

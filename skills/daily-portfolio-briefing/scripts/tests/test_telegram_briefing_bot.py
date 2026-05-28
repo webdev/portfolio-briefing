@@ -193,3 +193,40 @@ def test_start_auth_sends_link_and_sets_awaiting(tmp_path):
     assert bot.awaiting_verifier is True
     assert auth.begun == 1
     assert "authorize.example" in tg.messages[-1][1]
+
+
+def test_run_and_deliver_success_sends_summary_and_document(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text(
+        "# Daily Briefing\n\n## Today's Action List — Thu\n- buy X\n\n## Watch\nx\n"
+    )
+    tg = FakeTelegram()
+    runner = lambda: (0, str(briefing), "")
+    bot = _bot(tmp_path, tg, FakeAuth(), runner=runner)
+
+    bot.run_and_deliver(999)
+
+    assert any("Running your briefing" in m[1] for m in tg.messages)
+    assert any("buy X" in m[1] for m in tg.messages)
+    assert tg.documents and tg.documents[-1][1] == str(briefing)
+    assert bot.busy is False
+
+
+def test_run_and_deliver_failure_sends_log_tail(tmp_path):
+    tg = FakeTelegram()
+    runner = lambda: (2, str(tmp_path / "missing.md"), "line1\nFATAL boom")
+    bot = _bot(tmp_path, tg, FakeAuth(), runner=runner)
+
+    bot.run_and_deliver(999)
+
+    assert any("failed" in m[1] and "FATAL boom" in m[1] for m in tg.messages)
+    assert tg.documents == []
+    assert bot.busy is False
+
+
+def test_run_and_deliver_busy_guard(tmp_path):
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth())
+    bot.busy = True
+    bot.run_and_deliver(999)
+    assert any("already running" in m[1] for m in tg.messages)
