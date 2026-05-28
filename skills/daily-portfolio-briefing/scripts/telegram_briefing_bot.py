@@ -79,6 +79,19 @@ def save_state(path, state: dict) -> None:
     p.write_text(json.dumps(state, indent=2))
 
 
+def run_briefing(repo_root, delivery_dir, log_dir):
+    """Run the scheduled briefing; return (exit_code, briefing_path, log_tail)."""
+    script = Path(repo_root) / "skills" / "daily-portfolio-briefing" / "scripts" / "run_briefing_scheduled.sh"
+    proc = subprocess.run(["bash", str(script)])
+    briefing_path = str(Path(delivery_dir) / "latest.md")
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = Path(log_dir) / f"briefing_{today}.log"
+    log_tail = ""
+    if log_file.exists():
+        log_tail = "\n".join(log_file.read_text().splitlines()[-20:])
+    return proc.returncode, briefing_path, log_tail
+
+
 class TelegramClient:
     """Thin wrapper over the Telegram Bot API (long-poll + send)."""
 

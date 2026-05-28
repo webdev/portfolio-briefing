@@ -370,3 +370,25 @@ def test_tick_sends_one_reminder_while_awaiting(tmp_path):
     bot.tick(datetime(2026, 5, 28, 7, 30, 0))   # later still
     reminders = [m for m in tg.messages if "waiting" in m[1].lower()]
     assert len(reminders) == 1                  # still only one
+
+
+def test_run_briefing_returns_exit_path_and_log_tail(tmp_path, monkeypatch):
+    delivery = tmp_path / "deliv"
+    logs = delivery / "logs"
+    logs.mkdir(parents=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    (logs / f"briefing_{today}.log").write_text("\n".join(f"l{i}" for i in range(30)))
+
+    class _Proc:
+        returncode = 0
+
+    monkeypatch.setattr(tb.subprocess, "run", lambda *a, **k: _Proc())
+
+    code, path, tail = tb.run_briefing(
+        repo_root="/repo", delivery_dir=str(delivery), log_dir=str(logs)
+    )
+
+    assert code == 0
+    assert path == str(delivery / "latest.md")
+    assert tail.count("\n") == 19          # last 20 lines
+    assert "l29" in tail and "l0" not in tail
