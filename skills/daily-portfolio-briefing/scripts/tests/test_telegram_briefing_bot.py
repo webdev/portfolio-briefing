@@ -60,3 +60,20 @@ def test_compute_next_fire_rolls_to_tomorrow_when_past():
 def test_compute_next_fire_returns_same_time_at_exact_equality():
     now = datetime(2026, 5, 28, 6, 30, 0)
     assert tb.compute_next_fire(now, 6, 30) == datetime(2026, 5, 28, 6, 30, 0)
+
+
+def test_load_state_defaults_when_missing(tmp_path):
+    state = tb.load_state(tmp_path / "nope.json")
+    assert state == {"update_offset": 0, "last_fire_date": None}
+
+
+def test_save_then_load_roundtrips(tmp_path):
+    p = tmp_path / "state.json"
+    tb.save_state(p, {"update_offset": 42, "last_fire_date": "2026-05-28"})
+    assert tb.load_state(p) == {"update_offset": 42, "last_fire_date": "2026-05-28"}
+
+
+def test_load_state_recovers_from_corrupt(tmp_path):
+    p = tmp_path / "state.json"
+    p.write_text("{ not json")
+    assert tb.load_state(p) == {"update_offset": 0, "last_fire_date": None}

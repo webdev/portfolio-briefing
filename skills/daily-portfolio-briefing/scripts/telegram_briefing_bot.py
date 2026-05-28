@@ -56,3 +56,21 @@ def compute_next_fire(now: datetime, hour: int = 6, minute: int = 30) -> datetim
     if candidate < now:
         candidate += timedelta(days=1)
     return candidate
+
+
+def load_state(path) -> dict:
+    """Load persisted offset + last fire date; return defaults if missing/corrupt."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"update_offset": 0, "last_fire_date": None}
+    return {
+        "update_offset": int(data.get("update_offset", 0)),
+        "last_fire_date": data.get("last_fire_date"),
+    }
+
+
+def save_state(path, state: dict) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(state, indent=2))
