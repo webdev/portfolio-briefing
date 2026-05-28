@@ -201,3 +201,19 @@ class BriefingBot:
         self.awaiting_verifier = False
         self.oauth_handle = None
         self.run_and_deliver(chat_id)
+
+    def handle_update(self, update):
+        if not is_authorized(update, self.allowed_id):
+            return
+        msg = update.get("message") or {}
+        chat_id = (msg.get("chat") or {}).get("id")
+        text = (msg.get("text") or "").strip()
+
+        if self.awaiting_verifier:
+            code = extract_verifier(text)
+            if code:
+                self._complete_auth(chat_id, code)
+                return
+
+        if text.lower() in ("run", "briefing", "/run", "/briefing"):
+            self.trigger_run(chat_id)

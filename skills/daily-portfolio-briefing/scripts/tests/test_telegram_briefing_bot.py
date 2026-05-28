@@ -284,3 +284,51 @@ def test_complete_auth_no_handle_resets_session(tmp_path):
     bot._complete_auth(999, "ABC12")
     assert any("reset" in m[1].lower() for m in tg.messages)
     assert auth.begun == 1             # fresh link issued
+
+
+def _msg(uid, text, update_id=1, chat_id=None):
+    return {
+        "update_id": update_id,
+        "message": {
+            "from": {"id": uid},
+            "chat": {"id": chat_id if chat_id is not None else uid},
+            "text": text,
+        },
+    }
+
+
+def test_handle_update_ignores_unauthorized(tmp_path):
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth())
+    bot.handle_update(_msg(111, "run"))   # wrong id
+    assert tg.messages == [] and tg.documents == []
+
+
+def test_handle_update_run_command_triggers(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text("## Today's Action List — Thu\n- go\n")
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth(renew_ok=True), runner=lambda: (0, str(briefing), ""))
+    bot.handle_update(_msg(999, "run"))
+    assert tg.documents
+
+
+def test_handle_update_code_while_awaiting_completes(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text("## Today's Action List — Thu\n- go\n")
+    tg = FakeTelegram()
+    auth = FakeAuth()
+    bot = _bot(tmp_path, tg, auth, runner=lambda: (0, str(briefing), ""))
+    bot.awaiting_verifier = True
+    bot.oauth_handle = object()
+    bot.handle_update(_msg(999, "ABC12"))
+    assert auth.completed == ["ABC12"]
+
+
+def test_handle_update_code_when_not_awaiting_is_ignored(tmp_path):
+    tg = FakeTelegram()
+    auth = FakeAuth()
+    bot = _bot(tmp_path, tg, auth)
+    bot.handle_update(_msg(999, "ABC12"))   # not awaiting, not a command
+    assert auth.completed == []
+    assert tg.documents == []
