@@ -324,9 +324,18 @@ def main():
         try:
             updates = tg.get_updates(bot.state["update_offset"])
             for u in updates:
-                bot.handle_update(u)
+                # Advance + persist the offset BEFORE handling so a poison
+                # message is skipped on the next poll, never retried forever.
                 bot.state["update_offset"] = u["update_id"] + 1
                 save_state(bot.state_path, bot.state)
+                try:
+                    bot.handle_update(u)
+                except Exception as e:
+                    print(
+                        f"telegram briefing bot: handle_update error on "
+                        f"update {u.get('update_id')}: {e}",
+                        file=sys.stderr,
+                    )
             bot.tick(datetime.now())
         except Exception as e:        # network blips etc — never die
             print(f"telegram briefing bot: loop error: {e}", file=sys.stderr)
