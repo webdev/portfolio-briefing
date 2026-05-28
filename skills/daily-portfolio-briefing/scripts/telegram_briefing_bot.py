@@ -83,7 +83,11 @@ def run_briefing(repo_root, delivery_dir, log_dir):
     """Run the scheduled briefing; return (exit_code, briefing_path, log_tail)."""
     script = Path(repo_root) / "skills" / "daily-portfolio-briefing" / "scripts" / "run_briefing_scheduled.sh"
     today = datetime.now().strftime("%Y-%m-%d")
-    proc = subprocess.run(["bash", str(script)])
+    env = os.environ.copy()
+    # The daemon runs under the project venv (has all deps); make the briefing
+    # subprocess use the same interpreter instead of falling back to system py3.
+    env.setdefault("PORTFOLIO_BRIEFING_PYTHON", sys.executable)
+    proc = subprocess.run(["bash", str(script)], env=env)
     briefing_path = str(Path(delivery_dir) / "latest.md")
     log_file = Path(log_dir) / f"briefing_{today}.log"
     log_tail = ""

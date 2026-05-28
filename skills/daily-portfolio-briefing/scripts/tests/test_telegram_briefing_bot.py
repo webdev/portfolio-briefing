@@ -379,10 +379,18 @@ def test_run_briefing_returns_exit_path_and_log_tail(tmp_path, monkeypatch):
     today = datetime.now().strftime("%Y-%m-%d")
     (logs / f"briefing_{today}.log").write_text("\n".join(f"l{i}" for i in range(30)))
 
+    captured = {}
+
     class _Proc:
         returncode = 0
 
-    monkeypatch.setattr(tb.subprocess, "run", lambda *a, **k: _Proc())
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.delenv("PORTFOLIO_BRIEFING_PYTHON", raising=False)
+    monkeypatch.setattr(tb.subprocess, "run", _fake_run)
 
     code, path, tail = tb.run_briefing(
         repo_root="/repo", delivery_dir=str(delivery), log_dir=str(logs)
@@ -390,8 +398,10 @@ def test_run_briefing_returns_exit_path_and_log_tail(tmp_path, monkeypatch):
 
     assert code == 0
     assert path == str(delivery / "latest.md")
-    assert tail.count("\n") == 19          # last 20 lines
+    assert tail.count("\n") == 19
     assert "l29" in tail and "l0" not in tail
+    # The subprocess must run under the daemon's own interpreter, not system py3.
+    assert captured["env"]["PORTFOLIO_BRIEFING_PYTHON"] == tb.sys.executable
 
 
 def test_load_config_reads_env(monkeypatch, tmp_path):
