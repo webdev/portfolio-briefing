@@ -33,6 +33,30 @@ WATCHLIST = ["SPY", "QQQ", "^VIX"]
 _PARALLEL_FETCH_WORKERS = int(os.getenv("PORTFOLIO_BRIEFING_FETCH_WORKERS", "16"))
 
 
+def _select_snapshot_adapter(config: dict):
+    """Return the live-snapshot fetcher for the configured brokerage.
+
+    Defaults to E*TRADE so existing runs are unchanged. The Schwab fetcher is
+    wrapped so it receives the account-label map from config.
+    """
+    broker = (config.get("brokerage") or "etrade").strip().lower()
+    if broker == "schwab":
+        os.environ.setdefault("PORTFOLIO_BRIEFING_BROKER", "schwab")
+        from adapters.schwab_adapter import fetch_schwab_snapshot
+        labels = config.get("schwab_account_labels") or {}
+
+        def fetch_schwab_snapshot_wrapped(account_desc_whitelist=None):
+            return fetch_schwab_snapshot(
+                account_desc_whitelist=account_desc_whitelist,
+                account_labels=labels,
+            )
+        fetch_schwab_snapshot_wrapped.__name__ = "fetch_schwab_snapshot"
+        return fetch_schwab_snapshot_wrapped
+
+    from adapters.etrade_adapter import fetch_etrade_snapshot
+    return fetch_etrade_snapshot
+
+
 def load_portfolio_fixture(fixture_path: str) -> dict:
     """Load the user's holdings from JSON fixture (replaces E*TRADE positions API in v1)."""
     with open(fixture_path) as f:
@@ -449,17 +473,19 @@ def snapshot_inputs(
     snapshot_warnings: list = []
 
     if etrade_live:
-        # Real E*TRADE pull via the adapter
+        # Real live broker pull via the selected adapter (E*TRADE default).
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from adapters.etrade_adapter import fetch_etrade_snapshot
         # Honor an account-scope filter from briefing.yaml. Default scope is
         # the single INDIVIDUAL brokerage account — the user has multiple
-        # accounts at E*TRADE (Joint, Individual Brokerage, INDIVIDUAL, IRAs)
-        # but the briefing pipeline is currently aligned only to INDIVIDUAL.
+        # accounts (Joint, Individual Brokerage, INDIVIDUAL, IRAs) but the
+        # briefing pipeline is currently aligned only to INDIVIDUAL.
         # See CLAUDE.md for the canonical rule.
         account_desc_whitelist = config.get("account_desc_whitelist") or ["INDIVIDUAL"]
-        print(f"  Pulling REAL holdings from E*TRADE (scoped to: {account_desc_whitelist})...")
-        snap = fetch_etrade_snapshot(account_desc_whitelist=account_desc_whitelist)
+        fetch_snapshot = _select_snapshot_adapter(config)
+        broker_label = (config.get("brokerage") or "etrade").strip().lower()
+        print(f"  Pulling REAL holdings from {broker_label.upper()} "
+              f"(scoped to: {account_desc_whitelist})...")
+        snap = fetch_snapshot(account_desc_whitelist=account_desc_whitelist)
         accounts = snap.accounts
         positions = snap.positions
         base_balance = snap.balance
@@ -471,7 +497,8 @@ def snapshot_inputs(
         # Aggregate qty and cost basis, preserve account breakdown
         positions = _deduplicate_positions(positions)
 
-        print(f"  E*TRADE: {len(accounts)} accounts, {len(positions)} unique symbols, NLV ${base_balance.get('accountValue', 0):,.0f}")
+        print(f"  {source}: {len(accounts)} accounts, {len(positions)} unique symbols, "
+              f"NLV ${base_balance.get('accountValue', 0):,.0f}")
         for w in snapshot_warnings:
             print(f"    [warn] {w}")
     elif etrade_fixture:

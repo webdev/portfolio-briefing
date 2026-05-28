@@ -169,7 +169,7 @@ except ImportError:
     def format_validation_line(v): return ""
 
 try:
-    from etrade_market import find_put_strike_near, get_option_chain  # type: ignore
+    from broker_market import find_put_strike_near, get_option_chain  # type: ignore
 except ImportError:
     def find_put_strike_near(**kwargs):
         return None
@@ -882,6 +882,17 @@ def render_action_list(
             is_put = opt_type == "PUT"
             higher_strike = new_strike > cur_strike
 
+            # CLAUDE.md #14: a covered call that's still OTM has no real
+            # assignment risk — only a genuine roll-UP (higher strike) belongs in
+            # the action list. A same-strike calendar or down-roll just re-caps a
+            # bullish name to harvest premium (the SMH/SOXX bug, where the only
+            # credit-positive candidate was a same-strike re-cap mislabeled as
+            # "up-and-out"). Defer to HOLD here; the Watch ROLL ANALYSIS table
+            # still shows the full menu for opportunistic action.
+            if opt_type == "CALL" and not genuinely_itm and not higher_strike:
+                seen_contracts.add(contract)
+                continue
+
             if is_put and higher_strike and not is_calendar:
                 # Surfacing a put-roll UP would guarantee/accelerate assignment.
                 # Skip this candidate entirely — the ranker shouldn't have
@@ -1225,6 +1236,23 @@ def render_action_list(
         # buy-to-close (which reads as a close and gives up the shares/cap).
         _ROLL_DECISIONS = {"ROLL_OUT", "ROLL_OUT_AND_UP", "ROLL_UP_AND_OUT", "ROLL_OUT_AND_DOWN"}
         if rec in _ROLL_DECISIONS:
+            # CLAUDE.md #14: defer to the position's own advisor. We only reach
+            # here when block #3 found no genuine credit-positive roll-up. For a
+            # covered call that's still OTM (no real assignment risk), that means
+            # the only "rolls" are same-strike re-caps or HOLD — so don't surface
+            # a roll directive that contradicts the advisor's HOLD (the SPY bug,
+            # where recommendedCandidateId was "A"). Real assignment risk (spot
+            # at/through the strike) still surfaces the directive.
+            _otype = (rev.get("type") or "").upper()
+            _strike_g = float(rev.get("strike") or 0)
+            _und_g = rev.get("underlying") or contract.split("_")[0]
+            _q_g = (snapshot_data or {}).get("quotes", {}) if snapshot_data else {}
+            _spot_g = float((_q_g.get(_und_g) or {}).get("last") or 0)
+            _call_itm = (_otype == "CALL" and _spot_g and _strike_g and _spot_g >= _strike_g)
+            if _otype == "CALL" and not _call_itm:
+                seen_contracts.add(contract)
+                continue
+
             qty = abs(float(rev.get("qty", 0) or 0))
             cur_mid = float(rev.get("current_mid", 0) or 0)
             up = ("UP" in rec)

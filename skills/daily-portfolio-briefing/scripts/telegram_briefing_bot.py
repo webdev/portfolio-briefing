@@ -219,6 +219,7 @@ class BriefingBot:
 
         self.state = load_state(state_path)
         self.oauth_handle = None
+        self.auth_started = False
         self.awaiting_verifier = False
         self.pending_chat_id = None
         self.busy = False
@@ -226,22 +227,20 @@ class BriefingBot:
         self.reminded = False
 
     def ensure_token(self) -> str:
-        saved = self.auth.load_tokens()
-        if saved and self.auth.renew_tokens(saved["oauth_token"], saved["oauth_secret"]):
-            return "ready"
-        return "need_auth"
+        return self.auth.token_status()
 
     def start_auth(self, chat_id):
         url, handle = self.auth.begin_interactive()
         self.oauth_handle = handle
+        self.auth_started = True
         self.awaiting_verifier = True
         self.pending_chat_id = chat_id
         self.prompt_time = datetime.now()
         self.reminded = False
         self.tg.send_message(
             chat_id,
-            "🔐 E*TRADE token expired. Tap to authorize, then send me the "
-            f"5-char code:\n{url}",
+            "🔐 Broker authorization needed. Tap to authorize, then send me the "
+            f"code (or paste the redirected URL):\n{url}",
         )
 
     def run_and_deliver(self, chat_id):
@@ -279,7 +278,11 @@ class BriefingBot:
         self.run_and_deliver(chat_id)
 
     def _complete_auth(self, chat_id, code):
-        if self.oauth_handle is None:
+        # Detect a lost auth session by whether one was started in THIS process,
+        # not by the handle — Schwab's OAuth2 begin_interactive returns a None
+        # handle legitimately (no live handle needed), so keying off the handle
+        # would loop forever on the Schwab path.
+        if not self.auth_started:
             self.tg.send_message(chat_id, "Session reset — here's a fresh link:")
             self.start_auth(chat_id)
             return
@@ -292,6 +295,7 @@ class BriefingBot:
             )
             return
         self.awaiting_verifier = False
+        self.auth_started = False
         self.oauth_handle = None
         self.run_and_deliver(chat_id)
 
@@ -303,7 +307,7 @@ class BriefingBot:
         text = (msg.get("text") or "").strip()
 
         if self.awaiting_verifier:
-            code = extract_verifier(text)
+            code = self.auth.extract_code(text)
             if code:
                 self._complete_auth(chat_id, code)
                 return
@@ -390,11 +394,15 @@ def main():
         print("Another telegram_briefing_bot instance is running; exiting.", file=sys.stderr)
         return 1
 
-    import etrade_auth
+    broker = os.environ.get("PORTFOLIO_BRIEFING_BROKER", "etrade").strip().lower()
+    if broker == "schwab":
+        import schwab_auth as auth_mod
+    else:
+        import etrade_auth as auth_mod
     tg = TelegramClient(cfg["token"])
     bot = BriefingBot(
         tg=tg,
-        auth=etrade_auth,
+        auth=auth_mod,
         runner=lambda: run_briefing(str(repo), delivery_dir, log_dir),
         allowed_id=int(cfg["allowed_id"]),
         state_path=state_dir / "telegram_bot_state.json",
