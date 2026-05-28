@@ -30,17 +30,20 @@ Then in Telegram, DM @gbriefing_bot the word `run`. Expect:
 Ctrl-C to stop.
 
 ## Install the LaunchAgent
-1. `cp skills/daily-portfolio-briefing/assets/launchd/com.portfolio-briefing.telegram-bot.plist ~/Library/LaunchAgents/`
-2. (Only if your paths differ from the defaults) edit the copy to match.
-3. `launchctl load ~/Library/LaunchAgents/com.portfolio-briefing.telegram-bot.plist`
-4. Verify: `launchctl list | grep telegram-bot` (a PID and exit code 0).
-5. Logs: `~/Documents/briefings/logs/telegram_bot.{out,err}.log`.
+1. `mkdir -p ~/Documents/briefings/logs`
+2. `cp skills/daily-portfolio-briefing/assets/launchd/com.portfolio-briefing.telegram-bot.plist ~/Library/LaunchAgents/`
+3. (Only if your paths differ from the defaults) edit the copy to match.
+4. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.portfolio-briefing.telegram-bot.plist`
+   (macOS 15+; on older systems fall back to `launchctl load ~/Library/LaunchAgents/com.portfolio-briefing.telegram-bot.plist`)
+5. Verify: `launchctl list | grep telegram-bot` (a PID and exit code 0).
+6. Logs: `~/Documents/briefings/logs/telegram_bot.{out,err}.log`.
 
 ## Crash / restart check
 `kill <pid>` then `launchctl list | grep telegram-bot` — a new PID appears (KeepAlive).
 
 ## Uninstall
-`launchctl unload ~/Library/LaunchAgents/com.portfolio-briefing.telegram-bot.plist`
+`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.portfolio-briefing.telegram-bot.plist`
+(macOS 15+; on older systems fall back to `launchctl unload ~/Library/LaunchAgents/com.portfolio-briefing.telegram-bot.plist`)
 
 ## Notes
 - @gbriefing_bot must be the ONLY consumer of its token — don't run the Claude
