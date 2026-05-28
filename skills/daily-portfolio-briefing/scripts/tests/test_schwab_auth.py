@@ -13,13 +13,22 @@ def test_extract_code_from_full_redirect_url():
 
 
 def test_extract_code_from_bare_code():
-    assert schwab_auth.extract_code("C0.abc-123@") == "C0.abc-123@"
+    # A real Schwab auth code is a long whitespace-free token (URL-decoded here).
+    bare = "C0.abc-123def-456ghi-789jkl-012@"
+    assert schwab_auth.extract_code(bare) == "C0.abc-123def-456ghi-789jkl-012@"
 
 
 def test_extract_code_rejects_plain_chatter():
     assert schwab_auth.extract_code("run the briefing") is None
     assert schwab_auth.extract_code("") is None
     assert schwab_auth.extract_code(None) is None
+
+
+def test_extract_code_rejects_short_one_word_command():
+    # The bot routes awaiting-auth messages through extract_code; a one-word
+    # command must not be misread as a code.
+    assert schwab_auth.extract_code("run") is None
+    assert schwab_auth.extract_code("briefing") is None
 
 
 def test_token_is_expired_uses_skew():

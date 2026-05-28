@@ -104,9 +104,11 @@ def extract_code(text: str | None) -> str | None:
         qs = urllib.parse.parse_qs(parsed.query) if parsed.query else urllib.parse.parse_qs(t)
         codes = qs.get("code")
         return codes[0] if codes else None
-    # Bare code heuristic: a Schwab code is a single whitespace-free token;
-    # ordinary chat ("run the briefing") has spaces and is rejected.
-    if t.split() == [t]:
+    # Bare code heuristic: a Schwab auth code is a single whitespace-free token
+    # and is long (50+ chars in practice). Require length >= 20 so short
+    # one-word bot commands ("run", "briefing") are NOT misread as codes — the
+    # Telegram daemon routes every awaiting-auth message through here.
+    if t.split() == [t] and len(t) >= 20:
         return urllib.parse.unquote(t)
     return None
 
