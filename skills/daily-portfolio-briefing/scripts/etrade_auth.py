@@ -301,6 +301,25 @@ def get_session(sandbox: bool = False, try_renew: bool = True) -> ETradeSession:
     )
 
 
+import re as _re
+
+_VERIFIER_RE = _re.compile(r"^[A-Za-z0-9]{5}$")
+
+
+def extract_code(text: str | None) -> str | None:
+    """Return the 5-char E*TRADE verifier, or None. Generic-auth surface."""
+    t = (text or "").strip()
+    return t if _VERIFIER_RE.match(t) else None
+
+
+def token_status() -> str:
+    """'ready' if saved tokens renew, else 'need_auth'. Generic-auth surface."""
+    saved = load_tokens()
+    if saved and renew_tokens(str(saved["oauth_token"]), str(saved["oauth_secret"])):
+        return "ready"
+    return "need_auth"
+
+
 # --------------------------------------------------------------------------
 # CLI entry point — `python3 etrade_auth.py` runs the interactive flow.
 # --------------------------------------------------------------------------

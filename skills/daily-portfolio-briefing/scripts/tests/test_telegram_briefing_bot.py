@@ -152,6 +152,17 @@ class FakeAuth:
     def renew_tokens(self, tok, sec):
         return self.renew_ok
 
+    def token_status(self):
+        # Mirrors the real etrade_auth.token_status: ready iff a renewable
+        # token exists. Preserves this fake's renew_ok semantics.
+        return "ready" if (self.load_tokens() and self.renew_tokens(
+            self.saved["oauth_token"], self.saved["oauth_secret"])) else "need_auth"
+
+    def extract_code(self, text):
+        import re
+        t = (text or "").strip()
+        return t if re.match(r"^[A-Za-z0-9]{5}$", t) else None
+
     def begin_interactive(self):
         self.begun += 1
         return ("https://authorize.example/url", object())

@@ -226,10 +226,7 @@ class BriefingBot:
         self.reminded = False
 
     def ensure_token(self) -> str:
-        saved = self.auth.load_tokens()
-        if saved and self.auth.renew_tokens(saved["oauth_token"], saved["oauth_secret"]):
-            return "ready"
-        return "need_auth"
+        return self.auth.token_status()
 
     def start_auth(self, chat_id):
         url, handle = self.auth.begin_interactive()
@@ -240,8 +237,8 @@ class BriefingBot:
         self.reminded = False
         self.tg.send_message(
             chat_id,
-            "🔐 E*TRADE token expired. Tap to authorize, then send me the "
-            f"5-char code:\n{url}",
+            "🔐 Broker authorization needed. Tap to authorize, then send me the "
+            f"code (or paste the redirected URL):\n{url}",
         )
 
     def run_and_deliver(self, chat_id):
@@ -303,7 +300,7 @@ class BriefingBot:
         text = (msg.get("text") or "").strip()
 
         if self.awaiting_verifier:
-            code = extract_verifier(text)
+            code = self.auth.extract_code(text)
             if code:
                 self._complete_auth(chat_id, code)
                 return
@@ -390,11 +387,15 @@ def main():
         print("Another telegram_briefing_bot instance is running; exiting.", file=sys.stderr)
         return 1
 
-    import etrade_auth
+    broker = os.environ.get("PORTFOLIO_BRIEFING_BROKER", "etrade").strip().lower()
+    if broker == "schwab":
+        import schwab_auth as auth_mod
+    else:
+        import etrade_auth as auth_mod
     tg = TelegramClient(cfg["token"])
     bot = BriefingBot(
         tg=tg,
-        auth=etrade_auth,
+        auth=auth_mod,
         runner=lambda: run_briefing(str(repo), delivery_dir, log_dir),
         allowed_id=int(cfg["allowed_id"]),
         state_path=state_dir / "telegram_bot_state.json",
