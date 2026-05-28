@@ -1,0 +1,32 @@
+[
+  {
+    "securitiesAccount": {
+      "type": "MARGIN",
+      "accountNumber": "123456789",
+      "currentBalances": {
+        "liquidationValue": 250000.0,
+        "cashBalance": 40000.0,
+        "longMarketValue": 210000.0
+      },
+      "positions": [
+        {
+          "instrument": {"assetType": "EQUITY", "symbol": "NVDA"},
+          "longQuantity": 100.0, "shortQuantity": 0.0,
+          "marketValue": 12000.0, "averagePrice": 95.0,
+          "longOpenProfitLoss": 2500.0
+        },
+        {
+          "instrument": {
+            "assetType": "OPTION",
+            "symbol": "NVDA  260619C00150000",
+            "underlyingSymbol": "NVDA",
+            "putCall": "CALL"
+          },
+          "longQuantity": 0.0, "shortQuantity": 1.0,
+          "marketValue": -450.0, "averagePrice": 5.0,
+          "longOpenProfitLoss": 50.0
+        }
+      ]
+    }
+  }
+]
