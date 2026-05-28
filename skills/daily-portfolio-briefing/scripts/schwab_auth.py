@@ -213,10 +213,22 @@ def get_access_token(session=None) -> str | None:
             {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]},
             session=session,
         )
+        if not raw.get("access_token"):
+            return None
+        # Schwab normally returns a fresh refresh_token; if it doesn't, carry the
+        # current one forward so the parse doesn't fail and we keep a usable token.
+        raw.setdefault("refresh_token", tokens["refresh_token"])
+        new_tokens = _parse_token_response(raw)
     except Exception:
+        # Fail-closed: a malformed refresh response must yield None, not raise
+        # out of a function documented to return None.
         return None
-    new_tokens = _parse_token_response(raw)
-    # Schwab returns a fresh refresh_token on refresh; keep its 7-day window.
+    # The refresh token's ~7-day life runs from INITIAL issuance and is NOT
+    # extended by an access-token refresh — preserve the original deadline so
+    # token_status() correctly reports need_auth as the weekly re-auth nears.
+    new_tokens["refresh_expires_at"] = tokens.get(
+        "refresh_expires_at", new_tokens["refresh_expires_at"]
+    )
     save_tokens(new_tokens)
     return new_tokens["access_token"]
 

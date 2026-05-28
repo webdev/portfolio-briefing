@@ -219,6 +219,7 @@ class BriefingBot:
 
         self.state = load_state(state_path)
         self.oauth_handle = None
+        self.auth_started = False
         self.awaiting_verifier = False
         self.pending_chat_id = None
         self.busy = False
@@ -231,6 +232,7 @@ class BriefingBot:
     def start_auth(self, chat_id):
         url, handle = self.auth.begin_interactive()
         self.oauth_handle = handle
+        self.auth_started = True
         self.awaiting_verifier = True
         self.pending_chat_id = chat_id
         self.prompt_time = datetime.now()
@@ -276,7 +278,11 @@ class BriefingBot:
         self.run_and_deliver(chat_id)
 
     def _complete_auth(self, chat_id, code):
-        if self.oauth_handle is None:
+        # Detect a lost auth session by whether one was started in THIS process,
+        # not by the handle — Schwab's OAuth2 begin_interactive returns a None
+        # handle legitimately (no live handle needed), so keying off the handle
+        # would loop forever on the Schwab path.
+        if not self.auth_started:
             self.tg.send_message(chat_id, "Session reset — here's a fresh link:")
             self.start_auth(chat_id)
             return
@@ -289,6 +295,7 @@ class BriefingBot:
             )
             return
         self.awaiting_verifier = False
+        self.auth_started = False
         self.oauth_handle = None
         self.run_and_deliver(chat_id)
 

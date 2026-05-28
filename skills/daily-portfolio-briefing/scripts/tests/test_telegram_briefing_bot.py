@@ -331,6 +331,7 @@ def test_handle_update_code_while_awaiting_completes(tmp_path):
     auth = FakeAuth()
     bot = _bot(tmp_path, tg, auth, runner=lambda: (0, str(briefing), ""))
     bot.awaiting_verifier = True
+    bot.auth_started = True
     bot.oauth_handle = object()
     bot.handle_update(_msg(999, "ABC12"))
     assert auth.completed == ["ABC12"]

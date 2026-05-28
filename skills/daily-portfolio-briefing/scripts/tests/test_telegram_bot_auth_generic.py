@@ -51,7 +51,30 @@ def test_ensure_token_delegates_to_auth_module(tmp_path):
 def test_handle_update_uses_auth_extract_code(tmp_path):
     b, auth = _make_bot(tmp_path)
     b.awaiting_verifier = True
+    b.auth_started = True
     b.oauth_handle = "HANDLE"
     update = {"message": {"from": {"id": 42}, "chat": {"id": 42}, "text": "CODE-xyz"}}
     b.handle_update(update)
     assert auth.completed_with == ("HANDLE", "CODE-xyz")
+
+
+class _FakeAuthNoneHandle(_FakeAuth):
+    """Schwab-style auth: begin_interactive returns a None handle (OAuth2)."""
+    def begin_interactive(self):
+        return ("https://schwab/authorize", None)
+
+
+def test_schwab_style_auth_completes_with_none_handle(tmp_path):
+    # Regression: a None handle (Schwab OAuth2) must NOT loop forever in
+    # _complete_auth. After start_auth + a pasted code, completion must fire.
+    auth = _FakeAuthNoneHandle()
+    b = bot.BriefingBot(
+        tg=_FakeTg(), auth=auth, runner=lambda: (0, None, ""),
+        allowed_id=42, state_path=tmp_path / "state.json",
+    )
+    b.start_auth(chat_id=42)
+    assert b.oauth_handle is None and b.auth_started is True
+    update = {"message": {"from": {"id": 42}, "chat": {"id": 42}, "text": "CODE-abc"}}
+    b.handle_update(update)
+    assert auth.completed_with == (None, "CODE-abc")  # completed, did not reset
+    assert b.awaiting_verifier is False and b.auth_started is False

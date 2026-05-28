@@ -109,3 +109,39 @@ def test_get_access_token_none_when_refresh_dead(tmp_path, monkeypatch):
         "refresh_expires_at": (now - timedelta(seconds=10)).isoformat(),
     })
     assert schwab_auth.get_access_token() is None
+
+
+def test_refresh_preserves_original_refresh_window(tmp_path, monkeypatch):
+    # The 7-day refresh-token life runs from initial issuance; an access-token
+    # refresh must NOT push the deadline out.
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(tmp_path / "schwab_tokens.json"))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "KEY")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "SECRET")
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    original_deadline = (now + timedelta(days=2)).isoformat()  # 2 days left
+    schwab_auth.save_tokens({
+        "access_token": "OLD", "refresh_token": "RT",
+        "access_expires_at": (now - timedelta(seconds=10)).isoformat(),
+        "refresh_expires_at": original_deadline,
+    })
+    fake = _FakeSession({"access_token": "NEW", "refresh_token": "RT2", "expires_in": 1800})
+    assert schwab_auth.get_access_token(session=fake) == "NEW"
+    assert schwab_auth.load_tokens()["refresh_expires_at"] == original_deadline
+
+
+def test_refresh_resilient_when_response_omits_refresh_token(tmp_path, monkeypatch):
+    # A refresh response missing refresh_token must not raise; carry the old one.
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(tmp_path / "schwab_tokens.json"))
+    monkeypatch.setenv("SCHWAB_APP_KEY", "KEY")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "SECRET")
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    schwab_auth.save_tokens({
+        "access_token": "OLD", "refresh_token": "RT",
+        "access_expires_at": (now - timedelta(seconds=10)).isoformat(),
+        "refresh_expires_at": (now + timedelta(days=5)).isoformat(),
+    })
+    fake = _FakeSession({"access_token": "NEW", "expires_in": 1800})  # no refresh_token
+    assert schwab_auth.get_access_token(session=fake) == "NEW"
+    assert schwab_auth.load_tokens()["refresh_token"] == "RT"  # carried forward
