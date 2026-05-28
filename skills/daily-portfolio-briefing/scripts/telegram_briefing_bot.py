@@ -22,6 +22,84 @@ import requests
 
 _VERIFIER_RE = re.compile(r"^[A-Za-z0-9]{5}$")
 
+_MDV2_SPECIALS = set(r"_*[]()~`>#+-=|{}.!")
+_HEADER_RE = re.compile(r"^#{1,6}\s+(.*)$")
+_INLINE_RE = re.compile(r"\*\*(.+?)\*\*|`([^`]+)`")
+_DIGEST_SECTIONS = ("Action List", "Red Flags", "Capital Plan")
+
+
+def _escape_mdv2(text: str) -> str:
+    """Escape Telegram MarkdownV2 special chars in plain text."""
+    out = []
+    for ch in text:
+        if ch == "\\" or ch in _MDV2_SPECIALS:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _format_inline(text: str) -> str:
+    """Convert **bold** and `code` spans to MarkdownV2, escaping plain runs."""
+    out = []
+    pos = 0
+    for m in _INLINE_RE.finditer(text):
+        out.append(_escape_mdv2(text[pos:m.start()]))
+        if m.group(1) is not None:            # **bold**
+            out.append("*" + _escape_mdv2(m.group(1)) + "*")
+        else:                                  # `code`
+            code = m.group(2).replace("\\", "\\\\").replace("`", "\\`")
+            out.append("`" + code + "`")
+        pos = m.end()
+    out.append(_escape_mdv2(text[pos:]))
+    return "".join(out)
+
+
+def _format_line_mdv2(line: str) -> str:
+    """One briefing line -> MarkdownV2. Headers become bold; bodies get inline formatting."""
+    h = _HEADER_RE.match(line)
+    if h:
+        return "*" + _escape_mdv2(h.group(1)) + "*"
+    return _format_inline(line)
+
+
+def _extract_section(md: str, needle: str) -> str | None:
+    """Return the '## ...<needle>...' section (header through line before next '## '), or None."""
+    lines = md.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and needle in line:
+            start = i
+            break
+    if start is None:
+        return None
+    out = [lines[start]]
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def build_digest_messages(md: str, limit: int = 3900) -> list[str]:
+    """MarkdownV2 messages for the digest sections, chunked on line boundaries under `limit`."""
+    msgs = []
+    for needle in _DIGEST_SECTIONS:
+        section = _extract_section(md, needle)
+        if not section:
+            continue
+        formatted_lines = [_format_line_mdv2(l) for l in section.splitlines()]
+        cur = ""
+        for fl in formatted_lines:
+            if cur and len(cur) + 1 + len(fl) > limit:
+                msgs.append(cur)
+                cur = fl
+            else:
+                cur = fl if not cur else cur + "\n" + fl
+        if cur:
+            msgs.append(cur)
+    return msgs
+
 
 def extract_verifier(text: str | None) -> str | None:
     """Return the 5-char alphanumeric verifier code, or None if not a code."""
@@ -37,20 +115,10 @@ def is_authorized(update: dict, allowed_id) -> bool:
 
 def extract_summary(md: str, limit: int = 3500) -> str:
     """Pull the 'Today's Action List' section; fall back to the first 1500 chars."""
-    lines = md.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith("## ") and "Action List" in line:
-            start = i
-            break
-    if start is None:
+    section = _extract_section(md, "Action List")
+    if section is None:
         return md[:1500].strip()
-    out = [lines[start]]
-    for line in lines[start + 1:]:
-        if line.startswith("## "):
-            break
-        out.append(line)
-    return "\n".join(out).strip()[:limit]
+    return section[:limit]
 
 
 def compute_next_fire(now: datetime, hour: int = 6, minute: int = 30) -> datetime:
@@ -112,10 +180,13 @@ class TelegramClient:
         r.raise_for_status()
         return r.json().get("result", [])
 
-    def send_message(self, chat_id, text: str):
+    def send_message(self, chat_id, text: str, parse_mode=None):
+        data = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         r = self.session.post(
             f"{self.base}/sendMessage",
-            data={"chat_id": chat_id, "text": text},
+            data=data,
             timeout=30,
         )
         r.raise_for_status()
@@ -183,7 +254,12 @@ class BriefingBot:
             exit_code, briefing_path, log_tail = self.runner()
             if exit_code == 0 and briefing_path and Path(briefing_path).exists():
                 md = Path(briefing_path).read_text()
-                self.tg.send_message(chat_id, extract_summary(md))
+                chunks = build_digest_messages(md)
+                if chunks:
+                    for chunk in chunks:
+                        self.tg.send_message(chat_id, chunk, parse_mode="MarkdownV2")
+                else:
+                    self.tg.send_message(chat_id, extract_summary(md))
                 self.tg.send_document(chat_id, briefing_path, caption="Full briefing")
             else:
                 self.tg.send_message(

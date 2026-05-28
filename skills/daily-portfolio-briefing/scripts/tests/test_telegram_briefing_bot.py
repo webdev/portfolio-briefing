@@ -128,11 +128,11 @@ def test_client_send_message_posts_text():
 
 class FakeTelegram:
     def __init__(self):
-        self.messages = []   # (chat_id, text)
+        self.messages = []   # (chat_id, text, parse_mode)
         self.documents = []  # (chat_id, path, caption)
 
-    def send_message(self, chat_id, text):
-        self.messages.append((chat_id, text))
+    def send_message(self, chat_id, text, parse_mode=None):
+        self.messages.append((chat_id, text, parse_mode))
 
     def send_document(self, chat_id, path, caption=""):
         self.documents.append((chat_id, path, caption))
@@ -441,3 +441,49 @@ def test_acquire_lock_blocks_when_kill_raises_permission_error(tmp_path, monkeyp
     lock.write_text("4242")
     monkeypatch.setattr(tb.os, "kill", lambda pid, sig: (_ for _ in ()).throw(PermissionError()))
     assert tb.acquire_lock(lock) is False
+
+
+def test_escape_mdv2_escapes_specials():
+    assert tb._escape_mdv2("a.b-c!") == "a\\.b\\-c\\!"
+    assert tb._escape_mdv2("100%") == "100%"
+
+
+def test_format_line_header_becomes_bold():
+    assert tb._format_line_mdv2("## Today's Action List") == "*Today's Action List*"
+
+
+def test_format_inline_bold_and_code():
+    assert tb._format_line_mdv2("- **DO** `TSLA` now.") == "\\- *DO* `TSLA` now\\."
+
+
+def test_build_digest_orders_three_sections():
+    md = (
+        "# Daily Briefing\n\n"
+        "## Today's Action List\n- buy X\n\n"
+        "## 🚦 Red Flags & Priorities\n- risk Y\n\n"
+        "## 💰 Capital Plan\n- plan Z\n"
+    )
+    msgs = tb.build_digest_messages(md)
+    assert len(msgs) == 3
+    assert "Action List" in msgs[0] and "buy X" in msgs[0]
+    assert "Red Flags" in msgs[1] and "risk Y" in msgs[1]
+    assert "Capital Plan" in msgs[2] and "plan Z" in msgs[2]
+
+
+def test_build_digest_skips_missing_sections():
+    md = "## Today's Action List\n- only this\n"
+    msgs = tb.build_digest_messages(md)
+    assert len(msgs) == 1
+
+
+def test_run_and_deliver_sends_markdownv2_digest(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text(
+        "## Today's Action List\n- buy X\n\n## 🚦 Red Flags & Priorities\n- risk Y\n"
+    )
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth(), runner=lambda: (0, str(briefing), ""))
+    bot.run_and_deliver(999)
+    digest = [m for m in tg.messages if m[2] == "MarkdownV2"]
+    assert len(digest) == 2
+    assert tg.documents
