@@ -230,3 +230,57 @@ def test_run_and_deliver_busy_guard(tmp_path):
     bot.busy = True
     bot.run_and_deliver(999)
     assert any("already running" in m[1] for m in tg.messages)
+
+
+def test_trigger_run_prompts_auth_when_token_dead(tmp_path):
+    tg = FakeTelegram()
+    auth = FakeAuth(renew_ok=False)
+    bot = _bot(tmp_path, tg, auth)
+    bot.trigger_run(999)
+    assert bot.awaiting_verifier is True
+    assert auth.begun == 1
+
+
+def test_trigger_run_runs_when_token_ready(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text("## Today's Action List — Thu\n- go\n")
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth(renew_ok=True), runner=lambda: (0, str(briefing), ""))
+    bot.trigger_run(999)
+    assert tg.documents  # delivered, no auth prompt
+    assert bot.awaiting_verifier is False
+
+
+def test_complete_auth_runs_after_valid_code(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text("## Today's Action List — Thu\n- go\n")
+    tg = FakeTelegram()
+    auth = FakeAuth()
+    bot = _bot(tmp_path, tg, auth, runner=lambda: (0, str(briefing), ""))
+    bot.start_auth(999)
+    bot._complete_auth(999, "ABC12")
+    assert auth.completed == ["ABC12"]
+    assert bot.awaiting_verifier is False
+    assert tg.documents
+
+
+def test_complete_auth_bad_code_stays_awaiting(tmp_path):
+    tg = FakeTelegram()
+    auth = FakeAuth()
+    auth.complete_raises = True
+    bot = _bot(tmp_path, tg, auth)
+    bot.start_auth(999)
+    bot._complete_auth(999, "BADXX")
+    assert bot.awaiting_verifier is True
+    assert any("didn't work" in m[1] for m in tg.messages)
+
+
+def test_complete_auth_no_handle_resets_session(tmp_path):
+    tg = FakeTelegram()
+    auth = FakeAuth()
+    bot = _bot(tmp_path, tg, auth)
+    bot.awaiting_verifier = True       # simulate restart mid-auth
+    bot.oauth_handle = None
+    bot._complete_auth(999, "ABC12")
+    assert any("reset" in m[1].lower() for m in tg.messages)
+    assert auth.begun == 1             # fresh link issued

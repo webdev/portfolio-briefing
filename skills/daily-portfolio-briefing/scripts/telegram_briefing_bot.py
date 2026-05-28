@@ -175,3 +175,29 @@ class BriefingBot:
                 )
         finally:
             self.busy = False
+
+    def trigger_run(self, chat_id):
+        if self.busy:
+            self.tg.send_message(chat_id, "⏳ already running, hang tight")
+            return
+        if self.ensure_token() == "need_auth":
+            self.start_auth(chat_id)
+            return
+        self.run_and_deliver(chat_id)
+
+    def _complete_auth(self, chat_id, code):
+        if self.oauth_handle is None:
+            self.tg.send_message(chat_id, "Session reset — here's a fresh link:")
+            self.start_auth(chat_id)
+            return
+        try:
+            self.auth.complete_interactive(self.oauth_handle, code)
+        except Exception:
+            self.tg.send_message(
+                chat_id,
+                "❌ that didn't work, re-tap the link and resend the code",
+            )
+            return
+        self.awaiting_verifier = False
+        self.oauth_handle = None
+        self.run_and_deliver(chat_id)
