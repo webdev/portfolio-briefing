@@ -253,3 +253,87 @@ class BriefingBot:
             self.state["last_fire_date"] = today
             save_state(self.state_path, self.state)
             self.trigger_run(self.allowed_id)
+
+
+def load_config() -> dict:
+    """Read the dedicated bot token + allowed id from env (loaded from .env once at import)."""
+    token = os.environ.get("TELEGRAM_BRIEFING_BOT_TOKEN", "")
+    allowed_id = os.environ.get("TELEGRAM_BRIEFING_ALLOWED_ID", "")
+    if not token:
+        raise RuntimeError("TELEGRAM_BRIEFING_BOT_TOKEN not set (see .env)")
+    if not allowed_id:
+        raise RuntimeError("TELEGRAM_BRIEFING_ALLOWED_ID not set (see .env)")
+    return {"token": token, "allowed_id": allowed_id}
+
+
+def _load_dotenv() -> None:
+    """Load the repo .env into os.environ without overriding real env vars."""
+    repo = Path(os.getenv("PORTFOLIO_BRIEFING_REPO", str(Path.home() / "workspace" / "portfolio-briefing")))
+    env_path = repo / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
+
+def acquire_lock(lock_path) -> bool:
+    """Single-instance pidfile. True if we got the lock, False if a live holder."""
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.exists():
+        try:
+            pid = int(lock_path.read_text().strip())
+            os.kill(pid, 0)          # raises if not alive
+            return False             # a live instance holds it
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass                     # stale or unreadable — reclaim
+    lock_path.write_text(str(os.getpid()))
+    return True
+
+
+def main():
+    cfg = load_config()
+    repo = Path(os.getenv("PORTFOLIO_BRIEFING_REPO", str(Path.home() / "workspace" / "portfolio-briefing")))
+    delivery_dir = os.getenv("PORTFOLIO_BRIEFING_DELIVERY_DIR", str(Path.home() / "Documents" / "briefings"))
+    log_dir = str(Path(delivery_dir) / "logs")
+    state_dir = repo / "skills" / "daily-portfolio-briefing" / "scripts" / "state"
+    lock_path = state_dir / "telegram_bot.pid"
+
+    if not acquire_lock(lock_path):
+        print("Another telegram_briefing_bot instance is running; exiting.", file=sys.stderr)
+        return 1
+
+    import etrade_auth
+    tg = TelegramClient(cfg["token"])
+    bot = BriefingBot(
+        tg=tg,
+        auth=etrade_auth,
+        runner=lambda: run_briefing(str(repo), delivery_dir, log_dir),
+        allowed_id=cfg["allowed_id"],
+        state_path=state_dir / "telegram_bot_state.json",
+    )
+    print(f"telegram briefing bot: polling, fires daily at "
+          f"{bot.fire_hour:02d}:{bot.fire_minute:02d} local", file=sys.stderr)
+
+    while True:
+        try:
+            updates = tg.get_updates(bot.state["update_offset"])
+            for u in updates:
+                bot.handle_update(u)
+                bot.state["update_offset"] = u["update_id"] + 1
+                save_state(bot.state_path, bot.state)
+            bot.tick(datetime.now())
+        except Exception as e:        # network blips etc — never die
+            print(f"telegram briefing bot: loop error: {e}", file=sys.stderr)
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -392,3 +392,33 @@ def test_run_briefing_returns_exit_path_and_log_tail(tmp_path, monkeypatch):
     assert path == str(delivery / "latest.md")
     assert tail.count("\n") == 19          # last 20 lines
     assert "l29" in tail and "l0" not in tail
+
+
+def test_load_config_reads_env(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BRIEFING_BOT_TOKEN", "TOK123")
+    monkeypatch.setenv("TELEGRAM_BRIEFING_ALLOWED_ID", "999")
+    cfg = tb.load_config()
+    assert cfg["token"] == "TOK123"
+    assert cfg["allowed_id"] == "999"
+
+
+def test_load_config_raises_without_token(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BRIEFING_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("TELEGRAM_BRIEFING_ALLOWED_ID", "999")
+    try:
+        tb.load_config()
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
+
+
+def test_acquire_lock_blocks_second_instance(tmp_path):
+    lock = tmp_path / "bot.pid"
+    assert tb.acquire_lock(lock) is True       # first wins
+    assert tb.acquire_lock(lock) is False      # second sees a live pid
+
+
+def test_acquire_lock_reclaims_stale(tmp_path):
+    lock = tmp_path / "bot.pid"
+    lock.write_text("999999999")               # almost certainly dead pid
+    assert tb.acquire_lock(lock) is True
