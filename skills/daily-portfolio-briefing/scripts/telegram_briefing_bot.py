@@ -46,7 +46,7 @@ def _format_inline(text: str) -> str:
     for m in _INLINE_RE.finditer(text):
         out.append(_escape_mdv2(text[pos:m.start()]))
         if m.group(1) is not None:            # **bold**
-            out.append("*" + _escape_mdv2(m.group(1)) + "*")
+            out.append("*" + _escape_mdv2(m.group(1).strip()) + "*")
         else:                                  # `code`
             code = m.group(2).replace("\\", "\\\\").replace("`", "\\`")
             out.append("`" + code + "`")

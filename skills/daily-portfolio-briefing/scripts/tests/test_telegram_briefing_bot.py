@@ -487,3 +487,8 @@ def test_run_and_deliver_sends_markdownv2_digest(tmp_path):
     digest = [m for m in tg.messages if m[2] == "MarkdownV2"]
     assert len(digest) == 2
     assert tg.documents
+
+
+def test_format_inline_strips_padded_bold():
+    # Telegram 400s on bold entities with leading/trailing whitespace.
+    assert tb._format_line_mdv2("x ** y ** z") == "x *y* z"
