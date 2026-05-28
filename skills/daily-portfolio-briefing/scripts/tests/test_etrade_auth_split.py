@@ -28,12 +28,11 @@ def test_begin_returns_url_and_handle(monkeypatch):
 
     url, handle = etrade_auth.begin_interactive()
 
-    assert "authorize" in url
+    assert url == "https://us.etrade.com/e/t/etws/authorize?key=CK&token=REQ"
     assert isinstance(handle, _FakeOAuth)
 
 
 def test_complete_exchanges_and_saves(monkeypatch, tmp_path):
-    monkeypatch.setattr(etrade_auth, "_consumer_credentials", lambda: ("CK", "CS"))
     monkeypatch.setattr(etrade_auth, "token_file_path", lambda: tmp_path / "tok.json")
     monkeypatch.setattr(etrade_auth, "_build_clients", lambda *a, **k: "SESSION")
 
