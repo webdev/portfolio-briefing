@@ -217,3 +217,26 @@ class BriefingBot:
 
         if text.lower() in ("run", "briefing", "/run", "/briefing"):
             self.trigger_run(chat_id)
+
+    def tick(self, now):
+        # One reminder if a verifier prompt has gone unanswered ~20 min.
+        if (self.awaiting_verifier and not self.reminded
+                and self.prompt_time is not None
+                and now - self.prompt_time >= timedelta(minutes=20)):
+            self.reminded = True
+            self.tg.send_message(
+                self.pending_chat_id,
+                "⏰ still waiting on your E*TRADE code — re-tap the link above if needed.",
+            )
+            return
+
+        today = now.date().isoformat()
+        fire_today = now.replace(hour=self.fire_hour, minute=self.fire_minute,
+                                 second=0, microsecond=0)
+        if (now >= fire_today
+                and self.state.get("last_fire_date") != today
+                and not self.busy
+                and not self.awaiting_verifier):
+            self.state["last_fire_date"] = today
+            save_state(self.state_path, self.state)
+            self.trigger_run(self.allowed_id)

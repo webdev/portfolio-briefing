@@ -332,3 +332,41 @@ def test_handle_update_code_when_not_awaiting_is_ignored(tmp_path):
     bot.handle_update(_msg(999, "ABC12"))   # not awaiting, not a command
     assert auth.completed == []
     assert tg.documents == []
+
+
+def test_tick_fires_at_6_30_once_per_day(tmp_path):
+    briefing = tmp_path / "latest.md"
+    briefing.write_text("## Today's Action List — Thu\n- go\n")
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth(renew_ok=True), runner=lambda: (0, str(briefing), ""))
+
+    bot.tick(datetime(2026, 5, 28, 6, 30, 5))
+    assert tg.documents                      # fired
+    assert bot.state["last_fire_date"] == "2026-05-28"
+
+    tg.documents.clear()
+    bot.tick(datetime(2026, 5, 28, 6, 31, 0))   # same day restart
+    assert tg.documents == []                # no double-fire
+
+
+def test_tick_does_not_fire_before_6_30(tmp_path):
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth(renew_ok=True))
+    bot.tick(datetime(2026, 5, 28, 6, 29, 0))
+    assert tg.messages == [] and bot.state["last_fire_date"] is None
+
+
+def test_tick_sends_one_reminder_while_awaiting(tmp_path):
+    tg = FakeTelegram()
+    bot = _bot(tmp_path, tg, FakeAuth())
+    bot.awaiting_verifier = True
+    bot.pending_chat_id = 999
+    bot.prompt_time = datetime(2026, 5, 28, 6, 30, 0)
+
+    bot.tick(datetime(2026, 5, 28, 6, 55, 0))   # 25 min later
+    reminders = [m for m in tg.messages if "waiting" in m[1].lower()]
+    assert len(reminders) == 1
+
+    bot.tick(datetime(2026, 5, 28, 7, 30, 0))   # later still
+    reminders = [m for m in tg.messages if "waiting" in m[1].lower()]
+    assert len(reminders) == 1                  # still only one
