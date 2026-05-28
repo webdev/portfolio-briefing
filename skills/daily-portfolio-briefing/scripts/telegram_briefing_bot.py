@@ -114,3 +114,44 @@ class TelegramClient:
             )
         r.raise_for_status()
         return r.json()
+
+
+class BriefingBot:
+    """Routes Telegram updates and the 6:30 trigger through one run path."""
+
+    def __init__(self, tg, auth, runner, allowed_id, state_path,
+                 fire_hour=6, fire_minute=30):
+        self.tg = tg
+        self.auth = auth
+        self.runner = runner
+        self.allowed_id = allowed_id
+        self.state_path = state_path
+        self.fire_hour = fire_hour
+        self.fire_minute = fire_minute
+
+        self.state = load_state(state_path)
+        self.oauth_handle = None
+        self.awaiting_verifier = False
+        self.pending_chat_id = None
+        self.busy = False
+        self.prompt_time = None
+        self.reminded = False
+
+    def ensure_token(self) -> str:
+        saved = self.auth.load_tokens()
+        if saved and self.auth.renew_tokens(saved["oauth_token"], saved["oauth_secret"]):
+            return "ready"
+        return "need_auth"
+
+    def start_auth(self, chat_id):
+        url, handle = self.auth.begin_interactive()
+        self.oauth_handle = handle
+        self.awaiting_verifier = True
+        self.pending_chat_id = chat_id
+        self.prompt_time = datetime.now()
+        self.reminded = False
+        self.tg.send_message(
+            chat_id,
+            "🔐 E*TRADE token expired. Tap to authorize, then send me the "
+            f"5-char code:\n{url}",
+        )

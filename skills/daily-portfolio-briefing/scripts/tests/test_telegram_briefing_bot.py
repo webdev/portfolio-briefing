@@ -124,3 +124,72 @@ def test_client_send_message_posts_text():
     method, url, data, has_files = sess.calls[0]
     assert method == "POST" and url.endswith("/sendMessage")
     assert data["chat_id"] == 123 and data["text"] == "hello"
+
+
+class FakeTelegram:
+    def __init__(self):
+        self.messages = []   # (chat_id, text)
+        self.documents = []  # (chat_id, path, caption)
+
+    def send_message(self, chat_id, text):
+        self.messages.append((chat_id, text))
+
+    def send_document(self, chat_id, path, caption=""):
+        self.documents.append((chat_id, path, caption))
+
+
+class FakeAuth:
+    def __init__(self, renew_ok=True):
+        self.renew_ok = renew_ok
+        self.saved = {"oauth_token": "T", "oauth_secret": "S"}
+        self.begun = 0
+        self.completed = []
+        self.complete_raises = False
+
+    def load_tokens(self):
+        return self.saved
+
+    def renew_tokens(self, tok, sec):
+        return self.renew_ok
+
+    def begin_interactive(self):
+        self.begun += 1
+        return ("https://authorize.example/url", object())
+
+    def complete_interactive(self, handle, code, sandbox=False):
+        if self.complete_raises:
+            raise RuntimeError("bad verifier")
+        self.completed.append(code)
+        return "SESSION"
+
+
+def _bot(tmp_path, tg, auth, runner=None):
+    return tb.BriefingBot(
+        tg=tg,
+        auth=auth,
+        runner=runner or (lambda: (0, str(tmp_path / "latest.md"), "")),
+        allowed_id=999,
+        state_path=tmp_path / "state.json",
+        fire_hour=6,
+        fire_minute=30,
+    )
+
+
+def test_ensure_token_ready_when_renew_succeeds(tmp_path):
+    bot = _bot(tmp_path, FakeTelegram(), FakeAuth(renew_ok=True))
+    assert bot.ensure_token() == "ready"
+
+
+def test_ensure_token_need_auth_when_renew_fails(tmp_path):
+    bot = _bot(tmp_path, FakeTelegram(), FakeAuth(renew_ok=False))
+    assert bot.ensure_token() == "need_auth"
+
+
+def test_start_auth_sends_link_and_sets_awaiting(tmp_path):
+    tg = FakeTelegram()
+    auth = FakeAuth()
+    bot = _bot(tmp_path, tg, auth)
+    bot.start_auth(999)
+    assert bot.awaiting_verifier is True
+    assert auth.begun == 1
+    assert "authorize.example" in tg.messages[-1][1]
