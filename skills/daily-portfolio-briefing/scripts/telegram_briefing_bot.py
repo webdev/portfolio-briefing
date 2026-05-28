@@ -53,6 +53,6 @@ def extract_summary(md: str, limit: int = 3500) -> str:
 def compute_next_fire(now: datetime, hour: int = 6, minute: int = 30) -> datetime:
     """Next occurrence of hour:minute at or after `now`."""
     candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if candidate <= now:
+    if candidate < now:
         candidate += timedelta(days=1)
     return candidate

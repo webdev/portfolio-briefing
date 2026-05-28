@@ -55,3 +55,8 @@ def test_compute_next_fire_same_day_when_before():
 def test_compute_next_fire_rolls_to_tomorrow_when_past():
     now = datetime(2026, 5, 28, 7, 0, 0)
     assert tb.compute_next_fire(now, 6, 30) == datetime(2026, 5, 29, 6, 30, 0)
+
+
+def test_compute_next_fire_returns_same_time_at_exact_equality():
+    now = datetime(2026, 5, 28, 6, 30, 0)
+    assert tb.compute_next_fire(now, 6, 30) == datetime(2026, 5, 28, 6, 30, 0)
