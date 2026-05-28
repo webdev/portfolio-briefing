@@ -22,8 +22,6 @@ from adapters.etrade_adapter import EtradeSnapshot  # type: ignore  # noqa: E402
 _ACCOUNTS_URL = "https://api.schwabapi.com/trader/v1/accounts"
 _ACCOUNT_NUMBERS_URL = "https://api.schwabapi.com/trader/v1/accounts/accountNumbers"
 
-_MONTHS = None  # unused; expirations parsed numerically
-
 
 def _parse_osi(osi: str) -> tuple[str, str, float, str]:
     """Parse an OSI option symbol 'ROOT  YYMMDD[C/P]XXXXXXXX' into parts.

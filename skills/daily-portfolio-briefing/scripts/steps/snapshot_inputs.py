@@ -41,7 +41,6 @@ def _select_snapshot_adapter(config: dict):
     """
     broker = (config.get("brokerage") or "etrade").strip().lower()
     if broker == "schwab":
-        import os
         os.environ.setdefault("PORTFOLIO_BRIEFING_BROKER", "schwab")
         from adapters.schwab_adapter import fetch_schwab_snapshot
         labels = config.get("schwab_account_labels") or {}
