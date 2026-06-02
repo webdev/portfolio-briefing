@@ -533,6 +533,11 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4,
         "_📋 Per-company candidate research (all theme companies — RSI-gated entries "
         "+ FMP valuation): `~/Documents/briefings/candidates_DATE.md`._"
     )
+    lines.append(
+        "_🎯 When-to-enter triggers (every theme company → ENTRY NOW / WAIT-for-X / "
+        "WATCH / AVOID, with the explicit trigger condition): "
+        "`~/Documents/briefings/when_to_enter_DATE.md`._"
+    )
     lines.append("")
 
     # Theme metadata (name / group / anchors / etfs) is CONFIG, not data — read

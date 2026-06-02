@@ -178,9 +178,19 @@ def aggregate_briefing(
                     / "intrinsic_value_cache.json",
                     api_key=_fmp_cb,
                 )
+            # Position-aware: cross-check candidates against the user's CURRENT
+            # short puts AND long puts (live snapshot), so we never recommend a
+            # contract that's already open (the LITE $820P duplicate bug) AND
+            # never recommend a short put that cancels a protective long put
+            # (the META $570P collar-floor bug). Independent of the 24h scout
+            # cache.
+            _esp_cb = _cr_cb.short_puts_by_ticker(snapshot_data.get("positions", []))
+            _elp_cb = _cr_cb.long_puts_by_ticker(snapshot_data.get("positions", []))
             _cand_section = _cr_cb.render_candidate_briefing(
                 scout_payload, fv_by_ticker=_cand_fv, config=config,
                 generated_at=date_str, as_section=True,
+                existing_short_puts=_esp_cb,
+                existing_long_puts=_elp_cb,
             )
             lines.extend(_cand_section.splitlines())
         except Exception as _cbe:

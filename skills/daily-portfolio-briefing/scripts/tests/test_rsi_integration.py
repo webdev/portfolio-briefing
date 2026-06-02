@@ -124,6 +124,95 @@ def test_strategy_upgrade_promotes_favored_cc():
     assert "✅ RSI favourable" in md
 
 
+def test_strategy_upgrade_midrange_cc_waits_for_strength():
+    """A mid-range-RSI new CC (caution zone, e.g. RSI 47) must NOT be headlined
+    READY TO WRITE — it drops into the 'wait for strength' section, the same
+    discipline that pulls overbought new puts/buys off the actionable list.
+    (This is the SOFI RSI-47 case.)"""
+    upgrades = [{
+        "type": "write_covered_call", "underlying": "SOFI", "shares_held": 700,
+        "contracts_writable": 7, "current_price": 16.0, "target_strike": 17.0,
+        "target_dte": 31, "est_premium_per_share": 0.68, "est_premium_total": 476,
+        "est_annualized_pct": 50.0, "current_weight_pct": 1.0,
+        "earnings_blocked": False, "chain_source": "etrade_live",
+        "bid": 0.66, "ask": 0.70,
+        "rsi_14": 47.0, "rsi_tag": "RSI 47 🟡 mid-range",
+        "rsi_note": "mid-range — premium average; prefer waiting for strength.",
+        "rsi_decision": "keep", "rsi_badge": "⚠ RSI caution",
+        "rsi_blocked": False, "rsi_wait": True,
+    }]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    assert "wait for strength" in md.lower()
+    assert "⏸ WAIT FOR STRENGTH" in md
+    # SOFI is rendered, but NOT under a READY TO WRITE header.
+    assert "SOFI" in md
+    assert "READY TO WRITE" not in md
+    # The premium / SELL detail is still shown for context.
+    assert "SELL 7× SOFI" in md
+    # ...and the RSI note explains why it's held.
+    assert "RSI 47" in md
+
+
+def test_strategy_upgrade_favored_cc_stays_ready_not_waiting():
+    """RSI-favored (≥60) write stays actionable; no wait-for-strength section."""
+    upgrades = [{
+        "type": "write_covered_call", "underlying": "SPY", "shares_held": 100,
+        "contracts_writable": 1, "current_price": 600.0, "target_strike": 640.0,
+        "target_dte": 35, "est_premium_per_share": 9.0, "est_premium_total": 900,
+        "est_annualized_pct": 15.0, "current_weight_pct": 6.0,
+        "earnings_blocked": False, "chain_source": "etrade_live",
+        "bid": 8.8, "ask": 9.2,
+        "rsi_14": 68.0, "rsi_tag": "RSI 68 🟢 extended",
+        "rsi_note": "extended — favourable spot to write.",
+        "rsi_decision": "promote", "rsi_badge": "✅ RSI favourable",
+        "rsi_blocked": False, "rsi_wait": False,
+    }]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    assert "READY TO WRITE" in md
+    assert "wait for strength" not in md.lower()
+
+
+def test_cc_renders_real_delta_and_otm():
+    """The SELL line shows the measured delta + actual OTM%, not a hardcoded
+    '~6% OTM, ~0.30 delta'."""
+    upgrades = [{
+        "type": "write_covered_call", "underlying": "SPY", "shares_held": 100,
+        "contracts_writable": 1, "current_price": 600.0, "target_strike": 645.0,
+        "target_dte": 35, "est_premium_per_share": 9.0, "est_premium_total": 900,
+        "est_annualized_pct": 15.0, "current_weight_pct": 6.0,
+        "earnings_blocked": False, "chain_source": "etrade_live",
+        "bid": 8.8, "ask": 9.2,
+        "target_delta": 0.24, "otm_pct": 7.5, "strike_selected_by": "delta",
+        "rsi_14": 68.0, "rsi_tag": "RSI 68 🟢 extended", "rsi_note": "extended.",
+        "rsi_decision": "promote", "rsi_badge": "✅ RSI favourable",
+        "rsi_blocked": False, "rsi_wait": False,
+    }]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    assert "7.5% OTM" in md
+    assert "δ 0.24" in md
+    assert "~0.30 delta" not in md  # the old hardcoded text is gone
+
+
+def test_cc_renders_delta_na_when_chain_has_no_greeks():
+    """When the chain carried no deltas (fallback to %OTM), render 'δ n/a' —
+    never a fabricated delta."""
+    upgrades = [{
+        "type": "write_covered_call", "underlying": "SMH", "shares_held": 100,
+        "contracts_writable": 1, "current_price": 595.0, "target_strike": 630.0,
+        "target_dte": 35, "est_premium_per_share": 12.0, "est_premium_total": 1200,
+        "est_annualized_pct": 20.0, "current_weight_pct": 5.0,
+        "earnings_blocked": False, "chain_source": "etrade_live",
+        "bid": 11.8, "ask": 12.2,
+        "target_delta": None, "otm_pct": 5.9, "strike_selected_by": "otm_pct",
+        "rsi_14": 68.0, "rsi_tag": "RSI 68 🟢 extended", "rsi_note": "extended.",
+        "rsi_decision": "promote", "rsi_badge": "✅ RSI favourable",
+        "rsi_blocked": False, "rsi_wait": False,
+    }]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    assert "δ n/a" in md
+    assert "5.9% OTM" in md
+
+
 def test_strategy_upgrade_sublot_blocked_when_overbought():
     upgrades = [{
         "type": "sublot_completion", "underlying": "XYZ", "shares_held": 50,

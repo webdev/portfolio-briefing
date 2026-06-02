@@ -89,6 +89,22 @@ covered call, labeled "extend 10-15 months" by the old hardcoded note). Default:
 via `context["max_tenor_days"]`. Source: `advise.py` line ~211 — the call now
 matches the discipline of `render/panels.py` block #3's ranker.
 
+**Both roll legs must carry REAL chain values — never "pick from the ROLL
+ANALYSIS table."** Block #3 (priced-candidate path) already does this — it
+renders concrete BTC and STO quotes from `enumerate_roll_candidates`. Block #4
+(generic directive path, fires when a roll is warranted but block #3 had no
+priced best) used to render only the BTC leg with a real mid and then hand-wave
+the STO leg ("Sell-to-Open 1× a higher-strike call further out — pick the target
+from the ROLL ANALYSIS table"). That violates the no-hand-wavy-output rule.
+Block #4 now fetches a REAL STO quote via the canonical `etrade-chain-fetcher`:
+delta-first selection (`find_strike_near_delta`, target ~0.25 within ±0.12,
+volatility-adaptive), %OTM fallback when the chain has no Greeks, target DTE
+~90d within the 120d action-list tenor cap. The order line renders the actual
+strike, expiration, bid/mid/ask, DTE, delta (or `δ n/a`), and net credit/debit.
+When the chain is unreachable, the line says "live chain unavailable, verify the
+STO leg at the broker before placing" — never a fabricated strike or price.
+Source: `render/panels.py` block #4 `_ROLL_DECISIONS` branch.
+
 **Matrix is side-gated (PUT vs CALL).** The decision matrix encodes side only in
 the row `id` prefix (`PUT_*` / `CALL_*`), so `decision_walker.row_matches` must
 gate on it — a short CALL may match ONLY `CALL_*` rows (or side-agnostic ones
@@ -506,13 +522,87 @@ action read is a bug.
 18. **Protective long puts cancel new-short-put recs:** if the user holds a LONG put on a name (collar floor / protective put), no new-short-put surface may recommend a short at the same/near strike — that would un-hedge the position. Applies to `Candidate Trades` (via `long_puts_by_ticker` → `existing_long_puts` + `_long_put_cancellation`) and `LT_CSP` (`long_term_opportunities.py` builds `long_puts_by_ticker` and refuses recs with a "would cancel your collar floor" reason). The original "stacking" guard only counted short puts and missed this; selling the same strike as a held long put isn't stacking, it's cancellation (the META bug, where the user held a long $570P as a collar floor and the briefing recommended SELL $570P at the same strike).
 19. **No hardcoded boilerplate in actionable output — everything from real verified data:** any number that looks like data MUST come from a real source measured this cycle. No "~6% OTM, ~0.30 delta" baked into a format string, no "extend 4-6 weeks" / "extend 10-15 months" label irrespective of actual DTE, no "4×" hardcoded into roll-candidate descriptions, no `C` hardcoded for put positions. The SOXX bug surfaced this hard rule: candidate C labeled "10-15 months" was actually +791 days (~2.2 years), candidate descriptions hardcoded `4×` regardless of position qty, and `C` regardless of option type. If the value isn't computed from snapshot/chain/position data, it's not data — render `n/a` or omit, never a plausible-looking guess. Tenor phrasing: use `_tenor_phrase(dte_ext)` (returns `+Xd`, `+Xd (~Nw)`, `+Xd (~Nmo)`, or `+Xd (~N.Nyr)`) — always derived from real DTE. Dates: format with year (`Jul 17 '26`, never `0717` MMDD which collides across years). Source: `wheel-roll-advisor/scripts/roll_target.py` (description + notes), `strategy_upgrades.py` + `strategy_upgrades_panel.py` (CC SELL line). Every renderer touched in the future must obey this — a hardcoded number in the output is a bug.
 
+## Third-party recommendations — Parkev's Google Sheet (fetched every run)
+
+The "third-party rec" column in every surface of the briefing (Watch panel
+`Third-party: Buy (tier 3, 1d old)` notes, scout verdicts, When-To-Enter
+`rec BUY` tags, the Long-Term Opportunities EXIT decisions, the Capital Plan's
+SELL routing) all draw from **one source: Parkev Tatevosian's Google Sheet**.
+
+- **Sheet:** `https://docs.google.com/spreadsheets/d/12Fs_d8Zr4sKnoCxb5EaEbe2FciXIGPVTFGM9iehZq3M/`
+- **Fetcher skill:** `skills/recommendation-list-fetcher/` (CSV export via `gviz/tq?tqx=out:csv`)
+- **Briefing call site:** `run_briefing.py` Step 1.6 — `fetch_recommendations(snapshot_dir)`.
+  Runs **unconditionally on every briefing**, before snapshot_inputs. No `--refresh`
+  flag — the sheet is the authoritative source of truth and a fresh pull is part
+  of the canonical run.
+
+**Rating tier propagates through the scout** — `recs_map` in `run_briefing.py`
+and `scout._load_recs_and_weights()` carries the FULL rec dict (recommendation +
+rating_tier + aging + date_updated), not just the normalized BUY/HOLD/SELL
+string. `_research_ticker` accepts either shape for backward compatibility, but
+the briefing pipeline uses the dict form so `ScoutResult.rating_tier` (and
+`.aging`) flow into the scout cache and out to every downstream surface
+(`results_by_theme[*].rating_tier` is set).
+
+**Tier-aware rendering in When-To-Enter** — `classify()` reads
+`r.get("rating_tier")` and promotes tier ≥ 4 ENTRY NOW cards from
+`🟢 ENTRY NOW — BUY` to **`🌟 STRONG BUY — ENTRY NOW`** (or `🌟 STRONG BUY — ENTRY
+NOW (CSP)` for CSP setups). The read line annotates with `Parkev tier-N
+(raw_recommendation) — high-conviction catalyst`, and the trigger upgrades
+sizing guidance from "1/3 of target weight" (standard) to "1/2 of target weight
+is reasonable" (tier 4-5). Tier-5 is the rare "Top Stock to Buy" — Parkev's
+single strongest signal; tier-4 is "Top 15 Stock" / "Top 25 Stock." Tier-3
+("Buy") keeps the standard 🟢 label and 1/3 sizing.
+
+The underlying RSI gate is *unchanged* — tier doesn't loosen the favored-band
+(35-55) requirement, doesn't override the overbought block (RSI ≥ 70 still
+WAITs even on tier-5), and doesn't bypass the position-aware long-put-cancel
+guard. The tier only differentiates *within* the already-actionable set so the
+user can size accordingly.
+
+Rating ladder (`raw_recommendation` → normalized `recommendation` + `rating_tier`):
+
+| Raw value | Normalized | Tier |
+|-----------|------------|------|
+| `Top Stock to Buy` | BUY | 5 |
+| `Top 15 Stock` / `Top 25 Stock` | BUY | 4 |
+| `Buy` | BUY | 3 |
+| `Borderline Buy` | BUY | 2 |
+| `Hold/ Market Perform` | HOLD | 1 |
+| `Borderline Sell` | SELL | 0 |
+| `Sell` / `Top Stock to Sell` | SELL | 0 |
+
+Each row also carries `date_updated`, `age_days`, and an `aging: true` flag when
+the rec is >14 days old — the verdict logic gives more weight to fresh recs.
+
+**Universe alignment between Parkev's sheet and the scout's themes** is a known
+asymmetry. The sheet is broader (~200 names spanning consumer, healthcare,
+finance, AI/tech, etc.); the scout's `theme_universes.yaml` is intentionally
+narrow (AI Buildout + Ancillary + Adjacent, ~79 anchors). A ticker can be:
+
+- **In both** → full treatment (rec drives verdict, scout adds technicals/chain, full When-To-Enter card).
+- **In Parkev only** → "orphan" — rec is fetched and appears on relevant equity reviews but the scout never grades it. *No When-To-Enter card, no Candidate Trades visibility.* Add to `theme_universes.yaml` if the name fits an existing theme; otherwise it stays an out-of-universe rec.
+- **In scout only** → covered by technicals but verdict tends to land WATCH for lack of a third-party catalyst.
+
+When you see a name in the briefing that you expect to be in the scout but
+isn't, it's almost always this asymmetry. The fix is either adding the anchor
+to `theme_universes.yaml` (one-line config change, picked up on the next run
+that uses `--refresh-scout` or the 24h cache cycle) or creating a new theme
+for an out-of-AI-thesis name worth tracking.
+
+**Failure mode:** if `fetch_recommendations` errors (sheet unreachable / format
+change), the briefing continues with an empty rec list — downstream surfaces
+just don't get third-party annotations. The fetcher itself logs the failure
+to stderr. Watch for "Fetched 0 recommendations" on a run that should have had
+~200.
+
 ## Pipeline overview
 
 The briefing orchestrator runs these steps (see `scripts/run_briefing.py`):
 
 1. Pre-flight (config, yesterday's briefing for diffing)
 2. Load directives
-3. Fetch third-party recommendations
+3. Fetch third-party recommendations  — Parkev's sheet, every run (see above)
 4. Snapshot inputs (E*TRADE positions + parallel yfinance technicals + chains)
 5. Classify regime (VIX/SPY)
 6. Review equities (per-position decision)

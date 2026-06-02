@@ -188,15 +188,130 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
     return "\n".join(lines)
 
 
+# A proposed CSP strike within this fraction of a strike the user already holds
+# is treated as "the same trade" (duplicate), not a fresh candidate.
+_STRIKE_OVERLAP_PCT = 0.05
+
+
+def short_puts_by_ticker(positions: list | None) -> dict:
+    """Tally the user's OPEN short puts from snapshot positions.
+
+    Shape (matches the scout's put-stack guard): {TICKER: {"count": int,
+    "strikes": [float]}}. Only short (qty < 0) PUT options are counted.
+    """
+    out: dict = {}
+    for p in positions or []:
+        if (p.get("assetType") or "").upper() != "OPTION":
+            continue
+        if (p.get("type") or "").upper() != "PUT":
+            continue
+        try:
+            qty = float(p.get("qty", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty >= 0:  # long puts aren't a stacking concern for selling more
+            continue
+        tk = (p.get("underlying") or "").upper()
+        if not tk:
+            continue
+        try:
+            strike = float(p.get("strike", 0) or 0)
+        except (TypeError, ValueError):
+            strike = 0.0
+        entry = out.setdefault(tk, {"count": 0, "strikes": []})
+        entry["count"] += int(abs(qty)) or 1
+        if strike > 0:
+            entry["strikes"].append(strike)
+    return out
+
+
+def long_puts_by_ticker(positions: list | None) -> dict:
+    """Tally the user's OPEN LONG puts (protective puts / collar floors).
+
+    Shape mirrors short_puts_by_ticker. A long put at/near a proposed short-put
+    strike means recommending the short would *cancel* the protection — that
+    must be a hard block on any new-short-put surface (the META bug, where the
+    user held a long $570P as a collar floor and the LT_CSP recommended selling
+    a short $570P at the same strike)."""
+    out: dict = {}
+    for p in positions or []:
+        if (p.get("assetType") or "").upper() != "OPTION":
+            continue
+        if (p.get("type") or "").upper() != "PUT":
+            continue
+        try:
+            qty = float(p.get("qty", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0:  # we want LONG puts only
+            continue
+        tk = (p.get("underlying") or "").upper()
+        if not tk:
+            continue
+        try:
+            strike = float(p.get("strike", 0) or 0)
+        except (TypeError, ValueError):
+            strike = 0.0
+        entry = out.setdefault(tk, {"count": 0, "strikes": []})
+        entry["count"] += int(abs(qty)) or 1
+        if strike > 0:
+            entry["strikes"].append(strike)
+    return out
+
+
+def _held_put_overlap(ticker: str, strike, existing_short_puts: dict | None):
+    """Return None if the user holds no short puts on ``ticker``; else a dict
+    {count, strikes, dupe} where ``dupe`` is True when ``strike`` is within
+    _STRIKE_OVERLAP_PCT of a held strike (i.e. effectively the same contract)."""
+    if not existing_short_puts:
+        return None
+    e = existing_short_puts.get((ticker or "").upper())
+    if not e or not e.get("count"):
+        return None
+    strikes = e.get("strikes", []) or []
+    dupe = False
+    if strike:
+        dupe = any(s > 0 and abs(float(strike) - s) / s <= _STRIKE_OVERLAP_PCT for s in strikes)
+    return {"count": int(e.get("count", 0)), "strikes": sorted(strikes), "dupe": dupe}
+
+
+def _long_put_cancellation(ticker: str, strike, existing_long_puts: dict | None):
+    """Return the held LONG-put strike that would be CANCELLED by selling a
+    short put at ``strike`` (within _STRIKE_OVERLAP_PCT), or None if no held
+    long put on this name overlaps. A non-None return is a hard reason to
+    refuse the recommendation — selling the same-strike short un-hedges the
+    protective long put."""
+    if not existing_long_puts or not strike:
+        return None
+    e = existing_long_puts.get((ticker or "").upper())
+    if not e or not e.get("strikes"):
+        return None
+    for held in e["strikes"]:
+        if held > 0 and abs(float(strike) - held) / held <= _STRIKE_OVERLAP_PCT:
+            return {"count": int(e.get("count", 0)), "cancels_strike": held,
+                    "strikes": sorted(e["strikes"])}
+    return None
+
+
 def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict | None,
                               config: dict | None, generated_at: str,
-                              as_section: bool = False) -> str:
+                              as_section: bool = False,
+                              existing_short_puts: dict | None = None,
+                              existing_long_puts: dict | None = None) -> str:
     """Focused, action-first briefing built FROM the candidates: only the names
     whose setup qualifies AND passes the RSI gate (full entry cards), with the
     RSI-blocked names listed below as 'on deck'. Condensed market context up top.
 
     ``as_section=True`` demotes the headings one level (## / ###) so it embeds
-    cleanly inside the daily briefing rather than standing alone (# / ##)."""
+    cleanly inside the daily briefing rather than standing alone (# / ##).
+
+    ``existing_short_puts`` ({TICKER: {count, strikes}}, from
+    ``short_puts_by_ticker``) makes the candidate list position-aware: a CSP
+    candidate whose strike duplicates a put the user already holds (within
+    _STRIKE_OVERLAP_PCT) is pulled out of the actionable list into an "already
+    positioned" note — you can't "newly" sell a contract you're already short.
+    A same-name candidate at a different strike is kept but annotated as
+    stacking single-name risk."""
     _h_top = "## 🎯 Candidate Trades — Across Themes" if as_section else f"# Candidate Trade Briefing — {generated_at}"
     _h_sub = "###" if as_section else "##"
     if not scout_payload:
@@ -213,6 +328,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     # report keeps it under each theme).
     cands: list[tuple[str, dict]] = []
     held: list[tuple[str, dict, object]] = []
+    already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
     seen: set[str] = set()
     for theme_key, results in rbt.items():
         tname = themes_meta.get(theme_key, {}).get("name", theme_key)
@@ -225,7 +341,27 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
             status, rv = _status(r, rsi_th)
             if status == "candidate":
                 seen.add(tk)
-                cands.append((tname, r))
+                # Position-aware: if this CSP candidate duplicates a put the
+                # user already holds, it's not a new trade — pull it out.
+                q = r.get("csp_entry") or {}
+                # CRITICAL: long-put cancellation check first — a short put at
+                # the same strike as a held LONG put cancels protection (the
+                # META collar-floor case). That's a hard refuse, not a "stack."
+                cancel = _long_put_cancellation(tk, q.get("strike"), existing_long_puts) if q else None
+                overlap = _held_put_overlap(tk, q.get("strike"), existing_short_puts) if q else None
+                if cancel:
+                    # Tag the result with the cancellation context so the
+                    # "Already positioned" footer can explain it precisely.
+                    r = {**r, "_cancels_long_put": cancel}
+                    already_open.append((tname, r, {"count": cancel["count"],
+                                                    "strikes": cancel["strikes"],
+                                                    "dupe": True,
+                                                    "cancels_protection": True,
+                                                    "cancels_strike": cancel["cancels_strike"]}))
+                elif overlap and overlap["dupe"]:
+                    already_open.append((tname, r, overlap))
+                else:
+                    cands.append((tname, r))
             elif status == "held_rsi":
                 seen.add(tk)
                 held.append((tname, r, rv))
@@ -258,6 +394,16 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
         for tname, r in sorted(cands, key=lambda x: (x[0], x[1].get("ticker", ""))):
             card = _format_card(r, fv_by_ticker, etf_set, rsi_th)
             card[0] = f"{card[0]}  · _{tname}_"
+            # Same-name (different-strike) stacking note — kept, but flagged.
+            tk = (r.get("ticker") or "").upper()
+            q = r.get("csp_entry") or {}
+            ov = _held_put_overlap(tk, q.get("strike"), existing_short_puts) if q else None
+            if ov:
+                strikes_s = ", ".join(f"${s:g}" for s in ov["strikes"])
+                card.append(
+                    f"  - ⚠ **You already hold {ov['count']}× {tk} PUT** at {strikes_s} — "
+                    f"this would stack single-name assignment risk; size accordingly or skip."
+                )
             lines.extend(card)
             lines.append("")
     else:
@@ -276,6 +422,31 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 f"- **`{tk}`** ({tname}) — {r.get('verdict', '')} · "
                 f"{rsi_discipline.tag(r.get('rsi_14'))} — _{rv.reason}_"
             )
+        lines.append("")
+
+    if already_open:
+        lines.append(f"{_h_sub} ⏸ Already positioned — you hold this put ({len(already_open)})")
+        lines.append("_Suppressed from the actionable list: the proposed strike matches a put "
+                     "you're already short, OR — worse — would cancel a protective long put._")
+        lines.append("")
+        for tname, r, ov in sorted(already_open, key=lambda x: (x[0], x[1].get("ticker", ""))):
+            tk = (r.get("ticker") or "").upper()
+            q = r.get("csp_entry") or {}
+            strikes_s = ", ".join(f"${s:g}" for s in ov["strikes"])
+            if ov.get("cancels_protection"):
+                lines.append(
+                    f"- 🛡️ **`{tk}`** ({tname}) — scout floated SELL ${q.get('strike', 0):g}P, "
+                    f"but you hold a **LONG ${ov['cancels_strike']:g}P** on {tk} as downside "
+                    f"protection (collar floor / protective put). Selling a short at the same "
+                    f"strike would **cancel that hedge** — don't un-collar a hedged position to "
+                    f"collect premium."
+                )
+            else:
+                lines.append(
+                    f"- **`{tk}`** ({tname}) — scout floated ${q.get('strike', 0):g}P; "
+                    f"you already hold {ov['count']}× {tk} PUT at {strikes_s}. Manage the existing "
+                    f"position (see Watch), don't re-open it."
+                )
         lines.append("")
 
     lines.append("_Full per-company detail (WATCH/AVOID + every theme) is in the companion "

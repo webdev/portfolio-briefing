@@ -192,11 +192,24 @@ def _etrade_call_quote(
     spot: float,
     target_otm_pct: float = 6.0,
     target_dte: int = 35,
+    target_delta: float = 0.25,
+    delta_tolerance: float = 0.12,
 ) -> dict | None:
-    """Pull a call quote via the canonical E*TRADE chain fetcher.
+    """Pull a covered-call quote via the canonical E*TRADE chain fetcher.
 
-    Returns {strike, bid, mid, ask, delta, expiration, source} or None if
-    E*TRADE is unavailable.
+    Strike selection is **delta-first** (volatility-adaptive): we target a
+    ~``target_delta`` call, so the SAME delta sits further OTM on a high-IV name
+    (more headroom) and closer on a low-IV name. A flat %OTM target does the
+    opposite — it caps a volatile name too tight (the SOFI $17-on-$16 case).
+
+    We fall back to ``target_otm_pct`` ONLY when the chain carries no usable
+    deltas (e.g. E*TRADE didn't populate Greeks for the legs). In that case the
+    returned ``delta`` is None and callers must render "δ n/a" — never a
+    fabricated delta.
+
+    Returns {strike, bid, mid, ask, delta, iv, open_interest, expiration,
+    source, selected_by} or None if E*TRADE is unavailable. ``selected_by`` is
+    "delta" or "otm_pct".
     """
     mod, cache = _load_chain_fetcher()
     if mod is None:
@@ -206,7 +219,21 @@ def _etrade_call_quote(
     )
     if exp_date is None:
         return None
-    return mod.find_strike_at_otm_pct(
+    # Delta-band first — adapts strike distance to each name's volatility.
+    q = mod.find_strike_near_delta(
+        symbol=symbol,
+        expiration=exp_date,
+        target_delta=target_delta,
+        opt_type="CALL",
+        spot=spot,
+        tolerance=delta_tolerance,
+        cache=cache,
+    )
+    if q:
+        q["selected_by"] = "delta"
+        return q
+    # Fallback: nearest strike ~N% OTM (chain had no usable deltas). delta=None.
+    q = mod.find_strike_at_otm_pct(
         symbol=symbol,
         expiration=exp_date,
         otm_pct=target_otm_pct,
@@ -214,6 +241,9 @@ def _etrade_call_quote(
         spot=spot,
         cache=cache,
     )
+    if q:
+        q["selected_by"] = "otm_pct"
+    return q
 
 
 def compute_strategy_upgrades(
@@ -541,20 +571,34 @@ def compute_strategy_upgrades(
         if contracts_writable < 1:
             continue
 
-        # Target window
+        # Target window + covered-call strike-selection config (delta-band).
         target_dte = 35
         target_exp_date = date.today() + timedelta(days=target_dte)
+        cc_cfg = (params.get("covered_call") or {})
+        cc_target_delta = float(cc_cfg.get("target_delta", 0.25))
+        cc_delta_tol = float(cc_cfg.get("delta_tolerance", 0.12))
+        cc_fallback_otm = float(cc_cfg.get("fallback_otm_pct", 6.0))
 
         # Pull real E*TRADE chain via the canonical fetcher. NEVER yfinance.
+        # Delta-first selection (falls back to %OTM only when chain has no deltas).
         chain_quote = _etrade_call_quote(
-            symbol=symbol, spot=price, target_otm_pct=6.0, target_dte=target_dte
+            symbol=symbol, spot=price, target_otm_pct=cc_fallback_otm,
+            target_dte=target_dte, target_delta=cc_target_delta,
+            delta_tolerance=cc_delta_tol,
         )
 
+        # Real, measured values — never a hardcoded/fabricated delta. delta may
+        # be None (then rendered "δ n/a"); otm_pct is computed from the actual
+        # selected strike vs. spot.
+        cc_delta = None
+        strike_selected_by = "estimate"
         if chain_quote:
             target_strike = chain_quote["strike"]
             premium_per_share = chain_quote["mid"] or chain_quote.get("bid") or 0
             bid = chain_quote.get("bid", 0)
             ask = chain_quote.get("ask", 0)
+            cc_delta = chain_quote.get("delta")
+            strike_selected_by = chain_quote.get("selected_by", "etrade")
             actual_exp = chain_quote.get("expiration") or target_exp_date.isoformat()
             try:
                 actual_exp_date = date.fromisoformat(actual_exp)
@@ -571,6 +615,8 @@ def compute_strategy_upgrades(
             bid = ask = 0
             actual_dte = target_dte
             chain_source = "estimate_broker_unreachable"
+
+        otm_pct_actual = ((target_strike - price) / price * 100.0) if price > 0 else None
 
         premium_total = premium_per_share * 100 * contracts_writable
 
@@ -597,6 +643,16 @@ def compute_strategy_upgrades(
         rsi_val = rsi_discipline.rsi_for(symbol, technicals)
         rv = rsi_discipline.hook("call", rsi_val, rsi_th)
         rsi_cc_blocked = bool(rsi_gate_on and rv.removed)
+        # Mid-range RSI (35-60) is NOT a hard block, but writing a new covered
+        # call here caps the name for thin premium ("prefer waiting for
+        # strength"). Hold it out of the actionable READY TO WRITE list into a
+        # wait-for-strength section — the same discipline that pulls overbought
+        # new puts/buys off the action list. Only RSI-favored (≥60) or
+        # RSI-unknown writes stay actionable. (caution zone → keep + badge.)
+        rsi_cc_wait = bool(
+            rsi_gate_on and not rsi_cc_blocked
+            and rv.decision == "keep" and rv.badge
+        )
 
         upgrade = {
             "type": "write_covered_call",
@@ -607,11 +663,15 @@ def compute_strategy_upgrades(
             "rsi_decision": rv.decision,
             "rsi_badge": rv.badge,
             "rsi_blocked": rsi_cc_blocked,
+            "rsi_wait": rsi_cc_wait,
             "shares_held": int(qty),
             "contracts_writable": contracts_writable,
             "current_price": round(price, 2),
             "target_strike": float(target_strike),
             "target_dte": actual_dte,
+            "target_delta": (round(abs(float(cc_delta)), 2) if cc_delta is not None else None),
+            "otm_pct": (round(otm_pct_actual, 1) if otm_pct_actual is not None else None),
+            "strike_selected_by": strike_selected_by,
             "est_premium_per_share": round(premium_per_share, 2),
             "est_premium_total": round(premium_total, 0),
             "est_annualized_pct": round(annualized, 1),

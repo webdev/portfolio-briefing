@@ -14,6 +14,59 @@ from steps.strategy_upgrades import (
     _find_short_call,
     _is_tail_risk_name,
 )
+import steps.strategy_upgrades as _su
+from datetime import date
+
+
+class _FakeFetcher:
+    """Stand-in for the etrade-chain-fetcher module, to exercise the
+    delta-first / %OTM-fallback selection in _etrade_call_quote without a live
+    broker."""
+
+    def __init__(self, *, delta_quote=None, otm_quote=None):
+        self._delta_quote = delta_quote
+        self._otm_quote = otm_quote
+        self.delta_calls = 0
+        self.otm_calls = 0
+
+    def choose_expiration(self, **kw):
+        return date(2026, 7, 17)
+
+    def find_strike_near_delta(self, **kw):
+        self.delta_calls += 1
+        return self._delta_quote
+
+    def find_strike_at_otm_pct(self, **kw):
+        self.otm_calls += 1
+        return self._otm_quote
+
+
+def test_call_quote_prefers_delta_band(monkeypatch):
+    """When the chain has deltas, select by delta band and tag selected_by='delta'."""
+    fake = _FakeFetcher(
+        delta_quote={"strike": 18.0, "bid": 0.40, "mid": 0.42, "ask": 0.44, "delta": 0.24},
+        otm_quote={"strike": 17.0, "bid": 0.66, "mid": 0.68, "ask": 0.70, "delta": None},
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    q = _su._etrade_call_quote(symbol="SOFI", spot=16.0, target_delta=0.25)
+    assert q["selected_by"] == "delta"
+    assert q["strike"] == 18.0
+    assert q["delta"] == 0.24
+    assert fake.delta_calls == 1 and fake.otm_calls == 0  # never fell back
+
+
+def test_call_quote_falls_back_to_otm_when_no_deltas(monkeypatch):
+    """When delta selection yields nothing (chain lacks Greeks), fall back to
+    %OTM and carry delta=None (caller will render 'δ n/a')."""
+    fake = _FakeFetcher(
+        delta_quote=None,
+        otm_quote={"strike": 17.0, "bid": 0.66, "mid": 0.68, "ask": 0.70, "delta": None},
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    q = _su._etrade_call_quote(symbol="SMH", spot=16.0, target_delta=0.25)
+    assert q["selected_by"] == "otm_pct"
+    assert q["delta"] is None
+    assert fake.delta_calls == 1 and fake.otm_calls == 1  # tried delta, then fell back
 
 
 @pytest.fixture

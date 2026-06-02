@@ -255,6 +255,12 @@ class ScoutResult:
     earnings_date: str | None = None
     days_to_earnings: int | None = None
     third_party_rec: str | None = None
+    # Parkev rating tier (5=Top Stock to Buy, 4=Top 15/25 Stock, 3=Buy,
+    # 2=Borderline Buy, 1=Hold, 0=Sell). Tier ≥4 = high-conviction signal that
+    # When-To-Enter surfaces with a 🌟 STRONG BUY badge distinct from a plain
+    # tier-3 BUY. None when the ticker isn't in Parkev's sheet.
+    rating_tier: int | None = None
+    aging: bool = False           # rec is >14 days old per Parkev's date_updated
     verdict: str = "WATCH"
     rationale: list = field(default_factory=list)
     csp_entry: dict | None = None  # if CSP_ENTRY verdict
@@ -347,7 +353,19 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
         except ValueError:
             pass
 
-    res.third_party_rec = recs_map.get(ticker.upper())
+    # recs_map values can be EITHER a plain rec string (legacy callers) OR a
+    # dict carrying {recommendation, rating_tier, aging, ...} (preferred — used
+    # by the briefing pipeline). Handle both shapes for backwards compatibility.
+    _raw = recs_map.get(ticker.upper())
+    if isinstance(_raw, dict):
+        res.third_party_rec = _raw.get("recommendation")
+        rt = _raw.get("rating_tier")
+        res.rating_tier = int(rt) if rt is not None else None
+        res.aging = bool(_raw.get("aging"))
+    else:
+        res.third_party_rec = _raw  # legacy: string or None
+        res.rating_tier = None
+        res.aging = False
     held_w = held_weights.get(ticker.upper(), 0.0)
 
     verdict, reasons, want_csp = _verdict(tech, earnings, res.third_party_rec, held_w, cfg)
@@ -437,7 +455,17 @@ def _load_recs_and_weights() -> tuple[dict, dict, dict]:
                 t = r.get("ticker")
                 rec = r.get("recommendation")
                 if t and rec:
-                    recs[t.upper()] = str(rec).upper()
+                    # Carry the full rec dict so the scout can surface
+                    # rating_tier / aging downstream (parity with the briefing
+                    # pipeline's recs_map shape).
+                    recs[t.upper()] = {
+                        "recommendation": str(rec).upper(),
+                        "rating_tier": r.get("rating_tier"),
+                        "raw_recommendation": r.get("raw_recommendation"),
+                        "aging": bool(r.get("aging")),
+                        "age_days": r.get("age_days"),
+                        "date_updated": r.get("date_updated"),
+                    }
         except Exception:
             pass
 

@@ -199,20 +199,30 @@ def generate_long_term_opportunities_step(
     MAX_EXISTING_SHORT_PUTS_PER_NAME = 2
     STRIKE_OVERLAP_PCT = 0.05  # 5% — strikes within this range are "overlapping"
     existing_puts_by_ticker: dict = {}
+    # CRITICAL: a LONG put on the underlying is downside protection (collar floor
+    # or protective put). Selling a SHORT put at the same strike cancels that
+    # hedge. Track long puts separately so the LT_CSP path can refuse to
+    # recommend a short put that would un-collar an existing position. (The
+    # original code only tracked shorts via `if qty >= 0: continue`.)
+    long_puts_by_ticker: dict = {}
     for p in (positions or []):
         if p.get("assetType") != "OPTION":
             continue
         if (p.get("type") or "").upper() != "PUT":
             continue
         qty = float(p.get("qty", 0) or 0)
-        if qty >= 0:  # only short puts
-            continue
         t = (p.get("underlying") or "").upper()
         if not t:
             continue
-        entry = existing_puts_by_ticker.setdefault(t, {"count": 0, "strikes": []})
-        entry["count"] += abs(qty)
-        entry["strikes"].append(float(p.get("strike", 0) or 0))
+        strike = float(p.get("strike", 0) or 0)
+        if qty < 0:
+            entry = existing_puts_by_ticker.setdefault(t, {"count": 0, "strikes": []})
+            entry["count"] += abs(qty)
+            entry["strikes"].append(strike)
+        elif qty > 0:
+            lentry = long_puts_by_ticker.setdefault(t, {"count": 0, "strikes": []})
+            lentry["count"] += abs(qty)
+            lentry["strikes"].append(strike)
 
     filtered_again: list = []
     for op in op_dicts:
@@ -220,6 +230,33 @@ def generate_long_term_opportunities_step(
             filtered_again.append(op)
             continue
         t = (op.get("ticker") or "").upper()
+
+        # Long-put cancellation check (HIGHEST priority): if the user holds a
+        # LONG put on this name at/near the proposed strike, that's downside
+        # protection (collar floor / protective put). Selling a short put at the
+        # same strike cancels the hedge — refuse the recommendation outright.
+        import re as _re
+        sm = _re.search(r"\$(\d+(?:\.\d+)?)P\b", op.get("concrete_trade", ""))
+        proposed_strike = float(sm.group(1)) if sm else None
+        long_held = long_puts_by_ticker.get(t)
+        if long_held and proposed_strike is not None:
+            cancelling_strike = None
+            for held_strike in long_held["strikes"]:
+                if held_strike > 0 and abs(proposed_strike - held_strike) / held_strike <= STRIKE_OVERLAP_PCT:
+                    cancelling_strike = held_strike
+                    break
+            if cancelling_strike is not None:
+                op["skip_reason"] = (
+                    f"you already hold a LONG ${cancelling_strike:g}P on {t} as downside "
+                    f"protection (collar floor / protective put). Selling a "
+                    f"${proposed_strike:g}P at the same strike would cancel that hedge — "
+                    f"don't un-collar a hedged position to collect premium."
+                )
+                op["kind_when_skipped"] = "LONG_DATED_CSP"
+                op["kind"] = "SKIPPED_LT_CSP"
+                filtered_again.append(op)
+                continue
+
         existing = existing_puts_by_ticker.get(t)
         if not existing:
             filtered_again.append(op)

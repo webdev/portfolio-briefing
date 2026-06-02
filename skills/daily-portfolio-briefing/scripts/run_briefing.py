@@ -189,11 +189,23 @@ def main():
         held_weights = {}
         existing_short_puts: dict = {}
         nlv = float(snapshot_data.get("balance", {}).get("accountValue", 0) or 0)
+        # Build recs_map carrying the FULL rec dict (recommendation + rating_tier
+        # + aging) so the scout can surface tier-5 "Top Stock to Buy" distinct
+        # from tier-3 "Buy" rather than collapsing both into the same BUY signal.
+        # The scout accepts either {ticker: "BUY"} (legacy) or {ticker: {...full
+        # dict...}} (preferred) for backward compatibility.
         for r in (recommendations_list or []):
             t = r.get("ticker")
             rec = r.get("recommendation")
             if t and rec:
-                recs_map[str(t).upper()] = str(rec).upper()
+                recs_map[str(t).upper()] = {
+                    "recommendation": str(rec).upper(),
+                    "rating_tier": r.get("rating_tier"),
+                    "raw_recommendation": r.get("raw_recommendation"),
+                    "aging": bool(r.get("aging")),
+                    "age_days": r.get("age_days"),
+                    "date_updated": r.get("date_updated"),
+                }
         for p in (snapshot_data.get("positions") or []):
             if p.get("assetType") == "EQUITY":
                 sym = (p.get("symbol") or "").upper()
@@ -352,6 +364,32 @@ def main():
                 _shutil_c.copy(_cand_path, _deliv / _cand_path.name)
         except Exception as _ce:
             print(f"  WARNING: candidate research failed: {_ce}", file=sys.stderr)
+
+        # Step 8.6: When-To-Enter report — every theme company classified into
+        # ENTRY NOW / WAIT (with explicit RSI+pullback trigger) / WATCH / AVOID.
+        # Reuses the same scout cache; no extra fetches. Fail-soft.
+        try:
+            import os as _os_w
+            import shutil as _shutil_w
+            from datetime import datetime as _dt_w
+            from steps import when_to_enter as _wte
+
+            _wte_md = _wte.render_when_to_enter_report(
+                scout_payload, config=config,
+                generated_at=_dt_w.now().strftime("%A, %B %d, %Y · %I:%M %p"),
+            )
+            if _wte_md:
+                _wte_path = output_path.parent / f"when_to_enter_{today_date_str}.md"
+                _wte_path.write_text(_wte_md)
+                print(f"When-to-enter report: {_wte_path}")
+                if not args.no_delivery and not is_draft:
+                    _deliv_w = (Path(args.delivery_dir).expanduser() if args.delivery_dir
+                                else Path(_os_w.getenv("PORTFOLIO_BRIEFING_DELIVERY_DIR",
+                                                       str(Path.home() / "Documents" / "briefings"))).expanduser())
+                    _deliv_w.mkdir(parents=True, exist_ok=True)
+                    _shutil_w.copy(_wte_path, _deliv_w / _wte_path.name)
+        except Exception as _we:
+            print(f"  WARNING: when-to-enter report failed: {_we}", file=sys.stderr)
 
         if is_draft:
             print(f"\nWARNING: Briefing marked as DRAFT due to quality gate issues.")
