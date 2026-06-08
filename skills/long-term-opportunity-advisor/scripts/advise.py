@@ -115,8 +115,16 @@ def evaluate_options_idea(
     sma_200: Optional[float],
     third_party_rec: Optional[str],
     has_cash: bool = True,
+    sr_levels: Optional[list] = None,
 ) -> Optional[LongTermOpportunity]:
-    """Evaluate longer-dated option ideas: LEAP / long-dated CSP / diagonal / dividend."""
+    """Evaluate longer-dated option ideas: LEAP / long-dated CSP / diagonal / dividend.
+
+    ``sr_levels`` is an optional list of support/resistance level dicts (the
+    same shape returned by ``support_resistance.SupportResistance.to_dict()``
+    under ``supports`` + ``resistances``). When provided, LT_CSP strike
+    selection snaps to a real support cluster within the 7-13% OTM band
+    instead of the legacy "spot × 0.90, round to $5" heuristic.
+    """
     rec = (third_party_rec or "").upper()
 
     # LEAP CALL — high-conviction + low IV + near 200-SMA
@@ -141,7 +149,39 @@ def evaluate_options_idea(
     if (rec in ("BUY", "STRONG_BUY", "HOLD", "OUTPERFORM")
         and iv_rank is not None and iv_rank > 50
         and has_cash):
-        csp_strike = round(spot * 0.90 / 5) * 5  # 10% below spot
+        # Default: 10% OTM, rounded to nearest $5 (the legacy heuristic).
+        csp_strike = round(spot * 0.90 / 5) * 5
+        strike_anchor_note = ""
+        # S/R-aware refinement (hard rule #20): when a real support cluster
+        # sits within the 7-13% OTM band, snap the strike to it. Assignment
+        # then puts you at a chart-relevant level rather than a round-number
+        # spot * 0.90 estimate.
+        if sr_levels:
+            band_lo = spot * 0.87
+            band_hi = spot * 0.93
+            in_band = [
+                lv for lv in sr_levels
+                if isinstance(lv, dict)
+                and lv.get("side") == "support"
+                and band_lo <= float(lv.get("price", 0)) <= band_hi
+                and float(lv.get("strength", 0)) >= 1.5
+            ]
+            if in_band:
+                anchor = max(in_band, key=lambda lv: float(lv.get("strength", 0)))
+                anchor_price = float(anchor["price"])
+                # Round anchor to the nearest $5 to match listed-strike granularity.
+                csp_strike = round(anchor_price / 5) * 5
+                touches = int(anchor.get("touches", 1))
+                confluence = anchor.get("confluence") or []
+                source = anchor.get("source", "swing")
+                # Dedupe: source must not also appear in confluence ("sma_50 + sma_50").
+                conf_clean = [c for c in confluence if c != source]
+                conf_phrase = f" + {', '.join(conf_clean)}" if conf_clean else ""
+                touches_phrase = f"{touches} touches" if touches >= 2 else "1 touch"
+                strike_anchor_note = (
+                    f" Strike anchored to ${csp_strike:.0f} support ({source}{conf_phrase}, "
+                    f"{touches_phrase})."
+                )
         csp_premium_est = spot * 0.025  # rule-of-thumb 60-90 DTE 0.20 delta
         return LongTermOpportunity(
             kind="LONG_DATED_CSP",
@@ -149,7 +189,7 @@ def evaluate_options_idea(
             trigger_reasons=[f"third-party {rec}", f"IV rank {iv_rank:.0f} (elevated)", "willing-to-own at strike"],
             concrete_trade=f"SELL 1× {ticker} ${csp_strike:.0f}P ~75 DTE",
             rationale=f"Patient capital trade: elevated IV {iv_rank:.0f} + 75-DTE horizon = fat premium. "
-                      f"If assigned, you own at ${csp_strike:.0f} (effective basis ${csp_strike - csp_premium_est:.0f}).",
+                      f"If assigned, you own at ${csp_strike:.0f} (effective basis ${csp_strike - csp_premium_est:.0f}).{strike_anchor_note}",
             yield_or_cost=f"~${csp_premium_est*100:.0f} premium · ~{csp_premium_est/csp_strike*365/75*100:.0f}% annualized · ${csp_strike*100:,.0f} cash collateral",
             source="recommendation-list-fetcher + yfinance IV",
         )
@@ -166,13 +206,31 @@ def generate_long_term_opportunities(
     sma_200_values: dict,
     target_weights: dict,        # {ticker: ideal % NLV}
     has_cash: bool = True,
+    sr_by_ticker: Optional[dict] = None,
 ) -> list:
     """
     Run the advisor across the universe (held + recommended-but-not-held tickers).
 
+    ``sr_by_ticker`` optionally maps uppercase ticker → support_resistance dict
+    (the snapshot's ``to_dict()`` shape). When supplied, LT_CSP strike picking
+    anchors to a real support cluster rather than the spot×0.90 heuristic
+    (hard rule #20 — S/R discipline).
+
     Returns a list of LongTermOpportunity objects, sorted by priority.
     """
     opportunities = []
+    sr_by_ticker = sr_by_ticker or {}
+
+    def _sr_levels_for(t: str) -> Optional[list]:
+        """Concatenate supports + resistances into one list for the option
+        evaluator (the CSP path filters to side=='support' itself)."""
+        sr = sr_by_ticker.get((t or "").upper())
+        if not isinstance(sr, dict):
+            return None
+        out: list = []
+        out.extend(sr.get("supports") or [])
+        out.extend(sr.get("resistances") or [])
+        return out or None
 
     # Held positions: evaluate ADD/TRIM/EXIT/HOLD
     for ticker, info in positions_by_ticker.items():
@@ -198,6 +256,7 @@ def generate_long_term_opportunities(
             ticker=ticker, weight_pct=weight_pct, spot=spot,
             rsi=rsi, iv_rank=iv, sma_200=sma200,
             third_party_rec=rec, has_cash=has_cash,
+            sr_levels=_sr_levels_for(ticker),
         )
         if opt_idea:
             opportunities.append(opt_idea)

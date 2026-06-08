@@ -18,9 +18,183 @@ Output:  list[LongTermOpportunity-as-dict]  (ready to render).
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
+
+
+# Quality tier ranking constants for SKIPPED_ADD recs. Used to group the
+# Skipped section so the user sees which suppressed entries would be worth
+# funding if cash existed, vs which are redundant with existing CSPs.
+QUALITY_TOP = "TOP"            # high-quality entry — fund this first if cash exists
+QUALITY_WATCH = "WATCHLIST"     # acceptable — second-tier
+QUALITY_MARGINAL = "MARGINAL"   # weak setup — skip even with cash
+QUALITY_DEFERRED_CSP = "DEFERRED_CSP"  # the CSP is the entry mechanism
+QUALITY_RANK = {QUALITY_TOP: 0, QUALITY_WATCH: 1, QUALITY_MARGINAL: 2, QUALITY_DEFERRED_CSP: 3}
+
+
+def _score_lt_add_setup(
+    op: dict,
+    *,
+    rsi: float | None,
+    sma_200: float | None,
+    drawdown_pct: float | None,
+    spot: float | None,
+    rating_tier: int | None,
+    has_existing_csp: bool,
+    sr_payload: dict | None,
+) -> tuple[str, list[str]]:
+    """Return ``(quality_tier, notes)`` for a SKIPPED_ADD/DEFERRED_ADD_HAS_CSP rec.
+
+    Setup quality factors (each contributes to tier classification):
+      - RSI in 35-50 sweet spot vs 50-60 acceptable vs <30 or >60 disqualifying
+      - Third-party tier (5/4 high conviction, 3 standard, lower = weaker)
+      - Drawdown vs 200-SMA position — healthy correction vs broken trend
+      - S/R proximity — spot at a strong support cluster is the cleanest entry
+      - Existing CSP — defers to the CSP as the entry mechanism
+
+    Returns the tier label and a list of reason notes (for rendering).
+    """
+    notes: list[str] = []
+
+    if has_existing_csp:
+        notes.append("CSP already open — the put IS the entry mechanism")
+        return QUALITY_DEFERRED_CSP, notes
+
+    # Disqualifying conditions first.
+    sma_pct = None
+    if sma_200 and spot:
+        sma_pct = (spot - sma_200) / sma_200 * 100
+    if drawdown_pct is not None and drawdown_pct >= 50 and sma_pct is not None and sma_pct < -15:
+        notes.append(f"drawdown {drawdown_pct:.0f}% + {sma_pct:.0f}% below 200-SMA — trend broken")
+        return QUALITY_MARGINAL, notes
+
+    # RSI band scoring.
+    rsi_score = 0
+    if rsi is None:
+        notes.append("no RSI available")
+    elif 35 <= rsi <= 50:
+        rsi_score = 3
+        notes.append(f"RSI {rsi:.0f} sweet spot (pullback band)")
+    elif 50 < rsi <= 55:
+        rsi_score = 2
+        notes.append(f"RSI {rsi:.0f} mid-range, acceptable")
+    elif 55 < rsi <= 60:
+        rsi_score = 1
+        notes.append(f"RSI {rsi:.0f} borderline (extended)")
+    elif 25 <= rsi < 35:
+        rsi_score = 1
+        notes.append(f"RSI {rsi:.0f} oversold — wait for base")
+    else:
+        notes.append(f"RSI {rsi:.0f} outside favored band")
+
+    # Third-party tier scoring.
+    tier_score = 0
+    if rating_tier is None:
+        pass
+    elif rating_tier >= 5:
+        tier_score = 3
+        notes.append(f"tier {rating_tier} (high-conviction catalyst)")
+    elif rating_tier >= 4:
+        tier_score = 2
+        notes.append(f"tier {rating_tier} (Top 15)")
+    elif rating_tier >= 3:
+        tier_score = 1
+        notes.append(f"tier {rating_tier} (Buy)")
+    else:
+        notes.append(f"tier {rating_tier} (weak rec)")
+
+    # S/R proximity scoring (within 3-5% of a strong support cluster).
+    sr_score = 0
+    if sr_payload and isinstance(sr_payload, dict) and spot:
+        supports = sr_payload.get("supports") or []
+        for sup in supports[:3]:
+            try:
+                sp = float(sup.get("price", 0))
+                touches = int(sup.get("touches", 1))
+                if sp <= 0:
+                    continue
+                dist_pct = (spot - sp) / spot
+                if 0 < dist_pct <= 0.03 and touches >= 3:
+                    sr_score = 2
+                    notes.append(f"spot at ${sp:g} {touches}-touch support cluster")
+                    break
+                elif 0 < dist_pct <= 0.05:
+                    sr_score = max(sr_score, 1)
+                    notes.append(f"spot near ${sp:g} support")
+                    break
+            except (TypeError, ValueError):
+                continue
+
+    # Drawdown sanity.
+    if drawdown_pct is not None:
+        if 10 <= drawdown_pct <= 30 and sma_pct is not None and sma_pct >= -5:
+            notes.append(f"drawdown {drawdown_pct:.0f}% — healthy correction (trend intact)")
+
+    total = rsi_score + tier_score + sr_score
+    if total >= 5:
+        return QUALITY_TOP, notes
+    if total >= 3:
+        return QUALITY_WATCH, notes
+    return QUALITY_MARGINAL, notes
+
+
+def _compute_funding_hint(snapshot_data: dict) -> dict:
+    """Compute approximate funding sources for re-deploying capital.
+
+    Walks the snapshot's option positions and surfaces:
+      - sum of cash that would be freed by closing all SHORT options at ≥30% profit
+      - count of such positions
+      - top 3 by absolute freed-cash contribution
+    """
+    positions = (snapshot_data or {}).get("positions") or []
+    candidates: list[dict] = []
+    for p in positions:
+        if p.get("assetType") != "OPTION":
+            continue
+        qty = float(p.get("qty", 0) or 0)
+        if qty >= 0:
+            continue  # only short positions free collateral on close
+
+        # E*TRADE snapshot fields: costPerShare = entry premium per share;
+        # currentMid = current option price; totalGainPct = capture %.
+        # For a SHORT, capture = (entry - current) / entry. When totalGainPct
+        # is negative on a short, that's a LOSS (current > entry), so flip sign.
+        entry = float(p.get("costPerShare") or p.get("premiumReceived") or 0)
+        current = float(p.get("currentMid") or 0)
+        if entry <= 0 or current < 0:
+            continue
+        # For shorts: profit when current < entry (we sold high, can buy back lower).
+        capture_pct = (entry - current) / entry
+        if capture_pct < 0.30:
+            continue
+        strike = float(p.get("strike", 0) or 0)
+        is_put = (p.get("type") or "").upper() == "PUT"
+        # Put collateral = strike × |qty| × 100. Calls don't tie up cash; they
+        # cap shares. We surface puts here because the user's question is
+        # "where can I free CASH for entries?"
+        freed_cash = strike * abs(qty) * 100 if is_put else 0
+        contracts = abs(qty)
+        sym = p.get("symbol") or "?"
+        profit_per_contract = (entry - current) * 100
+        locked_profit = profit_per_contract * contracts
+        candidates.append({
+            "symbol": sym,
+            "freed_cash": freed_cash,
+            "locked_profit": locked_profit,
+            "capture_pct": capture_pct,
+            "is_put": is_put,
+        })
+    candidates.sort(key=lambda c: -c["freed_cash"])
+    total_freed = sum(c["freed_cash"] for c in candidates)
+    total_profit = sum(c["locked_profit"] for c in candidates)
+    return {
+        "total_freed_cash": total_freed,
+        "total_locked_profit": total_profit,
+        "count": len(candidates),
+        "top3": candidates[:3],
+    }
 
 try:
     from analysis import rsi_discipline
@@ -162,6 +336,16 @@ def generate_long_term_opportunities_step(
             if spot:
                 positions_by_ticker[ticker] = {"weight_pct": 0.0, "spot": float(spot)}
 
+    # Build sr_by_ticker from the snapshot's technicals so LT_CSP strike
+    # selection can anchor to real support clusters (hard rule #20).
+    sr_by_ticker: dict = {}
+    for sym, tech in technicals.items():
+        if not isinstance(tech, dict):
+            continue
+        sr = tech.get("support_resistance")
+        if isinstance(sr, dict):
+            sr_by_ticker[str(sym).upper()] = sr
+
     try:
         opportunities = generate_long_term_opportunities(
             positions_by_ticker=positions_by_ticker,
@@ -172,6 +356,7 @@ def generate_long_term_opportunities_step(
             sma_200_values=sma_200_values,
             target_weights=target_weights,
             has_cash=has_cash,
+            sr_by_ticker=sr_by_ticker,
         )
     except Exception as e:
         print(f"  [warn] long-term-advisor failed: {e}", file=sys.stderr)
@@ -293,6 +478,149 @@ def generate_long_term_opportunities_step(
         filtered_again.append(op)
     op_dicts = filtered_again
 
+    # LT_ADD discipline gate (hard rule #22). $5K "starter" ADD recs are
+    # filler when:
+    #   (a) the user already has an open CSP on the name — the CSP IS the
+    #       entry mechanism, equity adds redundant exposure at a worse price
+    #   (b) stress coverage is below 0.30x — the system is in defensive mode,
+    #       new long exposure compounds the problem we're trying to fix
+    #   (c) cash floor < 5% NLV — recently-experienced margin call lesson;
+    #       deploying cash into low-conviction starters is the wrong move
+    # When tier >= 4 (Top 15 / Top Stock to Buy per Parkev's ladder) AND
+    # NO existing CSP, PROMOTE the starter from $5K to $20K so the size
+    # expresses the conviction.
+    add_cfg = (config or {}).get("lt_add_discipline", {}) or {}
+    suppress_coverage_below = float(add_cfg.get("suppress_below_coverage", 0.30))
+    suppress_cash_below_pct = float(add_cfg.get("suppress_below_cash_pct", 0.05))
+    promote_tier_min = int(add_cfg.get("promote_tier_min", 4))
+    promote_size = float(add_cfg.get("promote_to_size_usd", 20_000))
+
+    # Snapshot the gate inputs.
+    _cash = float(balance.get("cash", 0) or 0)
+    _cash_pct = (_cash / nlv) if nlv > 0 else 0.0
+    _coverage = None  # the long-term-advisor step doesn't take analytics yet;
+                      # safest default = unknown → don't suppress on coverage.
+                      # When analytics is available upstream, plumb it here.
+    # Snapshot recommendations_list for tier lookup.
+    _tier_by_ticker: dict = {}
+    for r in (recommendations_list or []):
+        if isinstance(r, dict):
+            tk = (r.get("ticker") or "").upper()
+            rt = r.get("rating_tier")
+            if tk and rt is not None:
+                try:
+                    _tier_by_ticker[tk] = int(rt)
+                except (TypeError, ValueError):
+                    pass
+
+    add_demoted: list = []
+    for op in op_dicts:
+        if (op.get("kind") or "").upper() != "ADD":
+            add_demoted.append(op)
+            continue
+        t = (op.get("ticker") or "").upper()
+
+        # Gate 1: suppress when cash floor breached (post-margin-call discipline).
+        if _cash_pct < suppress_cash_below_pct:
+            op["skip_reason"] = (
+                f"cash floor breached — only {_cash_pct*100:.1f}% NLV in cash "
+                f"(< {suppress_cash_below_pct*100:.0f}% floor). Deploying capital "
+                f"into low-conviction starter positions when defensive room is thin "
+                f"is the lesson Friday's margin call taught us. Skip until cash "
+                f"is rebuilt."
+            )
+            op["kind_when_skipped"] = "ADD"
+            op["kind"] = "SKIPPED_ADD"
+            # Score the setup quality so the renderer can tier these into
+            # TOP picks (worth funding) vs WATCHLIST vs MARGINAL vs DEFERRED_CSP.
+            # IMPORTANT: include has_existing_csp here. Even when cash floor
+            # suppresses the rec, the user wants to see that the CSP is the
+            # entry mechanism so they don't think "free cash = buy these" when
+            # really "your CSP is already doing this."
+            sr_payload = (technicals.get(t) or {}).get("support_resistance") \
+                         if isinstance(technicals.get(t), dict) else None
+            spot_for_score = positions_by_ticker.get(t, {}).get("spot")
+            _csp_here = existing_puts_by_ticker.get(t)
+            _has_csp = bool(_csp_here and _csp_here.get("count", 0) > 0)
+            tier, q_notes = _score_lt_add_setup(
+                op,
+                rsi=rsi_values.get(t),
+                sma_200=sma_200_values.get(t),
+                drawdown_pct=drawdown_pcts.get(t),
+                spot=spot_for_score,
+                rating_tier=_tier_by_ticker.get(t),
+                has_existing_csp=_has_csp,
+                sr_payload=sr_payload,
+            )
+            op["quality_tier"] = tier
+            op["quality_notes"] = q_notes
+            add_demoted.append(op)
+            continue
+
+        # Gate 2: suppress when stress coverage is in defensive territory.
+        if _coverage is not None and _coverage < suppress_coverage_below:
+            op["skip_reason"] = (
+                f"stress coverage {_coverage:.2f}× < {suppress_coverage_below:.2f}× "
+                f"defensive floor. Adding long equity exposure while in defensive "
+                f"posture compounds the problem; rebuild coverage first."
+            )
+            op["kind_when_skipped"] = "ADD"
+            op["kind"] = "SKIPPED_ADD"
+            add_demoted.append(op)
+            continue
+
+        # Gate 3: demote when user already has a short put on this name.
+        # The CSP IS the entry mechanism — equity here double-pays at a worse
+        # cost basis than the put strike.
+        existing_csp = existing_puts_by_ticker.get(t)
+        if existing_csp and existing_csp.get("count", 0) > 0:
+            strikes = sorted(set(existing_csp.get("strikes", [])))
+            strikes_str = ", ".join(f"${s:g}" for s in strikes)
+            op["skip_reason"] = (
+                f"you already have {int(existing_csp['count'])} short put(s) on {t} "
+                f"at strike(s) {strikes_str} — the CSP IS the entry mechanism for "
+                f"this name. Adding equity at spot pays MORE per share than your "
+                f"put-assignment cost basis. Let the put do the work; if you want "
+                f"more exposure, sell another CSP at a lower strike rather than "
+                f"buying equity at the higher current price."
+            )
+            op["kind_when_skipped"] = "ADD"
+            op["kind"] = "DEFERRED_ADD_HAS_CSP"
+            op["quality_tier"] = QUALITY_DEFERRED_CSP
+            op["quality_notes"] = [f"existing CSP at {strikes_str} — CSP is the entry"]
+            add_demoted.append(op)
+            continue
+
+        # Gate 4 (promote, not suppress): tier 4-5 high-conviction ADD with NO
+        # existing CSP gets a meaningful size, not the default $5K filler.
+        tier = _tier_by_ticker.get(t)
+        if tier is not None and tier >= promote_tier_min:
+            # Recompute share count for the promoted size.
+            try:
+                spot_str = re.search(r"~\$([\d,.]+)\)", op.get("concrete_trade", "") or "")
+                spot_for_shares = float(spot_str.group(1).replace(",", "")) if spot_str else 0.0
+            except (ValueError, AttributeError):
+                spot_for_shares = 0.0
+            new_shares = int(promote_size / spot_for_shares) if spot_for_shares > 0 else 0
+            old_size_str = re.search(r"~\$[\d,]+", op.get("concrete_trade", "") or "")
+            if old_size_str and new_shares > 0:
+                op["concrete_trade"] = (
+                    op["concrete_trade"].replace(
+                        old_size_str.group(0),
+                        f"~${promote_size:,.0f}"
+                    ).replace(
+                        re.search(r"\(~\d+ shares", op["concrete_trade"]).group(0),
+                        f"(~{new_shares} shares"
+                    )
+                )
+                op["promoted_tier"] = tier
+                op.setdefault("trigger_reasons", []).insert(
+                    0, f"🌟 Parkev tier-{tier} high-conviction — sized meaningfully"
+                )
+
+        add_demoted.append(op)
+    op_dicts = add_demoted
+
     # RSI discipline — a LONG_DATED_CSP is a put-sale, so an overbought tape
     # (RSI > 70) hard-blocks the new open, consistent with the rest of the
     # briefing. Then annotate EVERY surviving opportunity with its RSI so the
@@ -337,6 +665,18 @@ def generate_long_term_opportunities_step(
     # Pull REAL premium/bid/ask from live yfinance chains for each LT_CSP so
     # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
     _enrich_with_live_premiums(op_dicts)
+
+    # Compute a funding-hint footer so the Skipped section can tell the user
+    # how much cash they could free by closing their high-capture short puts
+    # today (the path back to deploying the suppressed ADD recs). Stashed
+    # under a sentinel kind that the renderer will pull out before rendering.
+    funding = _compute_funding_hint(snapshot_data)
+    if funding["total_freed_cash"] > 0 or funding["total_locked_profit"] > 0:
+        op_dicts.append({
+            "kind": "_FUNDING_HINT",
+            "ticker": "",
+            "funding": funding,
+        })
     return op_dicts
 
 
@@ -651,8 +991,20 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
 
     # Partition into active opportunities vs ones we skipped because of
     # existing positions / strike overlaps. Skipped ones get a compact footer.
-    active = [op for op in opportunities if not (op.get("kind") or "").startswith("SKIPPED")]
-    skipped = [op for op in opportunities if (op.get("kind") or "").startswith("SKIPPED")]
+    # _FUNDING_HINT is metadata, not a renderable opportunity — pull it out.
+    funding_hint = None
+    cleaned: list = []
+    for op in opportunities:
+        if (op.get("kind") or "") == "_FUNDING_HINT":
+            funding_hint = op.get("funding")
+            continue
+        cleaned.append(op)
+    opportunities = cleaned
+
+    active = [op for op in opportunities if not (op.get("kind") or "").startswith("SKIPPED")
+              and (op.get("kind") or "") != "DEFERRED_ADD_HAS_CSP"]
+    skipped = [op for op in opportunities if (op.get("kind") or "").startswith("SKIPPED")
+               or (op.get("kind") or "") == "DEFERRED_ADD_HAS_CSP"]
 
     lines = [
         "## 🔭 Long-Term Opportunities (3-12mo horizon)",
@@ -693,15 +1045,85 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
             lines.append(f"- **Source:** {op['source']}")
         lines.append("")
 
-    # Footer: surface LT_CSPs we skipped (existing-position guards or RSI gate)
+    # Footer: surface skipped recs, but GROUP and RANK them so the user can
+    # see which are worth re-considering vs which are redundant. The
+    # quality_tier attached during the gating step drives the grouping:
+    #   - TOP picks (would be the cleanest entries if you free up cash)
+    #   - WATCHLIST (acceptable second-tier)
+    #   - DEFERRED to CSP (you already have a put — the CSP IS the entry)
+    #   - MARGINAL / RSI / position guards (skip even with cash)
     if skipped:
+        # Bucket by quality tier (only ADDs have tiers; CSPs go to "other").
+        by_tier: dict = {QUALITY_TOP: [], QUALITY_WATCH: [],
+                         QUALITY_DEFERRED_CSP: [], QUALITY_MARGINAL: [], "_OTHER": []}
+        for op in skipped:
+            kind_w = (op.get("kind_when_skipped") or "").upper()
+            if kind_w == "ADD" and op.get("quality_tier"):
+                by_tier[op["quality_tier"]].append(op)
+            else:
+                by_tier["_OTHER"].append(op)
+
         lines.append("### ⏸ Skipped (position + RSI discipline guards)")
         lines.append("")
-        for op in skipped:
-            ticker = op.get("ticker", "?")
-            reason = op.get("skip_reason") or "duplicate or overlapping exposure"
-            kind = (op.get("kind_when_skipped") or "LT_CSP").replace("LONG_DATED_CSP", "LT_CSP")
-            lines.append(f"- **{ticker} {kind}** — {reason}")
-        lines.append("")
+
+        if by_tier[QUALITY_TOP]:
+            lines.append("**🥇 Top entries if you free cash** — clean RSI band + favorable third-party rec + near support")
+            lines.append("")
+            for op in by_tier[QUALITY_TOP]:
+                t = op.get("ticker", "?")
+                notes = "; ".join(op.get("quality_notes") or [])
+                lines.append(f"- **{t}** — {notes}")
+            lines.append("")
+
+        if by_tier[QUALITY_WATCH]:
+            lines.append("**🥈 Watchlist** — acceptable but not the cleanest setup")
+            lines.append("")
+            for op in by_tier[QUALITY_WATCH]:
+                t = op.get("ticker", "?")
+                notes = "; ".join(op.get("quality_notes") or [])
+                lines.append(f"- **{t}** — {notes}")
+            lines.append("")
+
+        if by_tier[QUALITY_DEFERRED_CSP]:
+            lines.append("**🛡️ Deferred to existing CSP** — the put IS your entry; don't double-pay")
+            lines.append("")
+            for op in by_tier[QUALITY_DEFERRED_CSP]:
+                t = op.get("ticker", "?")
+                notes = "; ".join(op.get("quality_notes") or [])
+                lines.append(f"- **{t}** — {notes}")
+            lines.append("")
+
+        if by_tier[QUALITY_MARGINAL]:
+            lines.append("**⚠️ Marginal** — broken trend or weak setup; skip even with cash")
+            lines.append("")
+            for op in by_tier[QUALITY_MARGINAL]:
+                t = op.get("ticker", "?")
+                notes = "; ".join(op.get("quality_notes") or [])
+                lines.append(f"- **{t}** — {notes}")
+            lines.append("")
+
+        if by_tier["_OTHER"]:
+            for op in by_tier["_OTHER"]:
+                ticker = op.get("ticker", "?")
+                reason = op.get("skip_reason") or "duplicate or overlapping exposure"
+                kind = (op.get("kind_when_skipped") or "LT_CSP").replace("LONG_DATED_CSP", "LT_CSP")
+                lines.append(f"- **{ticker} {kind}** — {reason}")
+            lines.append("")
+
+        # Funding hint footer — show the user HOW to free cash if they want
+        # to act on the Top picks. This converts the "skip until cash rebuilt"
+        # vagueness into an actionable next step.
+        if funding_hint and (funding_hint.get("total_freed_cash", 0) > 0 or
+                              funding_hint.get("total_locked_profit", 0) > 0):
+            total_cash = funding_hint["total_freed_cash"]
+            total_profit = funding_hint["total_locked_profit"]
+            n = funding_hint["count"]
+            lines.append(f"**💰 How to fund deployment:** Closing your {n} short put(s) at ≥30% capture "
+                         f"would free **${total_cash:,.0f}** of collateral and lock **${total_profit:,.0f}** "
+                         f"of theta. Top contributors:")
+            for c in funding_hint.get("top3", []):
+                lines.append(f"  - `{c['symbol']}` — frees ${c['freed_cash']:,.0f} + locks ${c['locked_profit']:,.0f} "
+                             f"({c['capture_pct']*100:.0f}% captured)")
+            lines.append("")
 
     return lines

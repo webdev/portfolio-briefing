@@ -38,6 +38,18 @@ try:
 except ImportError:  # pragma: no cover - path fallback
     _iv = None
 
+try:
+    from analysis import support_resistance as _sr
+except ImportError:  # pragma: no cover - path fallback
+    _sr = None
+
+
+# When spot is within this percentage of a support/resistance cluster the
+# trigger phrasing switches from "wait for X-Y% pullback" to the explicit
+# price-zone language. 3% is the standard "anchor proximity" used elsewhere
+# (see briefing.yaml → support_resistance.anchor_proximity_pct).
+_AT_LEVEL_PCT = 0.03
+
 
 GROUP_ORDER = ["The AI Buildout", "Ancillary", "Adjacent"]
 THEME_ORDER = [
@@ -83,12 +95,84 @@ def _pct_below_sma(spot, sma) -> float | None:
         return None
 
 
-def classify(r: dict) -> tuple[str, str, str, str]:
-    """Classify a single scout result.
+def _coerce_sr(sr):
+    """Return a SupportResistance object or None — accepts the dict shape that
+    travels through the snapshot JSON as well as raw objects."""
+    if sr is None or _sr is None:
+        return None
+    if isinstance(sr, dict):
+        return _sr._coerce(sr)
+    return sr
+
+
+def _strongest_support_below(sr, spot: float):
+    """Return the highest-strength support below spot, or None when SR is unavailable."""
+    if sr is None or not sr.supports or not spot:
+        return None
+    below = [lv for lv in sr.supports if lv.price < spot]
+    if not below:
+        return None
+    return max(below, key=lambda lv: lv.strength)
+
+
+def _strongest_resistance_above(sr, spot: float):
+    if sr is None or not sr.resistances or not spot:
+        return None
+    above = [lv for lv in sr.resistances if lv.price > spot]
+    if not above:
+        return None
+    return max(above, key=lambda lv: lv.strength)
+
+
+def _at_support(sr, spot: float, *, pct: float = _AT_LEVEL_PCT) -> "object | None":
+    """Return the support level spot is within ``pct`` of, or None."""
+    if sr is None or not sr.supports or not spot:
+        return None
+    for lv in sr.supports:
+        if spot > 0 and abs(spot - lv.price) / spot <= pct:
+            return lv
+    return None
+
+
+def _support_zone_phrase(sr, spot: float) -> str | None:
+    """Build a 'into $X-$Y support zone' phrase from the 1-2 nearest supports.
+    Returns None when no usable supports exist."""
+    if sr is None or not sr.supports:
+        return None
+    below = [lv for lv in sr.supports if lv.price < spot]
+    if not below:
+        return None
+    # Order by closeness to spot (cheaper to fall to nearest support first).
+    below.sort(key=lambda lv: spot - lv.price)
+    near = below[:2]
+    if len(near) == 1:
+        return f"into ${near[0].price:g} (nearest support)"
+    # Render the closer-to-spot first so the user reads "drop to $X (first), $Y (deeper)".
+    lo = min(near, key=lambda lv: lv.price)
+    hi = max(near, key=lambda lv: lv.price)
+    return f"into the ${lo.price:g}-${hi.price:g} support zone"
+
+
+def _at_level_label(level) -> str:
+    """Compact label for an at-level confluence note: 'at $176 support (Apr swing + 200-SMA, 3 touches)'."""
+    if level is None:
+        return ""
+    return f"at {level.label()}"
+
+
+def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
+    """Classify a single scout result, optionally enriched with S/R.
 
     Returns ``(status, status_label, read, trigger)`` where ``status`` is one
     of ``enter | wait | watch | avoid``. Pure function over the scout result —
-    no I/O, deterministic, side-effect free."""
+    no I/O, deterministic, side-effect free.
+
+    ``sr`` is an optional :class:`SupportResistance` (or its ``to_dict()``
+    shape) for the same ticker. When provided, the trigger text uses the
+    actual support/resistance levels instead of the generic "8-12% pullback"
+    phrasing, and ENTRY cards get a confluence badge when spot sits at a
+    strong support. Backwards-compatible: ``sr=None`` reproduces the legacy
+    behavior exactly."""
     rsi = r.get("rsi_14")
     verdict = (r.get("verdict") or "").upper()
     dd = r.get("drawdown_pct") or 0
@@ -103,30 +187,53 @@ def classify(r: dict) -> tuple[str, str, str, str]:
 
     tp = _trend_phrase(spot, sma) or "trend n/a"
 
+    # S/R enrichment — when available, swap generic "X-Y% pullback" phrasing for
+    # explicit price-zone language ("into the $238-$245 support zone"). Falls
+    # back to the legacy phrasing when SR is None or has no qualifying supports
+    # (fail-closed: never fabricate a level).
+    sr_obj = _coerce_sr(sr)
+    support_zone = _support_zone_phrase(sr_obj, spot or 0) if (sr_obj and spot) else None
+    nearest_sup = _strongest_support_below(sr_obj, spot or 0) if (sr_obj and spot) else None
+    at_sup = _at_support(sr_obj, spot or 0) if (sr_obj and spot) else None
+
     # Technical state first — even an AVOID verdict on an overbought name
     # reduces to "wait for the cool-off," not "thesis broken."
     if rsi is not None and rsi >= 70:
         side_note = (" If you own shares, WRITE COVERED CALLS — rich IV + "
                      "extended setup is the favored time.") if iv >= 60 else ""
+        pullback_phrase = (
+            f"a pullback {support_zone}" if support_zone
+            else "a 8-12% pullback from spot"
+        )
         return ("wait", "🔴 WAIT — overbought",
                 f"Extended after a {f5:+.1f}% 5d run, RSI {rsi:.0f}, {tp}, IV rank {iv:.0f}.",
-                f"WAIT for RSI < 55 AND a 8-12% pullback from spot.{side_note}")
+                f"WAIT for RSI < 55 AND {pullback_phrase}.{side_note}")
 
     if rsi is not None and 60 <= rsi < 70:
+        pullback_phrase = (
+            f"a pullback {support_zone}" if support_zone
+            else "a 5-8% pullback"
+        )
         return ("wait", "🟡 WAIT — extended",
                 f"RSI {rsi:.0f}, {tp}, {f5:+.1f}% 5d — extended but not at the chase point.",
-                "WAIT for RSI to retrace into 45-55 AND a 5-8% pullback. Covered calls attractive if held.")
+                f"WAIT for RSI to retrace into 45-55 AND {pullback_phrase}. Covered calls attractive if held.")
 
     # Thesis check — deep drawdown + weak technicals + below the 200-SMA.
     if dd >= 40 and rsi is not None and rsi < 45 and (sma_pct or 0) < -15:
+        sup_note = (f" Key support to defend: ${nearest_sup.price:g} ({nearest_sup.source})."
+                    if nearest_sup else "")
         return ("avoid", "🔴 AVOID — thesis check",
                 f"Drawdown {dd:.0f}% from highs, RSI {rsi:.0f}, {tp} — broken trend without strength.",
-                "Don't enter on the pullback alone. Verify fundamentals. Consider only after 2 consecutive higher weekly closes AND RSI > 45.")
+                f"Don't enter on the pullback alone. Verify fundamentals. "
+                f"Consider only after 2 consecutive higher weekly closes AND RSI > 45.{sup_note}")
 
     if rsi is not None and rsi < 25:
+        sup_note = (f" Watch for stabilization near ${nearest_sup.price:g}."
+                    if nearest_sup else "")
         return ("wait", "🟡 WAIT — falling knife",
                 f"RSI {rsi:.0f} deeply oversold, 5d {f5:+.1f}%, {tp}.",
-                "WAIT for stabilization: RSI > 35 AND at least one green day. Small starter size only when it bases.")
+                f"WAIT for stabilization: RSI > 35 AND at least one green day.{sup_note} "
+                "Small starter size only when it bases.")
 
     # Verdict-driven AVOID (the scout flagged a specific concern not caught
     # by the technical states above). Surface the scout's actual rationale.
@@ -147,6 +254,12 @@ def classify(r: dict) -> tuple[str, str, str, str]:
         raw_rec = r.get("raw_recommendation") or ""
         tier_note = (f" Parkev tier-{tier} ({raw_rec}) — high-conviction catalyst."
                      if is_top_tier else "")
+        # S/R confluence — when spot sits at a strong support, surface that
+        # as confirmation. This is the "suspenders" on top of the RSI gate;
+        # never overrides, only confirms.
+        confluence_note = ""
+        if at_sup is not None:
+            confluence_note = f" ✅ Spot sits {_at_level_label(at_sup)} — confluence with the RSI signal."
         if verdict.startswith("CSP") and csp:
             exp_raw = csp.get("expiration") or ""
             try:
@@ -158,30 +271,54 @@ def classify(r: dict) -> tuple[str, str, str, str]:
                 earn_note = (f"  ⚠ earnings in {earn}d INSIDE the contract window — "
                              "defer until after the print.")
             strike = csp.get("strike") or 0
+            # If the proposed strike sits at a strong support, surface that —
+            # the strike isn't just delta-anchored, it's anchored to a real level.
+            strike_note = ""
+            if sr_obj and strike:
+                anchor = _sr.nearest_support_in_range(
+                    sr_obj,
+                    min_price=float(strike) * 0.97,
+                    max_price=float(strike) * 1.03,
+                ) if _sr else None
+                if anchor is not None:
+                    strike_note = f" Strike sits {_at_level_label(anchor)} — assignment puts you at a real support."
             label = "🌟 STRONG BUY — ENTRY NOW (CSP)" if is_top_tier else "🟢 ENTRY NOW — CSP"
             return ("enter", label,
                     f"RSI {rsi:.0f} in pullback zone, IV rank {iv:.0f}, drawdown {dd:.0f}%, {tp}. "
-                    f"Favorable spot to get paid to maybe buy lower.{tier_note}",
+                    f"Favorable spot to get paid to maybe buy lower.{tier_note}{confluence_note}",
                     f"SELL 1× ${strike:g}P exp **{exp_p}** ({csp.get('dte')} DTE) · "
                     f"mid ${csp.get('mid', 0):.2f} (bid ${csp.get('bid', 0):.2f} / "
-                    f"ask ${csp.get('ask', 0):.2f}). Collateral ~${float(strike) * 100:,.0f}.{earn_note}")
+                    f"ask ${csp.get('ask', 0):.2f}). Collateral ~${float(strike) * 100:,.0f}.{strike_note}{earn_note}")
         if verdict.startswith("BUY"):
             label = "🌟 STRONG BUY — ENTRY NOW" if is_top_tier else "🟢 ENTRY NOW — BUY"
+            scale_target = (
+                f"toward ${nearest_sup.price:g} support" if nearest_sup
+                else "toward RSI 35-40"
+            )
             trigger = (
-                "ENTER: sized for high-conviction (1/2 of target weight is reasonable). "
-                "Scale on further weakness toward RSI 35-40. Average down on confirmed support."
+                f"ENTER: sized for high-conviction (1/2 of target weight is reasonable). "
+                f"Scale on further weakness {scale_target}. Average down on confirmed support."
                 if is_top_tier else
-                "ENTER: small starter (1/3 of target weight). Scale on further weakness "
-                "toward RSI 35-40. Average down on confirmed support."
+                f"ENTER: small starter (1/3 of target weight). Scale on further weakness "
+                f"{scale_target}. Average down on confirmed support."
             )
             return ("enter", label,
                     f"RSI {rsi:.0f} in pullback zone, drawdown {dd:.0f}%, {tp}, "
-                    f"third-party BUY-rated.{tier_note}",
+                    f"third-party BUY-rated.{tier_note}{confluence_note}",
                     trigger)
+        # WATCH/neutral — refine the monitor trigger with explicit support price
+        # so the user knows EXACTLY what to watch for, not just a band.
+        monitor_trigger = (
+            f"Monitor. CSP entry becomes favored if IV rank > 50 AND a third-party "
+            f"BUY/STRONG_BUY arrives, OR on a pullback {support_zone}."
+            if support_zone
+            else "Monitor. CSP entry becomes favored if IV rank > 50 AND a third-party "
+                 "BUY/STRONG_BUY arrives, OR if drawdown deepens past 20% with RSI "
+                 "holding 35-45."
+        )
         return ("watch", "🟡 WATCH — neutral",
                 f"RSI {rsi:.0f} in pullback band but no specific catalyst from the scout.",
-                "Monitor. CSP entry becomes favored if IV rank > 50 AND a third-party BUY/STRONG_BUY arrives, "
-                "OR if drawdown deepens past 20% with RSI holding 35-45.")
+                monitor_trigger)
 
     if rsi is None:
         return ("watch", "🟡 WATCH — no RSI",
@@ -189,19 +326,32 @@ def classify(r: dict) -> tuple[str, str, str, str]:
                 "Verify the ticker manually before any entry — fail closed.")
 
     if 25 <= rsi < 35:
+        sup_note = (f" Key support: ${nearest_sup.price:g}." if nearest_sup else "")
         return ("wait", "🟡 WAIT — oversold",
                 f"RSI {rsi:.0f}, drawdown {dd:.0f}%, 5d {f5:+.1f}%, {tp}.",
-                "Small starter OK if you want; otherwise WAIT for RSI > 40 with confirmed support.")
+                f"Small starter OK if you want; otherwise WAIT for RSI > 40 with confirmed support.{sup_note}")
 
+    pullback_trigger = (
+        f"Monitor. CSP entry favored on a pullback {support_zone} with RSI 40-50."
+        if support_zone
+        else "Monitor. CSP entry favored on a pullback to RSI 40-50."
+    )
     return ("watch", "🟡 NEUTRAL",
             f"RSI {rsi:.0f}, {tp}, 5d {f5:+.1f}% — no directional edge.",
-            "Monitor. CSP entry favored on a pullback to RSI 40-50.")
+            pullback_trigger)
 
 
 def render_when_to_enter_report(scout_payload: dict | None, *,
                                  config: dict | None = None,
-                                 generated_at: str = "") -> str:
-    """Build the markdown report. Empty-string when no scout payload."""
+                                 generated_at: str = "",
+                                 sr_by_sym: dict | None = None) -> str:
+    """Build the markdown report. Empty-string when no scout payload.
+
+    ``sr_by_sym`` maps uppercase ticker → ``SupportResistance`` or its
+    ``to_dict()`` shape from the snapshot. When provided, every card's
+    trigger text uses real S/R levels instead of generic pullback %s.
+    Backwards-compatible: omit it for the legacy phrasing."""
+    sr_by_sym = sr_by_sym or {}
     if not scout_payload:
         return ""
     themes_meta = scout_payload.get("themes", {}) or {}
@@ -237,8 +387,9 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
 
     total = len(seen)
     counts = {"enter": 0, "wait": 0, "avoid": 0, "watch": 0}
-    for _, (_, r) in seen.items():
-        s, *_ = classify(r)
+    for tk, (_, r) in seen.items():
+        sr = sr_by_sym.get(tk.upper())
+        s, *_ = classify(r, sr=sr)
         counts[s] = counts.get(s, 0) + 1
 
     lines: list[str] = []
@@ -267,7 +418,7 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
     for tk, (_, r) in sorted(seen.items()):
         if not _is_etf(tk):
             continue
-        s, label, *_ = classify(r)
+        s, label, *_ = classify(r, sr=sr_by_sym.get(tk.upper()))
         spot = r.get("spot")
         spot_s = f"${spot:,.2f}" if spot else "?"
         # Strip the emoji prefix from label for the compact one-liner
@@ -315,7 +466,8 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         f5 = r.get("fivedayret_pct")
         sma = r.get("sma_200")
         tp = _trend_phrase(spot, sma) or "trend n/a"
-        _status, label, read, trigger = classify(r)
+        sr_card = sr_by_sym.get(tk.upper())
+        _status, label, read, trigger = classify(r, sr=sr_card)
         others = [t for t in ticker_themes.get(tk, []) if t != tname]
         also = f" · also in: {', '.join(others)}" if others else ""
         etf_tag = " 🪙 **ETF**" if _is_etf(tk) else ""
@@ -367,7 +519,8 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
                 continue
             tname = themes_meta.get(tkey, {}).get("name", tkey)
             theme_etfs.sort(key=lambda item: (
-                STATUS_RANK.get(classify(item[1])[0], 9), item[0]
+                STATUS_RANK.get(classify(item[1], sr=sr_by_sym.get(item[0].upper()))[0], 9),
+                item[0],
             ))
             lines.append(f"### {tname} ({len(theme_etfs)})")
             lines.append("")
@@ -387,9 +540,9 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
                 continue
 
             def _sk(item):
-                _, r = item
-                s, *_ = classify(r)
-                return (STATUS_RANK.get(s, 9), item[0])
+                tk_sk, r = item
+                s, *_ = classify(r, sr=sr_by_sym.get(tk_sk.upper()))
+                return (STATUS_RANK.get(s, 9), tk_sk)
 
             rows.sort(key=_sk)
             lines.append(f"### {tname} ({len(rows)})")

@@ -194,6 +194,7 @@ def _etrade_call_quote(
     target_dte: int = 35,
     target_delta: float = 0.25,
     delta_tolerance: float = 0.12,
+    sr_resistances: list | None = None,
 ) -> dict | None:
     """Pull a covered-call quote via the canonical E*TRADE chain fetcher.
 
@@ -202,14 +203,21 @@ def _etrade_call_quote(
     (more headroom) and closer on a low-IV name. A flat %OTM target does the
     opposite — it caps a volatile name too tight (the SOFI $17-on-$16 case).
 
+    When ``sr_resistances`` is provided AND a strong resistance cluster sits
+    inside the delta-band's strike neighborhood, we prefer that strike — it
+    caps the position at a real chartist level rather than a delta-anchored
+    one (hard rule #20 — S/R discipline). The selected delta is then the
+    MEASURED delta at the resistance strike, never a fabricated one.
+
     We fall back to ``target_otm_pct`` ONLY when the chain carries no usable
     deltas (e.g. E*TRADE didn't populate Greeks for the legs). In that case the
     returned ``delta`` is None and callers must render "δ n/a" — never a
     fabricated delta.
 
     Returns {strike, bid, mid, ask, delta, iv, open_interest, expiration,
-    source, selected_by} or None if E*TRADE is unavailable. ``selected_by`` is
-    "delta" or "otm_pct".
+    source, selected_by, sr_anchor} or None if E*TRADE is unavailable.
+    ``selected_by`` is "delta", "otm_pct", or "sr_anchor". ``sr_anchor`` is
+    the Level-shaped dict the strike was snapped to (or None).
     """
     mod, cache = _load_chain_fetcher()
     if mod is None:
@@ -231,6 +239,47 @@ def _etrade_call_quote(
     )
     if q:
         q["selected_by"] = "delta"
+        q["sr_anchor"] = None
+        # S/R refinement: when a strong resistance sits within ±cluster of the
+        # delta-selected strike, snap to it. The chain fetcher's quote_contract
+        # call returns the *measured* delta at the snapped strike — never an
+        # invented one. If the snap quote fails (chain doesn't list that exact
+        # strike), keep the delta pick.
+        if sr_resistances:
+            chosen_strike = float(q.get("strike", 0) or 0)
+            if chosen_strike > 0:
+                # Same neighborhood as the delta tolerance, mapped to price:
+                # ±3% of the delta strike. The chain's strike granularity bounds
+                # how close we can actually snap.
+                band_lo = chosen_strike * 0.97
+                band_hi = chosen_strike * 1.03
+                in_band = [
+                    lv for lv in sr_resistances
+                    if isinstance(lv, dict)
+                    and lv.get("side") == "resistance"
+                    and band_lo <= float(lv.get("price", 0)) <= band_hi
+                    and float(lv.get("strength", 0)) >= 1.5
+                ]
+                if in_band:
+                    anchor = max(in_band, key=lambda lv: float(lv.get("strength", 0)))
+                    anchor_price = float(anchor["price"])
+                    # Try to snap the quote to the resistance strike. Use the
+                    # chain's quote_contract to fetch the real bid/mid/ask/delta
+                    # at that strike.
+                    snapped = mod.quote_contract(
+                        symbol=symbol,
+                        strike=anchor_price,
+                        expiration=exp_date,
+                        opt_type="CALL",
+                        cache=cache,
+                    )
+                    if snapped:
+                        snapped["selected_by"] = "sr_anchor"
+                        snapped["sr_anchor"] = anchor
+                        return snapped
+                    # Chain didn't list that exact strike — keep the delta pick
+                    # but record that we considered an anchor for transparency.
+                    q["sr_anchor"] = None
         return q
     # Fallback: nearest strike ~N% OTM (chain had no usable deltas). delta=None.
     q = mod.find_strike_at_otm_pct(
@@ -243,6 +292,7 @@ def _etrade_call_quote(
     )
     if q:
         q["selected_by"] = "otm_pct"
+        q["sr_anchor"] = None
     return q
 
 
@@ -579,12 +629,23 @@ def compute_strategy_upgrades(
         cc_delta_tol = float(cc_cfg.get("delta_tolerance", 0.12))
         cc_fallback_otm = float(cc_cfg.get("fallback_otm_pct", 6.0))
 
+        # S/R-aware strike anchoring (hard rule #20): when the snapshot has a
+        # resistance cluster, the chain fetcher will prefer snapping the CC
+        # strike to it if a strong resistance sits in the delta-band's
+        # neighborhood. Fail-closed when SR is missing — falls back to pure
+        # delta-band selection.
+        sr_resistances = None
+        sr_payload = (technicals.get(symbol) or {}).get("support_resistance")
+        if isinstance(sr_payload, dict):
+            sr_resistances = sr_payload.get("resistances") or None
+
         # Pull real E*TRADE chain via the canonical fetcher. NEVER yfinance.
         # Delta-first selection (falls back to %OTM only when chain has no deltas).
         chain_quote = _etrade_call_quote(
             symbol=symbol, spot=price, target_otm_pct=cc_fallback_otm,
             target_dte=target_dte, target_delta=cc_target_delta,
             delta_tolerance=cc_delta_tol,
+            sr_resistances=sr_resistances,
         )
 
         # Real, measured values — never a hardcoded/fabricated delta. delta may
@@ -654,6 +715,11 @@ def compute_strategy_upgrades(
             and rv.decision == "keep" and rv.badge
         )
 
+        # When the chain fetcher snapped to an S/R cluster, surface it so the
+        # rendered card can say "δ 0.24 · at $230 resistance (Mar high + 50-SMA,
+        # 3 touches)". Always carries the *measured* delta — never a fabrication.
+        sr_anchor_payload = chain_quote.get("sr_anchor") if chain_quote else None
+
         upgrade = {
             "type": "write_covered_call",
             "underlying": symbol,
@@ -672,6 +738,7 @@ def compute_strategy_upgrades(
             "target_delta": (round(abs(float(cc_delta)), 2) if cc_delta is not None else None),
             "otm_pct": (round(otm_pct_actual, 1) if otm_pct_actual is not None else None),
             "strike_selected_by": strike_selected_by,
+            "sr_anchor": sr_anchor_payload,
             "est_premium_per_share": round(premium_per_share, 2),
             "est_premium_total": round(premium_total, 0),
             "est_annualized_pct": round(annualized, 1),

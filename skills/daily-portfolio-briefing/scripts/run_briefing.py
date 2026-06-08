@@ -353,6 +353,30 @@ def main():
                 scout_payload, fv_by_ticker=_cand_fv, config=config,
                 generated_at=_dt_c.now().strftime("%A, %B %d, %Y · %I:%M %p"),
             )
+            # S/R annotation pass — appends "S: $X · R: $Y" to the candidate
+            # research cards. Merges snapshot technicals (held names) WITH the
+            # scout cache (all theme companies) so every card gets a level read.
+            # Fail-closed when SR is unavailable for a ticker.
+            try:
+                from analysis import support_resistance as _sr_cand
+                _sr_by_cand: dict = {}
+                if scout_payload:
+                    for _theme_key, _results in (scout_payload.get("results_by_theme") or {}).items():
+                        for _r in (_results or []):
+                            if not isinstance(_r, dict):
+                                continue
+                            _tk_s = (_r.get("ticker") or "").upper()
+                            _sr_s = _r.get("support_resistance")
+                            if _tk_s and isinstance(_sr_s, dict):
+                                _sr_by_cand[_tk_s] = _sr_s
+                _tech_cand = snapshot_data.get("technicals") or {}
+                for _sym_c, _t_c in _tech_cand.items():
+                    if isinstance(_t_c, dict) and isinstance(_t_c.get("support_resistance"), dict):
+                        _sr_by_cand[str(_sym_c).upper()] = _t_c["support_resistance"]
+                if _sr_by_cand:
+                    _cand_md = _sr_cand.annotate_briefing(_cand_md, _sr_by_cand)
+            except Exception as _se:
+                print(f"  WARNING: S/R annotation on candidate report failed: {_se}", file=sys.stderr)
             _cand_path = output_path.parent / f"candidates_{today_date_str}.md"
             _cand_path.write_text(_cand_md)
             print(f"Candidate research: {_cand_path}")
@@ -374,9 +398,32 @@ def main():
             from datetime import datetime as _dt_w
             from steps import when_to_enter as _wte
 
+            # Build sr_by_sym from BOTH the snapshot's technicals AND the scout
+            # cache, so every theme company (~120 tickers, not just held names)
+            # gets explicit support/resistance levels in its WTE trigger text
+            # instead of generic "X-Y% pullback" boilerplate. Snapshot wins on
+            # conflict (it's the freshest read for held positions); scout fills
+            # in everyone else.
+            _tech_wte = snapshot_data.get("technicals") or {}
+            _sr_wte: dict = {}
+            # Scout first (lower priority).
+            if scout_payload:
+                for _theme_key, _results in (scout_payload.get("results_by_theme") or {}).items():
+                    for _r in (_results or []):
+                        if not isinstance(_r, dict):
+                            continue
+                        _tk_s = (_r.get("ticker") or "").upper()
+                        _sr_s = _r.get("support_resistance")
+                        if _tk_s and isinstance(_sr_s, dict):
+                            _sr_wte[_tk_s] = _sr_s
+            # Snapshot second (higher priority, overrides scout).
+            for _sym_w, _t_w in _tech_wte.items():
+                if isinstance(_t_w, dict) and isinstance(_t_w.get("support_resistance"), dict):
+                    _sr_wte[str(_sym_w).upper()] = _t_w["support_resistance"]
             _wte_md = _wte.render_when_to_enter_report(
                 scout_payload, config=config,
                 generated_at=_dt_w.now().strftime("%A, %B %d, %Y · %I:%M %p"),
+                sr_by_sym=_sr_wte,
             )
             if _wte_md:
                 _wte_path = output_path.parent / f"when_to_enter_{today_date_str}.md"

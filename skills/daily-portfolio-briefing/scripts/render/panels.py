@@ -344,14 +344,45 @@ def render_health(equity_reviews: list, nlv: float, options_positions: list = No
     return lines
 
 
-def render_risk_alerts(equity_reviews: list, options_reviews: list, regime_data: dict) -> list:
-    """Real risk alerts — surface anything material from the reviews."""
+def render_risk_alerts(
+    equity_reviews: list, options_reviews: list, regime_data: dict,
+    put_buckets: list | None = None,
+) -> list:
+    """Real risk alerts — surface anything material from the reviews.
+
+    ``put_buckets`` is the list of PutBucketCluster objects from
+    analyze_put_buckets — critical-severity buckets get a dedicated Risk Alert
+    so users see them at the top of the briefing, distinct from the static
+    stress-coverage ratio (which assumes ALL puts assign at once and overstates
+    real risk on a well-laddered book)."""
     lines = ["## Risk Alerts", ""]
     alerts = []
 
     regime = (regime_data or {}).get("regime", "NORMAL")
     if regime in ("CAUTION", "RISK_OFF"):
         alerts.append(f"⚠️ Regime is **{regime}** — new long entries suppressed")
+
+    # Put-bucket concentration on a single Friday.
+    # Critical (≥30% NLV) gets ⚠️; Warning (≥20% NLV) gets 📊. This is separate
+    # from the per-name 10% cap (equity concentration) and from the stress-
+    # coverage ratio (which assumes simultaneous assignment — a fantasy on a
+    # laddered book).
+    for bucket in (put_buckets or []):
+        sev = getattr(bucket, "severity", None)
+        if sev not in ("critical", "warning"):
+            continue
+        exp_str = bucket.expiration.strftime("%a %b %d '%y")
+        names_sorted = sorted(bucket.names.items(), key=lambda kv: -kv[1])
+        top_names = ", ".join(t for t, _ in names_sorted[:5])
+        more = f" + {len(names_sorted) - 5} more" if len(names_sorted) > 5 else ""
+        days = f", {bucket.days_to_expiry}d out" if bucket.days_to_expiry is not None else ""
+        emoji = "⚠️" if sev == "critical" else "📊"
+        verdict = "over 30% NLV cluster" if sev == "critical" else "approaching 30% NLV cap"
+        alerts.append(
+            f"{emoji} Expiration cluster on **{exp_str}**{days} — "
+            f"{bucket.contract_count} short puts, ${bucket.total_obligation:,.0f} obligation "
+            f"({bucket.pct_of_nlv*100:.1f}% NLV, {verdict}). Names: {top_names}{more}"
+        )
 
     # Concentration warnings
     for rev in equity_reviews:

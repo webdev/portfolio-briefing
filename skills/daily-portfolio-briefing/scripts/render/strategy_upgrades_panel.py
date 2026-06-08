@@ -73,11 +73,25 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         otm_str = f"{otm_pct:.1f}% OTM" if otm_pct is not None else "OTM"
         delta_str = f"δ {abs(delta):.2f}" if delta is not None else "δ n/a"
 
+        # S/R anchor — when the strike was snapped to a real resistance cluster,
+        # surface it inline so the user sees the cap is at a chart-relevant level.
+        anchor = cc.get("sr_anchor") if isinstance(cc.get("sr_anchor"), dict) else None
+        anchor_str = ""
+        if anchor:
+            touches = int(anchor.get("touches", 1) or 1)
+            source = anchor.get("source", "swing")
+            confluence = anchor.get("confluence") or []
+            # Dedupe: source must not also appear in confluence.
+            conf_clean = [c for c in confluence if c != source]
+            conf_phrase = f" + {', '.join(conf_clean)}" if conf_clean else ""
+            touches_phrase = f"{touches} touches" if touches >= 2 else "1 touch"
+            anchor_str = f", at ${float(anchor['price']):g} resistance ({source}{conf_phrase}, {touches_phrase})"
+
         badge = "⛔ DEFER (earnings inside window)" if earnings_blocked else header_badge
         lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}{_promo_badge(cc)}")
         lines.append(
             f"  - SELL {contracts}× {symbol} ${strike:g}C exp ~{target_exp} "
-            f"({dte} DTE, {otm_str}, {delta_str})"
+            f"({dte} DTE, {otm_str}, {delta_str}{anchor_str})"
         )
         if cc.get("rsi_14") is not None:
             lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")

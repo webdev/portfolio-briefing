@@ -85,9 +85,10 @@ def compute_red_flags(
                 detail=(
                     f"You have **{short_put_count} short puts open** totaling "
                     f"**${total_put_oblig:,.0f} of cash-secured obligation** against "
-                    f"**${cash:,.0f} of cash** (coverage {coverage:.2f}×). At a 20% "
-                    f"market drop, multiple puts assign simultaneously and you'd be "
-                    f"short on cash."
+                    f"**${cash:,.0f} of cash** (coverage {coverage:.2f}×). Note: this is "
+                    f"the worst-case 'all puts assign at once' metric — see the "
+                    f"separate Expiration-bucket flag for the realistic single-Friday "
+                    f"concentration that drives time-weighted risk on a laddered book."
                 ),
                 do=[
                     "Close winners with ≥30% capture — frees collateral immediately.",
@@ -99,6 +100,53 @@ def compute_red_flags(
                     "Execute all Tier 3 LT CSPs — they make coverage worse, not better.",
                 ],
             ))
+
+    # ----------------------------------------------------------------
+    # 1b. Expiration-bucket concentration on a single Friday
+    # ----------------------------------------------------------------
+    # Even when puts are well distributed in dollar terms, a single
+    # expiration date that holds a fat share of NLV is a real liquidity
+    # cluster. analyze_put_buckets tiers these into critical (≥30%) and
+    # warning (≥20%). Critical → CRITICAL flag; warning → MEDIUM.
+    put_buckets = (analytics or {}).get("put_buckets") if isinstance(analytics, dict) else None
+    for bucket in (put_buckets or []):
+        sev = getattr(bucket, "severity", None)
+        if sev not in ("critical", "warning"):
+            continue
+        exp = bucket.expiration
+        days = bucket.days_to_expiry
+        days_str = f"{days}d out" if days is not None else "no DTE"
+        names_sorted = sorted(bucket.names.items(), key=lambda kv: -kv[1])
+        top_names = ", ".join(f"{t} (${o/1000:.0f}K)" for t, o in names_sorted[:5])
+        more = f", + {len(names_sorted) - 5} more" if len(names_sorted) > 5 else ""
+        rf_sev = "CRITICAL" if sev == "critical" else "MEDIUM"
+        flags.append(RedFlag(
+            severity=rf_sev,
+            headline=(
+                f"Expiration cluster on {exp.strftime('%a %b %d %y')} ({days_str}) — "
+                f"{bucket.contract_count} short puts, "
+                f"${bucket.total_obligation:,.0f} obligation, "
+                f"{bucket.pct_of_nlv*100:.1f}% NLV"
+            ),
+            detail=(
+                f"A single Friday holds **{bucket.contract_count} short puts** with "
+                f"**${bucket.total_obligation:,.0f} of cash-secured obligation** "
+                f"({bucket.pct_of_nlv*100:.1f}% of NLV). If a broad drop lands within "
+                f"the week of {exp.strftime('%b %d')}, multiple positions assign on the "
+                f"same day. Distribution-wise the book may look healthy elsewhere — "
+                f"this bucket is where the real correlated-event risk concentrates.\n\n"
+                f"Top positions in the bucket: {top_names}{more}"
+            ),
+            do=[
+                f"Close the highest-capture put in this bucket first — moves obligation off {exp.strftime('%b %d')}.",
+                f"Roll one position out to a later expiration — de-clusters with one ticket.",
+                f"Don't add new puts in this expiration bucket — it's already concentrated.",
+            ],
+            dont=[
+                f"Roll multiple positions INTO this date — it amplifies the cluster.",
+                f"Treat the per-name 10% concentration cap as the only flag — bucket concentration is orthogonal.",
+            ],
+        ))
 
     # ----------------------------------------------------------------
     # 2. Imminent earnings on losing positions (binary risk)

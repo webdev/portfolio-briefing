@@ -69,6 +69,115 @@ def test_call_quote_falls_back_to_otm_when_no_deltas(monkeypatch):
     assert fake.delta_calls == 1 and fake.otm_calls == 1  # tried delta, then fell back
 
 
+class _FakeFetcherWithQuoteContract(_FakeFetcher):
+    """Adds quote_contract() to support the S/R-anchor snap path."""
+
+    def __init__(self, *, delta_quote=None, otm_quote=None, anchor_quote=None):
+        super().__init__(delta_quote=delta_quote, otm_quote=otm_quote)
+        self._anchor_quote = anchor_quote
+        self.quote_contract_calls = 0
+        self.last_anchor_strike = None
+
+    def quote_contract(self, *, symbol, strike, expiration, opt_type, cache=None):
+        self.quote_contract_calls += 1
+        self.last_anchor_strike = strike
+        return self._anchor_quote
+
+
+def test_call_quote_snaps_to_sr_resistance_when_in_range(monkeypatch):
+    """A strong resistance cluster inside ±3% of the delta-selected strike
+    causes the quote to snap to that strike via quote_contract."""
+    fake = _FakeFetcherWithQuoteContract(
+        delta_quote={"strike": 18.0, "bid": 0.40, "mid": 0.42, "ask": 0.44, "delta": 0.24},
+        anchor_quote={"strike": 18.5, "bid": 0.50, "mid": 0.52, "ask": 0.54, "delta": 0.27},
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    sr_resistances = [
+        {"price": 18.5, "side": "resistance", "source": "swing",
+         "touches": 3, "strength": 2.5, "confluence": ["sma_50"]},
+    ]
+    q = _su._etrade_call_quote(
+        symbol="SOFI", spot=16.0, target_delta=0.25,
+        sr_resistances=sr_resistances,
+    )
+    assert q["selected_by"] == "sr_anchor"
+    assert q["strike"] == 18.5
+    assert q["delta"] == 0.27  # MEASURED delta at the snapped strike, never invented
+    assert q["sr_anchor"]["price"] == 18.5
+    assert fake.quote_contract_calls == 1
+
+
+def test_call_quote_no_snap_when_resistance_outside_band(monkeypatch):
+    """A resistance far from the delta strike → no snap, keep the delta pick."""
+    fake = _FakeFetcherWithQuoteContract(
+        delta_quote={"strike": 18.0, "bid": 0.40, "mid": 0.42, "ask": 0.44, "delta": 0.24},
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    sr_resistances = [
+        # 25 is ~39% above the delta strike of 18 — way outside ±3%
+        {"price": 25.0, "side": "resistance", "source": "swing",
+         "touches": 3, "strength": 2.5, "confluence": []},
+    ]
+    q = _su._etrade_call_quote(
+        symbol="SOFI", spot=16.0, target_delta=0.25,
+        sr_resistances=sr_resistances,
+    )
+    assert q["selected_by"] == "delta"
+    assert q["strike"] == 18.0
+    assert q["sr_anchor"] is None
+    assert fake.quote_contract_calls == 0  # never tried to snap
+
+
+def test_call_quote_no_snap_when_resistance_too_weak(monkeypatch):
+    """A weak (strength < 1.5) resistance inside the band → no snap."""
+    fake = _FakeFetcherWithQuoteContract(
+        delta_quote={"strike": 18.0, "bid": 0.40, "mid": 0.42, "ask": 0.44, "delta": 0.24},
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    sr_resistances = [
+        {"price": 18.3, "side": "resistance", "source": "swing",
+         "touches": 1, "strength": 0.5, "confluence": []},
+    ]
+    q = _su._etrade_call_quote(
+        symbol="SOFI", spot=16.0, target_delta=0.25,
+        sr_resistances=sr_resistances,
+    )
+    assert q["selected_by"] == "delta"
+    assert q["sr_anchor"] is None
+
+
+def test_call_quote_falls_back_when_anchor_strike_not_listed(monkeypatch):
+    """If quote_contract returns None (anchor strike not on the chain), keep
+    the delta pick rather than failing the whole quote."""
+    fake = _FakeFetcherWithQuoteContract(
+        delta_quote={"strike": 18.0, "bid": 0.40, "mid": 0.42, "ask": 0.44, "delta": 0.24},
+        anchor_quote=None,  # snap fails
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    sr_resistances = [
+        {"price": 18.5, "side": "resistance", "source": "swing",
+         "touches": 3, "strength": 2.5, "confluence": []},
+    ]
+    q = _su._etrade_call_quote(
+        symbol="SOFI", spot=16.0, target_delta=0.25,
+        sr_resistances=sr_resistances,
+    )
+    assert q["selected_by"] == "delta"
+    assert q["strike"] == 18.0
+    assert fake.quote_contract_calls == 1  # tried to snap, but didn't replace
+
+
+def test_call_quote_sr_none_preserves_legacy_behavior(monkeypatch):
+    """sr_resistances=None must reproduce the exact pre-S/R quote."""
+    fake = _FakeFetcherWithQuoteContract(
+        delta_quote={"strike": 18.0, "bid": 0.40, "mid": 0.42, "ask": 0.44, "delta": 0.24},
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+    q = _su._etrade_call_quote(symbol="SOFI", spot=16.0, target_delta=0.25, sr_resistances=None)
+    assert q["selected_by"] == "delta"
+    assert q.get("sr_anchor") is None
+
+
 @pytest.fixture
 def mock_snapshot_data():
     """Create a mock snapshot with positions, chains, earnings, quotes."""
