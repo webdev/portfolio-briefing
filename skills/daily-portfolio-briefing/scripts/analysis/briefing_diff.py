@@ -19,15 +19,38 @@ from typing import Optional
 
 
 def _signature_for_action(item_text: str) -> str:
-    """Build a stable signature for an action item (used for set comparison)."""
-    # Take the first line of the numbered item, strip leading number/bold
-    first = item_text.split("\n")[0]
-    # Drop leading "N. **TYPE**" → keep "TYPE TICKER..."
+    """Build a stable signature for an action item (used for set comparison).
+
+    The signature is ``TYPE|IDENTIFIER`` where IDENTIFIER is the option contract
+    (e.g. ``MU_PUT_700_20261218``) or, failing that, the ticker (e.g. ``TSLA``).
+
+    Crucially it must NOT depend on volatile text like the buy-to-close limit
+    price or captured-profit %, or the same recommendation flips between
+    "removed" and "added" day-over-day when only the price ticks (the MU bug).
+    The old regex used ``[A-Z_]+`` for the identifier, which excludes the DIGITS
+    in every option contract — so the match failed and it fell back to the first
+    80 chars of the line (price included). This keys on the stable parts only.
+    """
     import re
-    m = re.match(r"^\s*\d+\.\s+\*?\*?([A-Z_ ]+?)\*?\*?\s+([A-Z_]+?)(?:\s+|$|—)", first)
-    if m:
-        return f"{m.group(1).strip()}|{m.group(2).strip()}"
-    return first[:80]
+    first = item_text.split("\n")[0]
+
+    # Action TYPE = first bold token after the number ("CLOSE", "EXECUTE ROLL",
+    # "ROLL_OUT_AND_UP", "HEDGE", "DEFENSIVE ROLL (core override)", ...).
+    m_type = re.match(r"^\s*\d+\.\s+\*\*([^*]+)\*\*", first)
+    if not m_type:
+        return first[:80]
+    kind = m_type.group(1).strip()
+    rest = first[m_type.end():]
+
+    # Stable identifier: a full option contract (digits allowed!) first; else
+    # the first bare ticker. Never the price.
+    m_contract = re.search(r"\b[A-Z]{1,6}_(?:PUT|CALL)_\d+(?:_\d{6,8})?\b", rest)
+    if m_contract:
+        ident = m_contract.group(0)
+    else:
+        m_tk = re.search(r"\b[A-Z]{2,6}\b", rest)
+        ident = m_tk.group(0) if m_tk else rest.strip()[:40]
+    return f"{kind}|{ident}"
 
 
 def parse_action_signatures(briefing_md: str) -> set[str]:

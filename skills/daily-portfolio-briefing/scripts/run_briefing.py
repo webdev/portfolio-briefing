@@ -189,11 +189,23 @@ def main():
         held_weights = {}
         existing_short_puts: dict = {}
         nlv = float(snapshot_data.get("balance", {}).get("accountValue", 0) or 0)
+        # Build recs_map carrying the FULL rec dict (recommendation + rating_tier
+        # + aging) so the scout can surface tier-5 "Top Stock to Buy" distinct
+        # from tier-3 "Buy" rather than collapsing both into the same BUY signal.
+        # The scout accepts either {ticker: "BUY"} (legacy) or {ticker: {...full
+        # dict...}} (preferred) for backward compatibility.
         for r in (recommendations_list or []):
             t = r.get("ticker")
             rec = r.get("recommendation")
             if t and rec:
-                recs_map[str(t).upper()] = str(rec).upper()
+                recs_map[str(t).upper()] = {
+                    "recommendation": str(rec).upper(),
+                    "rating_tier": r.get("rating_tier"),
+                    "raw_recommendation": r.get("raw_recommendation"),
+                    "aging": bool(r.get("aging")),
+                    "age_days": r.get("age_days"),
+                    "date_updated": r.get("date_updated"),
+                }
         for p in (snapshot_data.get("positions") or []):
             if p.get("assetType") == "EQUITY":
                 sym = (p.get("symbol") or "").upper()
@@ -341,6 +353,30 @@ def main():
                 scout_payload, fv_by_ticker=_cand_fv, config=config,
                 generated_at=_dt_c.now().strftime("%A, %B %d, %Y · %I:%M %p"),
             )
+            # S/R annotation pass — appends "S: $X · R: $Y" to the candidate
+            # research cards. Merges snapshot technicals (held names) WITH the
+            # scout cache (all theme companies) so every card gets a level read.
+            # Fail-closed when SR is unavailable for a ticker.
+            try:
+                from analysis import support_resistance as _sr_cand
+                _sr_by_cand: dict = {}
+                if scout_payload:
+                    for _theme_key, _results in (scout_payload.get("results_by_theme") or {}).items():
+                        for _r in (_results or []):
+                            if not isinstance(_r, dict):
+                                continue
+                            _tk_s = (_r.get("ticker") or "").upper()
+                            _sr_s = _r.get("support_resistance")
+                            if _tk_s and isinstance(_sr_s, dict):
+                                _sr_by_cand[_tk_s] = _sr_s
+                _tech_cand = snapshot_data.get("technicals") or {}
+                for _sym_c, _t_c in _tech_cand.items():
+                    if isinstance(_t_c, dict) and isinstance(_t_c.get("support_resistance"), dict):
+                        _sr_by_cand[str(_sym_c).upper()] = _t_c["support_resistance"]
+                if _sr_by_cand:
+                    _cand_md = _sr_cand.annotate_briefing(_cand_md, _sr_by_cand)
+            except Exception as _se:
+                print(f"  WARNING: S/R annotation on candidate report failed: {_se}", file=sys.stderr)
             _cand_path = output_path.parent / f"candidates_{today_date_str}.md"
             _cand_path.write_text(_cand_md)
             print(f"Candidate research: {_cand_path}")
@@ -352,6 +388,55 @@ def main():
                 _shutil_c.copy(_cand_path, _deliv / _cand_path.name)
         except Exception as _ce:
             print(f"  WARNING: candidate research failed: {_ce}", file=sys.stderr)
+
+        # Step 8.6: When-To-Enter report — every theme company classified into
+        # ENTRY NOW / WAIT (with explicit RSI+pullback trigger) / WATCH / AVOID.
+        # Reuses the same scout cache; no extra fetches. Fail-soft.
+        try:
+            import os as _os_w
+            import shutil as _shutil_w
+            from datetime import datetime as _dt_w
+            from steps import when_to_enter as _wte
+
+            # Build sr_by_sym from BOTH the snapshot's technicals AND the scout
+            # cache, so every theme company (~120 tickers, not just held names)
+            # gets explicit support/resistance levels in its WTE trigger text
+            # instead of generic "X-Y% pullback" boilerplate. Snapshot wins on
+            # conflict (it's the freshest read for held positions); scout fills
+            # in everyone else.
+            _tech_wte = snapshot_data.get("technicals") or {}
+            _sr_wte: dict = {}
+            # Scout first (lower priority).
+            if scout_payload:
+                for _theme_key, _results in (scout_payload.get("results_by_theme") or {}).items():
+                    for _r in (_results or []):
+                        if not isinstance(_r, dict):
+                            continue
+                        _tk_s = (_r.get("ticker") or "").upper()
+                        _sr_s = _r.get("support_resistance")
+                        if _tk_s and isinstance(_sr_s, dict):
+                            _sr_wte[_tk_s] = _sr_s
+            # Snapshot second (higher priority, overrides scout).
+            for _sym_w, _t_w in _tech_wte.items():
+                if isinstance(_t_w, dict) and isinstance(_t_w.get("support_resistance"), dict):
+                    _sr_wte[str(_sym_w).upper()] = _t_w["support_resistance"]
+            _wte_md = _wte.render_when_to_enter_report(
+                scout_payload, config=config,
+                generated_at=_dt_w.now().strftime("%A, %B %d, %Y · %I:%M %p"),
+                sr_by_sym=_sr_wte,
+            )
+            if _wte_md:
+                _wte_path = output_path.parent / f"when_to_enter_{today_date_str}.md"
+                _wte_path.write_text(_wte_md)
+                print(f"When-to-enter report: {_wte_path}")
+                if not args.no_delivery and not is_draft:
+                    _deliv_w = (Path(args.delivery_dir).expanduser() if args.delivery_dir
+                                else Path(_os_w.getenv("PORTFOLIO_BRIEFING_DELIVERY_DIR",
+                                                       str(Path.home() / "Documents" / "briefings"))).expanduser())
+                    _deliv_w.mkdir(parents=True, exist_ok=True)
+                    _shutil_w.copy(_wte_path, _deliv_w / _wte_path.name)
+        except Exception as _we:
+            print(f"  WARNING: when-to-enter report failed: {_we}", file=sys.stderr)
 
         if is_draft:
             print(f"\nWARNING: Briefing marked as DRAFT due to quality gate issues.")

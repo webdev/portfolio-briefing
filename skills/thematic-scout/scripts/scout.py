@@ -108,11 +108,44 @@ def _load_intrinsic_module():
 
 
 # --------------------------------------------------------------------------
+# Lazy-load the support_resistance module (lives in daily-portfolio-briefing).
+# The scout reuses the briefing's S/R logic so the SAME levels/strength scoring
+# show up wherever the user looks (Watch panel + Candidate Trades + WTE).
+# --------------------------------------------------------------------------
+
+_SR_MODULE = None
+
+
+def _load_sr_module():
+    global _SR_MODULE
+    if _SR_MODULE is not None:
+        return _SR_MODULE
+    scripts_dir = _REPO_ROOT / "skills" / "daily-portfolio-briefing" / "scripts"
+    target = scripts_dir / "analysis" / "support_resistance.py"
+    if not target.exists():
+        return None
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    spec = importlib.util.spec_from_file_location("briefing_support_resistance", target)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["briefing_support_resistance"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"  [warn] support_resistance module load failed: {e}", file=sys.stderr)
+        return None
+    _SR_MODULE = mod
+    return mod
+
+
+# --------------------------------------------------------------------------
 # yfinance technical signals (same logic as snapshot_inputs._full_technicals)
 # --------------------------------------------------------------------------
 
 def _fetch_technicals(ticker: str) -> dict | None:
-    """Return {iv_rank, rsi_14, sma_200, drawdown_pct, spot, fivedayret}."""
+    """Return {iv_rank, rsi_14, sma_50, sma_200, drawdown_pct, spot, fivedayret, support_resistance}."""
     try:
         import yfinance as yf
         t = yf.Ticker(ticker)
@@ -152,6 +185,11 @@ def _fetch_technicals(ticker: str) -> dict | None:
             else:
                 rsi_14 = 50.0
 
+        # 50-SMA (used for S/R confluence)
+        sma_50 = None
+        if len(closes) >= 50:
+            sma_50 = round(float(closes.tail(50).mean()), 2)
+
         # 200-SMA
         sma_200 = None
         if len(closes) >= 200:
@@ -172,13 +210,30 @@ def _fetch_technicals(ticker: str) -> dict | None:
             if prev:
                 five_d = round((spot - prev) / prev * 100.0, 2)
 
+        # Support / Resistance — reuse the same 300d hist that fed RSI/SMA.
+        # Fail-closed (hard rule #20): missing/short hist → no SR; never a
+        # fabricated level. The SR module is imported via the daily-briefing
+        # package so we load it by path here (scout is a sibling skill).
+        sr_payload = None
+        try:
+            sr_mod = _load_sr_module()
+            if sr_mod is not None:
+                sr_result = sr_mod.compute_sr(
+                    hist, spot=float(spot), sma_50=sma_50, sma_200=sma_200,
+                )
+                sr_payload = sr_result.to_dict()
+        except Exception as _sr_e:
+            print(f"  [warn] S/R compute for {ticker}: {_sr_e}", file=sys.stderr)
+
         return {
             "iv_rank": iv_rank,
             "rsi_14": rsi_14,
+            "sma_50": sma_50,
             "sma_200": sma_200,
             "drawdown_pct": drawdown_pct,
             "spot": round(spot, 2),
             "fivedayret_pct": five_d,
+            "support_resistance": sr_payload,
         }
     except Exception as e:
         print(f"  [warn] technicals fetch for {ticker}: {e}", file=sys.stderr)
@@ -249,15 +304,29 @@ class ScoutResult:
     spot: float | None = None
     rsi_14: float | None = None
     iv_rank: float | None = None
+    sma_50: float | None = None
     sma_200: float | None = None
     drawdown_pct: float | None = None
     fivedayret_pct: float | None = None
     earnings_date: str | None = None
     days_to_earnings: int | None = None
     third_party_rec: str | None = None
+    # Parkev rating tier (5=Top Stock to Buy, 4=Top 15/25 Stock, 3=Buy,
+    # 2=Borderline Buy, 1=Hold, 0=Sell). Tier ≥4 = high-conviction signal that
+    # When-To-Enter surfaces with a 🌟 STRONG BUY badge distinct from a plain
+    # tier-3 BUY. None when the ticker isn't in Parkev's sheet.
+    rating_tier: int | None = None
+    aging: bool = False           # rec is >14 days old per Parkev's date_updated
     verdict: str = "WATCH"
     rationale: list = field(default_factory=list)
     csp_entry: dict | None = None  # if CSP_ENTRY verdict
+    # Support/Resistance levels for the ticker (the SupportResistance.to_dict()
+    # shape — supports + resistances + pivots + confidence). When present, the
+    # downstream When-To-Enter classifier substitutes real support prices into
+    # the trigger text and CSP strikes anchor to support clusters. Fail-closed:
+    # ``None`` means SR was unavailable for this ticker — never a fabricated
+    # level (hard rule #20).
+    support_resistance: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -334,9 +403,11 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
     res.spot = tech["spot"]
     res.rsi_14 = tech.get("rsi_14")
     res.iv_rank = tech.get("iv_rank")
+    res.sma_50 = tech.get("sma_50")
     res.sma_200 = tech.get("sma_200")
     res.drawdown_pct = tech.get("drawdown_pct")
     res.fivedayret_pct = tech.get("fivedayret_pct")
+    res.support_resistance = tech.get("support_resistance")
 
     earnings = _fetch_earnings_date(ticker)
     res.earnings_date = earnings
@@ -347,7 +418,19 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
         except ValueError:
             pass
 
-    res.third_party_rec = recs_map.get(ticker.upper())
+    # recs_map values can be EITHER a plain rec string (legacy callers) OR a
+    # dict carrying {recommendation, rating_tier, aging, ...} (preferred — used
+    # by the briefing pipeline). Handle both shapes for backwards compatibility.
+    _raw = recs_map.get(ticker.upper())
+    if isinstance(_raw, dict):
+        res.third_party_rec = _raw.get("recommendation")
+        rt = _raw.get("rating_tier")
+        res.rating_tier = int(rt) if rt is not None else None
+        res.aging = bool(_raw.get("aging"))
+    else:
+        res.third_party_rec = _raw  # legacy: string or None
+        res.rating_tier = None
+        res.aging = False
     held_w = held_weights.get(ticker.upper(), 0.0)
 
     verdict, reasons, want_csp = _verdict(tech, earnings, res.third_party_rec, held_w, cfg)
@@ -437,7 +520,17 @@ def _load_recs_and_weights() -> tuple[dict, dict, dict]:
                 t = r.get("ticker")
                 rec = r.get("recommendation")
                 if t and rec:
-                    recs[t.upper()] = str(rec).upper()
+                    # Carry the full rec dict so the scout can surface
+                    # rating_tier / aging downstream (parity with the briefing
+                    # pipeline's recs_map shape).
+                    recs[t.upper()] = {
+                        "recommendation": str(rec).upper(),
+                        "rating_tier": r.get("rating_tier"),
+                        "raw_recommendation": r.get("raw_recommendation"),
+                        "aging": bool(r.get("aging")),
+                        "age_days": r.get("age_days"),
+                        "date_updated": r.get("date_updated"),
+                    }
         except Exception:
             pass
 

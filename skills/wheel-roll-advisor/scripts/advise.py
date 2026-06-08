@@ -208,9 +208,22 @@ def advise(
                 spot = (underlying or {}).get("price") or position.get("underlyingPrice") or 0
                 is_core_flag = bool(context.get("is_core") if isinstance(context, dict) else False)
                 tax_est = float(context.get("embedded_tax_dollars", 0)) if isinstance(context, dict) else 0
+                # Tenor cap (CLAUDE.md #14): without this, the ranker just
+                # maximizes net credit and "✅ recommends" multi-year same-strike
+                # calendars (the SOXX +791d, +$10,100 candidate C). 120 days
+                # for non-core (the action-list ranker's default); core names
+                # roll year-after-year and may extend longer. The caller may
+                # override via context["max_tenor_days"]; we honor that.
+                _ctx_tenor = (context.get("max_tenor_days")
+                              if isinstance(context, dict) else None)
+                if _ctx_tenor is not None:
+                    max_tenor = int(_ctx_tenor)
+                else:
+                    max_tenor = 360 if is_core_flag else 120
                 best, _scores = _rank(
                     cand_dicts, spot=spot, is_core=is_core_flag,
                     embedded_tax_dollars=tax_est,
+                    max_tenor_days=max_tenor,
                 )
                 if best is not None:
                     recommended_id = best["id"]

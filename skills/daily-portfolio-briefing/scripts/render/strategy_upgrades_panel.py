@@ -39,62 +39,101 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     sublots = [u for u in upgrades if u.get("type") == "sublot_completion"]
 
     # === NEW COVERED CALLS ===
-    if new_ccs:
-        from datetime import date, timedelta
-        lines.append(f"### Write Covered Calls ({len(new_ccs)})")
-        lines.append("")
-        for cc in new_ccs:
-            symbol = cc.get("underlying")
-            shares = cc.get("shares_held")
-            contracts = cc.get("contracts_writable")
-            price = cc.get("current_price")
-            strike = cc.get("target_strike")
-            dte = cc.get("target_dte", 35)
-            premium_per_share = cc.get("est_premium_per_share")
-            premium_total = cc.get("est_premium_total")
-            annualized = cc.get("est_annualized_pct")
-            weight = cc.get("current_weight_pct")
-            earnings_blocked = cc.get("earnings_blocked")
-            earnings_date = cc.get("earnings_date")
-            bid = cc.get("bid") or 0
-            ask = cc.get("ask") or 0
-            chain_source = cc.get("chain_source", "estimate_broker_unreachable")
-            target_exp = (date.today() + timedelta(days=dte)).strftime("%a %b %d '%y")
+    # A mid-range-RSI write (caution zone) is not a hard block, but writing it
+    # caps the name for thin premium — so it's held out of the actionable
+    # "READY TO WRITE" list into a "Wait for strength" section. Only RSI-favored
+    # (≥60) or RSI-unknown writes stay actionable. Oversold (<35) was already
+    # pulled into the "Held back by RSI" footer via rsi_blocked above.
+    cc_ready = [c for c in new_ccs if not c.get("rsi_wait")]
+    cc_wait = [c for c in new_ccs if c.get("rsi_wait")]
 
-            if earnings_blocked:
-                badge = "⛔ DEFER (earnings inside window)"
-            else:
-                badge = "✅ READY TO WRITE"
-            lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}{_promo_badge(cc)}")
+    def _render_cc(cc: dict, header_badge: str) -> None:
+        from datetime import date, timedelta
+        symbol = cc.get("underlying")
+        shares = cc.get("shares_held")
+        contracts = cc.get("contracts_writable")
+        strike = cc.get("target_strike")
+        dte = cc.get("target_dte", 35)
+        premium_per_share = cc.get("est_premium_per_share")
+        premium_total = cc.get("est_premium_total")
+        annualized = cc.get("est_annualized_pct")
+        weight = cc.get("current_weight_pct")
+        earnings_blocked = cc.get("earnings_blocked")
+        earnings_date = cc.get("earnings_date")
+        bid = cc.get("bid") or 0
+        ask = cc.get("ask") or 0
+        chain_source = cc.get("chain_source", "estimate_broker_unreachable")
+        target_exp = (date.today() + timedelta(days=dte)).strftime("%a %b %d '%y")
+
+        # Real, measured strike geometry — never a hardcoded delta. otm_pct is
+        # computed from the actual strike vs spot; delta is the chain's value
+        # (or "n/a" when E*TRADE didn't populate Greeks and we fell back to %OTM).
+        otm_pct = cc.get("otm_pct")
+        delta = cc.get("target_delta")
+        otm_str = f"{otm_pct:.1f}% OTM" if otm_pct is not None else "OTM"
+        delta_str = f"δ {abs(delta):.2f}" if delta is not None else "δ n/a"
+
+        # S/R anchor — when the strike was snapped to a real resistance cluster,
+        # surface it inline so the user sees the cap is at a chart-relevant level.
+        anchor = cc.get("sr_anchor") if isinstance(cc.get("sr_anchor"), dict) else None
+        anchor_str = ""
+        if anchor:
+            touches = int(anchor.get("touches", 1) or 1)
+            source = anchor.get("source", "swing")
+            confluence = anchor.get("confluence") or []
+            # Dedupe: source must not also appear in confluence.
+            conf_clean = [c for c in confluence if c != source]
+            conf_phrase = f" + {', '.join(conf_clean)}" if conf_clean else ""
+            touches_phrase = f"{touches} touches" if touches >= 2 else "1 touch"
+            anchor_str = f", at ${float(anchor['price']):g} resistance ({source}{conf_phrase}, {touches_phrase})"
+
+        badge = "⛔ DEFER (earnings inside window)" if earnings_blocked else header_badge
+        lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}{_promo_badge(cc)}")
+        lines.append(
+            f"  - SELL {contracts}× {symbol} ${strike:g}C exp ~{target_exp} "
+            f"({dte} DTE, {otm_str}, {delta_str}{anchor_str})"
+        )
+        if cc.get("rsi_14") is not None:
+            lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
+        if earnings_blocked:
             lines.append(
-                f"  - SELL {contracts}× {symbol} ${strike:g}C exp ~{target_exp} "
-                f"({dte} DTE, ~6% OTM, ~0.30 delta)"
+                f"  - ⚠ Earnings on {earnings_date} — defer writing until after the print "
+                f"to avoid binary gap risk."
             )
-            if cc.get("rsi_14") is not None:
-                lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
-            if earnings_blocked:
-                lines.append(
-                    f"  - ⚠ Earnings on {earnings_date} — defer writing until after the print "
-                    f"to avoid binary gap risk."
-                )
-            elif chain_source == "etrade_live" and bid and ask:
-                spread_pct = ((ask - bid) / premium_per_share * 100) if premium_per_share else 0
-                lines.append(
-                    f"  - Premium: ${premium_per_share:.2f}/share (bid ${bid:.2f} / mid "
-                    f"${premium_per_share:.2f} / ask ${ask:.2f}, spread {spread_pct:.0f}%) "
-                    f"× 100 × {contracts} = **${premium_total:,.0f}** (~{annualized:.0f}% annualized)"
-                )
-                lines.append(f"  - **Source:** Live E*TRADE chain")
-            else:
-                lines.append(
-                    f"  - Est. premium: ${premium_per_share:.2f}/share × 100 × {contracts} = "
-                    f"**${premium_total:,.0f}** (~{annualized:.0f}% annualized)"
-                )
-                lines.append(
-                    f"  - ⚠ E*TRADE chain unreachable — premium is rule-of-thumb estimate. "
-                    f"Verify live bid/ask at broker before placing."
-                )
-            lines.append("")
+        elif chain_source == "etrade_live" and bid and ask:
+            spread_pct = ((ask - bid) / premium_per_share * 100) if premium_per_share else 0
+            lines.append(
+                f"  - Premium: ${premium_per_share:.2f}/share (bid ${bid:.2f} / mid "
+                f"${premium_per_share:.2f} / ask ${ask:.2f}, spread {spread_pct:.0f}%) "
+                f"× 100 × {contracts} = **${premium_total:,.0f}** (~{annualized:.0f}% annualized)"
+            )
+            lines.append(f"  - **Source:** Live E*TRADE chain")
+        else:
+            lines.append(
+                f"  - Est. premium: ${premium_per_share:.2f}/share × 100 × {contracts} = "
+                f"**${premium_total:,.0f}** (~{annualized:.0f}% annualized)"
+            )
+            lines.append(
+                f"  - ⚠ E*TRADE chain unreachable — premium is rule-of-thumb estimate. "
+                f"Verify live bid/ask at broker before placing."
+            )
+        lines.append("")
+
+    if cc_ready:
+        lines.append(f"### Write Covered Calls ({len(cc_ready)})")
+        lines.append("")
+        for cc in cc_ready:
+            _render_cc(cc, "✅ READY TO WRITE")
+
+    if cc_wait:
+        lines.append(f"### ⏸ Covered calls — wait for strength ({len(cc_wait)})")
+        lines.append(
+            "_RSI is mid-range: premium is only average and writing now caps upside "
+            "without much compensation. Shown for context — write when RSI extends (≥60)._"
+        )
+        lines.append("")
+        for cc in cc_wait:
+            _render_cc(cc, "⏸ WAIT FOR STRENGTH")
 
     # === COVERED STRANGLES ===
     if strangles:

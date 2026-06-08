@@ -143,7 +143,10 @@ def aggregate_briefing(
     # NEW: Render hedge book
     lines.extend(render_hedge_book(analytics["hedge_book"], analytics["nlv"], analytics["spy_price"]))
 
-    lines.extend(render_risk_alerts(equity_reviews, options_reviews, regime_data))
+    lines.extend(render_risk_alerts(
+        equity_reviews, options_reviews, regime_data,
+        put_buckets=analytics.get("put_buckets") or [],
+    ))
     lines.extend(action_list_lines)
     
     # MODIFIED: Use render_watch_with_commentary instead of plain render_watch
@@ -178,9 +181,19 @@ def aggregate_briefing(
                     / "intrinsic_value_cache.json",
                     api_key=_fmp_cb,
                 )
+            # Position-aware: cross-check candidates against the user's CURRENT
+            # short puts AND long puts (live snapshot), so we never recommend a
+            # contract that's already open (the LITE $820P duplicate bug) AND
+            # never recommend a short put that cancels a protective long put
+            # (the META $570P collar-floor bug). Independent of the 24h scout
+            # cache.
+            _esp_cb = _cr_cb.short_puts_by_ticker(snapshot_data.get("positions", []))
+            _elp_cb = _cr_cb.long_puts_by_ticker(snapshot_data.get("positions", []))
             _cand_section = _cr_cb.render_candidate_briefing(
                 scout_payload, fv_by_ticker=_cand_fv, config=config,
                 generated_at=date_str, as_section=True,
+                existing_short_puts=_esp_cb,
+                existing_long_puts=_elp_cb,
             )
             lines.extend(_cand_section.splitlines())
         except Exception as _cbe:
@@ -237,6 +250,52 @@ def aggregate_briefing(
     lines.extend(render_analyst_brief(equity_reviews, options_reviews, snapshot_data, analytics, regime_data))
     
     lines.extend(render_diffs(consistency_report))
+
+    # Support/Resistance annotation pass — append an "S: $X · R: $Y" note to
+    # every actionable single-stock line that doesn't already carry one. Merges
+    # snapshot technicals (held names) WITH the scout cache (all theme
+    # companies) so every actionable ticker in the briefing gets a level read,
+    # not just held positions. Fail-closed when SR is missing for a ticker.
+    try:
+        from analysis import support_resistance as _sr_mod
+        sr_by_sym: dict = {}
+        # Scout cache first (lower priority — scout fills in non-held tickers).
+        if scout_payload:
+            for _theme_key, _results in (scout_payload.get("results_by_theme") or {}).items():
+                for _r in (_results or []):
+                    if not isinstance(_r, dict):
+                        continue
+                    _tk_s = (_r.get("ticker") or "").upper()
+                    _sr_s = _r.get("support_resistance")
+                    if _tk_s and isinstance(_sr_s, dict):
+                        sr_by_sym[_tk_s] = _sr_s
+        # Snapshot technicals second (higher priority — freshest for held names).
+        tech_for_sr = snapshot_data.get("technicals") or {}
+        for _sym, _t in tech_for_sr.items():
+            if isinstance(_t, dict) and isinstance(_t.get("support_resistance"), dict):
+                sr_by_sym[str(_sym).upper()] = _t["support_resistance"]
+        if sr_by_sym:
+            md_text = "\n".join(lines)
+            annotated = _sr_mod.annotate_briefing(md_text, sr_by_sym)
+            lines = annotated.split("\n")
+            _sr_stats = _sr_mod.coverage_stats(annotated, sr_by_sym)
+            lines.append("## 📐 Support / Resistance Coverage")
+            lines.append("")
+            lines.append(
+                f"_S/R annotation: {_sr_stats['annotated']} actionable line(s) carry a level read · "
+                f"{len(_sr_stats['covered_tickers'])} ticker(s) covered._"
+            )
+            if _sr_stats["missing"]:
+                lines.append(
+                    f"_⚠️ {len(_sr_stats['missing'])} actionable line(s) had S/R data but no read was rendered "
+                    f"(annotation may not match this surface — file a bug):_"
+                )
+                for _m in _sr_stats["missing"][:5]:
+                    lines.append(f"- `{_m[:120]}`")
+            lines.append("")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] S/R annotation pass failed: {_e}", file=_sys.stderr)
 
     # RSI coverage hook — every recommendation must carry an RSI read. Scan the
     # assembled briefing and surface any recommendation line that's missing one.

@@ -1,7 +1,22 @@
 """Render hedge book panel with recommendations and scenarios."""
 
+from datetime import datetime as _dt
 from decimal import Decimal
 from analysis.hedge_book import HedgeBook
+
+
+def _fmt_exp(exp) -> str:
+    """Format an option expiration as 'Fri Jul 03 '26'. Accepts either a date
+    object or an ISO/string (the E*TRADE chain returns either depending on the
+    path) — never crashes on a str (the recurring bug)."""
+    if not exp:
+        return "?"
+    if hasattr(exp, "strftime"):
+        return exp.strftime("%a %b %d '%y")
+    try:
+        return _dt.strptime(str(exp)[:10], "%Y-%m-%d").strftime("%a %b %d '%y")
+    except (ValueError, TypeError):
+        return str(exp)
 
 
 def render_hedge_book(hedge: HedgeBook, nlv: Decimal, spy_price: Decimal | None = None) -> list[str]:
@@ -34,11 +49,7 @@ def render_hedge_book(hedge: HedgeBook, nlv: Decimal, spy_price: Decimal | None 
             symbol = h.get("symbol", "?")
             strike = h.get("strike", "?")
             opt_type = "P" if h.get("position_type") == "long_put" else "C"
-            exp = h.get("expiration")
-            if exp:
-                exp_str = exp.strftime("%a %b %d '%y")
-            else:
-                exp_str = "?"
+            exp_str = _fmt_exp(h.get("expiration"))
             delta = h.get("delta", 0.0)
             hedge_desc.append(f"{qty}x {symbol} ${strike}{opt_type} {exp_str} ({delta:+.2f}Δ)")
         lines.append(f"  Active hedges: {', '.join(hedge_desc)}")
@@ -53,7 +64,7 @@ def render_hedge_book(hedge: HedgeBook, nlv: Decimal, spy_price: Decimal | None 
         for rec in hedge.recommendations:
             label = rec.instrument.replace("_", " ").lower()
             if rec.target_strike and rec.target_expiration:
-                exp_str = rec.target_expiration.strftime("%a %b %d '%y")
+                exp_str = _fmt_exp(rec.target_expiration)
                 opt_letter = "P" if rec.target_delta < 0 else "C"
                 lines.append(
                     f"    • {label} **${rec.target_strike:.0f}{opt_letter}** {exp_str} — "

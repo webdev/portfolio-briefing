@@ -45,6 +45,20 @@ yfinance IS still allowed for:
 - Earnings calendar dates
 - General quotes/prices for non-option context
 
+## Brokerage backend — E*TRADE (default) or Schwab, selected by config
+
+The pipeline is broker-pluggable. `briefing.yaml` → `brokerage:` (or env
+`PORTFOLIO_BRIEFING_BROKER`) selects the backend; default `etrade` keeps the
+existing path byte-identical. `schwab` routes the live snapshot through
+`adapters/schwab_adapter.py`, chain data through the env-selected backend in the
+canonical chain fetcher and `adapters/broker_market.py`, and the Telegram
+daemon's auth through `schwab_auth.py` (OAuth2; access token 30 min, refresh
+silent, full re-auth ~weekly). Read-only on both brokers (hard rule #7). Schwab
+account scope keys off `schwab_account_labels` (account number → desc) so
+`account_desc_whitelist` gates the same way. The two brokers never run in one
+process — the Schwab user runs a separate instance with its own bot token,
+credentials, and token file.
+
 ## Roll discipline — moneyness-based, not P&L%
 
 Surface EXECUTE ROLL only when the position is at/past strike (genuine
@@ -55,6 +69,41 @@ assignment risk):
 P&L% bleed from a rally is NOT a defensive trigger by itself. A -70% short
 call that's still 12% OTM is "the rally happened, theta will recover," not
 "I'm about to lose my shares." Same rule applies to puts.
+
+**Action-list roll gate (enforced in `render/panels.py` blocks #3 + #4).** For a
+covered CALL that is still OTM (no genuine assignment risk), the action list
+surfaces a roll ONLY when there's a genuine credit-positive roll-**UP** (higher
+strike). A same-strike calendar or "no good roll" case defers to HOLD — never
+render a same-strike re-cap labeled as up-and-out (the SMH/SOXX bug), and never
+surface EXECUTE ROLL when the advisor's `recommendedCandidateId` is `A`=HOLD (the
+SPY bug). Genuine ITM (spot at/through strike) still surfaces the roll. The Watch
+ROLL ANALYSIS table always shows the full candidate menu regardless.
+
+**Advisor's `recommendedCandidateId` respects the tenor cap.** The
+`wheel-roll-advisor` (`advise.py`) calls its own `candidate_ranker` when picking
+the table's `✅ recommended` candidate. That call MUST pass `max_tenor_days` —
+otherwise the ranker just maximizes net credit and "recommends" multi-year
+same-strike calendars (the SOXX `C` candidate, +791d / +$10,100 credit on a
+covered call, labeled "extend 10-15 months" by the old hardcoded note). Default:
+120d for non-core, 360d for core (`is_core` from context). Callers may override
+via `context["max_tenor_days"]`. Source: `advise.py` line ~211 — the call now
+matches the discipline of `render/panels.py` block #3's ranker.
+
+**Both roll legs must carry REAL chain values — never "pick from the ROLL
+ANALYSIS table."** Block #3 (priced-candidate path) already does this — it
+renders concrete BTC and STO quotes from `enumerate_roll_candidates`. Block #4
+(generic directive path, fires when a roll is warranted but block #3 had no
+priced best) used to render only the BTC leg with a real mid and then hand-wave
+the STO leg ("Sell-to-Open 1× a higher-strike call further out — pick the target
+from the ROLL ANALYSIS table"). That violates the no-hand-wavy-output rule.
+Block #4 now fetches a REAL STO quote via the canonical `etrade-chain-fetcher`:
+delta-first selection (`find_strike_near_delta`, target ~0.25 within ±0.12,
+volatility-adaptive), %OTM fallback when the chain has no Greeks, target DTE
+~90d within the 120d action-list tenor cap. The order line renders the actual
+strike, expiration, bid/mid/ask, DTE, delta (or `δ n/a`), and net credit/debit.
+When the chain is unreachable, the line says "live chain unavailable, verify the
+STO leg at the broker before placing" — never a fabricated strike or price.
+Source: `render/panels.py` block #4 `_ROLL_DECISIONS` branch.
 
 **Matrix is side-gated (PUT vs CALL).** The decision matrix encodes side only in
 the row `id` prefix (`PUT_*` / `CALL_*`), so `decision_walker.row_matches` must
@@ -145,9 +194,16 @@ trade gate. It is read **asymmetrically** across the two sides of the wheel:
 - **Selling puts** (CSPs): favoured in a pullback (RSI ~30-50). OVERBOUGHT
   (RSI > 70) is a **hard block** — thinnest premium right before a reversal can
   whip the stock down through the strike. Falling-knife (RSI < 25) → warn.
-- **Selling covered calls**: favoured when extended/overbought (RSI > 60).
+- **Selling covered calls**: favoured when extended/overbought (RSI ≥ 60).
   OVERSOLD (RSI < 35) is a **hard block** — caps the name right before a likely
-  bounce. Mid-range (35-60) → warn.
+  bounce. **Mid-range (35-60) is NOT actionable** — writing here collects only
+  average premium while capping upside; on the Strategy Upgrades surface these
+  are pulled out of "✅ READY TO WRITE" into a "⏸ Covered calls — wait for
+  strength" section (`rsi_wait` flag in `strategy_upgrades.py`, rendered by
+  `strategy_upgrades_panel.py`). Only RSI ≥ 60 stays actionable; RSI-unknown
+  writes stay actionable with a verify note. (The central hook still classifies
+  mid-range as `keep`+caution for non-CC surfaces; the wait-for-strength
+  demotion is specific to new covered-call writes.)
 
 - **Buying shares** (equity ADD, sub-lot completion, thematic BUY): favoured in
   a pullback (RSI < ~60). OVERBOUGHT (RSI > 70) is a **hard block** — don't chase
@@ -177,6 +233,29 @@ Single source of truth: `scripts/analysis/rsi_discipline.py` (`assess`, `tag`,
 config-overridable via `briefing.yaml` → `rsi_discipline` ("standard wheel
 bands" by default, incl. a `buy` block). RSI comes from
 `snapshot_data["technicals"][sym]["rsi_14"]` (yfinance, Wilder's smoothing).
+
+## Covered-call strike selection — DELTA-FIRST, show the REAL delta
+
+New covered-call writes pick their strike by a **delta band** (default ~0.25,
+the wheel 0.20-0.30 zone), NOT a flat %OTM. The same delta sits **further OTM on
+a high-IV name** (more headroom) and **closer on a low-IV name** — a flat %OTM
+target does the opposite and caps a volatile name too tight. This was a real
+miss: a flat 6%-OTM pick put a SOFI $17 call on a ~$16 stock (≈30-delta, ~1-in-3
+assignment) and capped a name the same briefing wanted to *accumulate*.
+
+Hard requirements (mirror the "live-data backing / no fabricated numbers" rule):
+
+- **Never display a delta you didn't measure.** The old renderer printed a
+  hardcoded "~6% OTM, ~0.30 delta" on every CC line regardless of the actual
+  contract. Now the SELL line shows the **measured delta** (`δ 0.24`) and the
+  **actual OTM%** computed from the selected strike vs spot. When the chain
+  carries no usable deltas, render **`δ n/a`** — never invent one.
+- **Selection order:** `find_strike_near_delta` (delta band) first; fall back to
+  `find_strike_at_otm_pct` ONLY when the chain has no deltas (`selected_by`
+  records which path ran). Both come from the canonical `etrade-chain-fetcher`.
+- Config: `briefing.yaml` → `covered_call` (`target_delta`, `delta_tolerance`,
+  `fallback_otm_pct`). Source: `strategy_upgrades.py::_etrade_call_quote` +
+  `strategy_upgrades_panel.py`.
 
 ## Intrinsic value — fair-value read on every single-stock recommendation
 
@@ -278,6 +357,19 @@ shortlist." Fair values for just the candidate tickers are fetched inline
 (`briefing_candidate_tickers`, cached). The standalone scout report / web-app
 path keeps the shortlist via the `include_shortlist=True` default.
 
+**Position-aware — never recommend a contract you already hold.** The candidate
+list cross-checks the user's CURRENT short puts (built from the live snapshot via
+`short_puts_by_ticker`, passed as `existing_short_puts` from `aggregate.py`),
+independent of the 24h scout cache. A CSP candidate whose strike duplicates a
+held put (within `_STRIKE_OVERLAP_PCT`, 5%) is pulled out of the actionable list
+into an **"⏸ Already positioned — you hold this put"** note ("the same trade, not
+a new one"); a same-name candidate at a different strike is kept but annotated as
+stacking single-name risk. This catches what the scout's own put-stack guard
+misses: that guard only fires at ≥2 held puts (or a near-strike overlap) AND runs
+off the possibly-stale cache, so a single held put — e.g. the real LITE $820P /
+NOW $92P duplicates — slipped through as fresh candidates. The render-time check
+is the backstop. Source: `candidate_research.py::render_candidate_briefing`.
+
 ### Candidate Research report — per-company, all themes
 
 A separate dated report (`~/Documents/briefings/candidates_DATE.md`, also written
@@ -296,6 +388,54 @@ chain (reused from the Scout's `csp_entry`), or a BUY note. Statuses: 🎯 CANDI
 technical fetches); fair values are fetched once and cached
 (`intrinsic_value_cache.json`, 24h), fail-closed. Theme metadata is read fresh
 from `theme_universes.yaml` (config, not cached data).
+
+### When-To-Enter report — entry triggers, every theme company
+
+A second dated companion report (`~/Documents/briefings/when_to_enter_DATE.md`,
+also `reports/daily/`) sits next to `candidates_DATE.md` and reframes the same
+universe as **explicit entry triggers**. Where the candidate report is a
+research card per name, this one is an action card: every company in the
+Thematic Scout gets classified into one of four statuses and shown with the
+exact trigger condition.
+
+Source: `scripts/steps/when_to_enter.py` (`classify` — pure function over a
+scout result; `render_when_to_enter_report` — the markdown). Generated in
+`run_briefing.py` step 8.6 (right after `candidates_DATE.md`), delivered to the
+same folder, pointed to from the Thematic Scout section of the daily briefing.
+
+Classifier priority (this order is the contract — tests pin every band):
+
+1. **RSI ≥ 70 → 🔴 WAIT — overbought.** Even an AVOID verdict on an overbought
+   name reduces to "wait for the cool-off." Trigger: `RSI < 55 AND 8-12%
+   pullback`. (Bonus: if IV rank ≥ 60 and the user owns shares, the trigger
+   surfaces COVERED-CALL writing as the favored action right now.)
+2. **60 ≤ RSI < 70 → 🟡 WAIT — extended.** Trigger: `RSI in 45-55 AND 5-8%
+   pullback`.
+3. **drawdown ≥ 40% AND RSI < 45 AND below 200-SMA by >15% → 🔴 AVOID — thesis
+   check.** Genuine fundamental-broken case.
+4. **RSI < 25 → 🟡 WAIT — falling knife.** Trigger: `RSI > 35 AND one green
+   day`.
+5. **`verdict` starts with AVOID (not caught above) → 🔴 AVOID — scout flag.**
+   Surfaces the scout's actual rationale verbatim (no invented reason).
+6. **35 ≤ RSI ≤ 55 AND verdict CSP → 🟢 ENTRY NOW — CSP** with the live
+   `csp_entry` ticket (strike, expiration, mid/bid/ask, DTE, collateral). Flags
+   earnings-inside-window inline.
+7. **35 ≤ RSI ≤ 55 AND verdict BUY → 🟢 ENTRY NOW — BUY** (small starter, scale
+   on weakness).
+8. **35 ≤ RSI ≤ 55, no actionable verdict → 🟡 WATCH — neutral.** No invented
+   entry.
+9. **25 ≤ RSI < 35 → 🟡 WAIT — oversold** (not falling-knife).
+10. **otherwise (55-60, missing RSI) → 🟡 NEUTRAL.**
+
+The technical-state-first ordering is what avoided the AMD bug (RSI 75 with
+verdict "AVOID — extended" was wrongly tagged AVOID with read "Deep drawdown
+(1%)"; the correct read is "WAIT — overbought" with trigger "WAIT for RSI < 55
++ 8-12% pullback"). The tests in `test_when_to_enter.py` pin this priority.
+
+Every number in the rendered report is real (RSI / IV / drawdown / 5d /
+trend% / CSP entry quote — all from the scout cache); no hardcoded thresholds
+in the output. RSI bands match `briefing.yaml` → `rsi_discipline`. Like the
+candidate report, it reuses the scout's existing research (no extra fetches).
 
 ## Challenge every recommendation — multi-perspective (never relay at face value)
 
@@ -372,11 +512,97 @@ action read is a bug.
 8. **Tax framing:** rolling defers tax conditionally — never says "saves" tax.
 9. **No directional forecasts:** flag conditions, don't predict prices.
 10. **Fail closed:** missing data → suppress action, never fill with defaults.
-11. **RSI discipline:** every rec passes `rsi_discipline.hook()` → remove/keep/promote. Show RSI on every rec; block new put-sales & buys >70, new covered calls <35; management never removed. Verifier (`audit_missing_rsi`) enforces RSI coverage.
+11. **RSI discipline:** every rec passes `rsi_discipline.hook()` → remove/keep/promote. Show RSI on every rec; block new put-sales & buys >70, new covered calls <35; **mid-range (35-60) covered-call writes are demoted to "⏸ wait for strength" (not READY TO WRITE)**; management never removed. Verifier (`audit_missing_rsi`) enforces RSI coverage.
 12. **Intrinsic value:** every single-stock rec shows FMP DCF + analyst-target fair value; ETFs → "n/a — basket"; fail closed (no key / no data → no fabricated number). Source: `intrinsic_value.py`.
 13. **Capital Plan new-put gate:** `NEW_CSP`/`LT_CSP` demoted to Skipped when stress coverage < 0.50× or projected concentration ≥ 10% NLV — the plan can't contradict the Red Flags.
 14. **Challenge every rec:** action list defers to the position's advisor (never EXECUTE ROLL when the advisor says HOLD; prefer roll-up/shorter-tenor over max-credit); a deterministic counterpoint layer (`recommendation_challenger.py`) surfaces contradictions, opportunity cost, tenor, tax, concentration & valuation — inline + in a panel. Never relay a rec at face value.
 15. **Everything actionable:** no datapoint stays descriptive — every state (overbought/oversold/cold/extended/drawdown) maps to an entry/exit/trim/write-calls/hold/wait verdict, read asymmetrically. Market Pulse names carry `🎬 Action:`; theme leaders carry `→ <tag>`. Source: `thematic_research._action_read()` / `_action_tag()`. A datapoint without an action read is a bug.
+16. **Covered-call strike = delta-first, real delta only:** new CC writes pick the strike by a delta band (`covered_call.target_delta`, default ~0.25), not a flat %OTM, so strike distance adapts to each name's IV. The SELL line shows the **measured** delta + actual OTM% (`δ n/a` when the chain has no Greeks) — never a hardcoded/fabricated delta. Fall back to %OTM only when deltas are missing. Source: `strategy_upgrades.py::_etrade_call_quote` + `strategy_upgrades_panel.py`.
+17. **Candidate Trades are position-aware:** never surface a CSP candidate that duplicates a put the user already holds. The Candidate Trades section cross-checks live short puts (`short_puts_by_ticker` → `existing_short_puts`, from `aggregate.py`, NOT the 24h scout cache); a strike within 5% of a held strike → demoted to "⏸ Already positioned"; a same-name different-strike candidate → kept but flagged as stacking. The scout's own guard (≥2 puts, cache-based) is insufficient — the render-time check is the backstop. Source: `candidate_research.py::render_candidate_briefing`.
+18. **Protective long puts cancel new-short-put recs:** if the user holds a LONG put on a name (collar floor / protective put), no new-short-put surface may recommend a short at the same/near strike — that would un-hedge the position. Applies to `Candidate Trades` (via `long_puts_by_ticker` → `existing_long_puts` + `_long_put_cancellation`) and `LT_CSP` (`long_term_opportunities.py` builds `long_puts_by_ticker` and refuses recs with a "would cancel your collar floor" reason). The original "stacking" guard only counted short puts and missed this; selling the same strike as a held long put isn't stacking, it's cancellation (the META bug, where the user held a long $570P as a collar floor and the briefing recommended SELL $570P at the same strike).
+19. **No hardcoded boilerplate in actionable output — everything from real verified data:** any number that looks like data MUST come from a real source measured this cycle. No "~6% OTM, ~0.30 delta" baked into a format string, no "extend 4-6 weeks" / "extend 10-15 months" label irrespective of actual DTE, no "4×" hardcoded into roll-candidate descriptions, no `C` hardcoded for put positions. The SOXX bug surfaced this hard rule: candidate C labeled "10-15 months" was actually +791 days (~2.2 years), candidate descriptions hardcoded `4×` regardless of position qty, and `C` regardless of option type. If the value isn't computed from snapshot/chain/position data, it's not data — render `n/a` or omit, never a plausible-looking guess. Tenor phrasing: use `_tenor_phrase(dte_ext)` (returns `+Xd`, `+Xd (~Nw)`, `+Xd (~Nmo)`, or `+Xd (~N.Nyr)`) — always derived from real DTE. Dates: format with year (`Jul 17 '26`, never `0717` MMDD which collides across years). Source: `wheel-roll-advisor/scripts/roll_target.py` (description + notes), `strategy_upgrades.py` + `strategy_upgrades_panel.py` (CC SELL line). Every renderer touched in the future must obey this — a hardcoded number in the output is a bug.
+20. **S/R discipline — every single-stock rec carries a support/resistance read; CSP strikes anchor to support, CC strikes anchor to resistance; fail closed when OHLC unavailable.** S/R levels are computed from the same 300d yfinance OHLC already pulled for RSI/SMA (no extra fetch). Two sources: classic daily/weekly/monthly **pivots** + **swing-point clusters** (180d lookback, 2% cluster band, min 2 touches). Confluence (within 2% of 50-SMA / 200-SMA / 52w high/low / fib retracements) boosts strength. Reading is **asymmetric** — support matters for buys/CSPs, resistance matters for CCs/exits — mirroring the RSI discipline. **S/R refines, never overrides, the RSI gate**: a name at support with RSI 75 is still RSI-blocked from new put-sales (hard rule #11). The render path appends `S: $X (200-SMA + Apr swing, 3 touches) · R: $Y` to every Watch-panel equity, LT_ADD/TRIM/SELL, LT_CSP/PULLBACK CSP, and Candidate Trades header via `support_resistance.annotate_briefing` (orchestrator in aggregate.py + run_briefing.py). The When-To-Enter classifier substitutes explicit support prices into trigger text — "WAIT for price into the $238-$245 support zone" replaces "WAIT for 8-12% pullback" — and adds a ✅ confluence badge to ENTRY cards when spot sits at a strong support. Strike anchoring: LT_CSP picks the strongest support within the 7-13% OTM band (advise.py); CC picks the strongest resistance within ±3% of the delta-selected strike (strategy_upgrades.py::_etrade_call_quote), then re-fetches via `quote_contract` so the **measured** delta at the snapped strike is rendered — never a fabricated one. **Strength scoring required** (touches + recency + confluence); `min_strength=1.5` filters out single-touch noise. **Fabricated levels are a bug** — when SR is unavailable, surface nothing rather than a synthesized number. Source: `support_resistance.py` (module), `snapshot_inputs.py::_full_technicals` (wiring), `when_to_enter.py::classify` (trigger refinement), `advise.py::evaluate_options_idea` (CSP anchoring), `strategy_upgrades.py::_etrade_call_quote` (CC anchoring). Verifier: `support_resistance.coverage_stats` emits the "📐 Support / Resistance Coverage" panel.
+21. **Expiration-bucket concentration is a separate red flag from stress coverage.** A single-Friday short-put obligation ≥ 30% NLV fires `CRITICAL` (⚠️ alert in Risk Alerts + CRITICAL flag in Red Flags & Priorities). ≥ 20% NLV fires `WARNING` (📊 alert + MEDIUM flag). ≥ 10% NLV is informational (no alert, ladder panel only). This metric is **orthogonal** to (a) the static stress-coverage ratio (which assumes ALL puts assign at once — a fantasy on a well-laddered book and overstates real risk) and (b) the per-name 10% concentration cap (which is single-ticker, this is single-date). The user pushed back on a 0.02× stress-coverage scare with "but my puts are well distributed across expirations" and they were right — distribution by date is the realistic time-weighted risk; this flag captures it explicitly. Source: `analysis/expiration_ladder.py::analyze_put_buckets` (separate from the legacy `analyze_expiration_ladder` which counts puts+calls together). Wired into `Risk Alerts` via `render_risk_alerts(put_buckets=...)` and into `Red Flags & Priorities` via `red_flags.py`. The flag includes the top 5 names in the bucket so the user can identify which positions to close/roll to de-concentrate. Config in `briefing.yaml` → `expiration_bucket`: `critical_pct` (default 0.30), `warning_pct` (default 0.20), `info_pct` (default 0.10).
+22. **LT_ADD discipline — $5K "starter" recs are filler unless context makes them real.** Default LT ADD recommendations are sized at ~1/12 of a 6% NLV target = ~$5K. That starter sizing is the right default for a watchlist tracker, but it becomes counter-productive in three specific contexts and the system MUST surface those (not silently emit a `BUY ~$5K` line that the user has to manually filter). Gates (in `long_term_opportunities.py`, applied after the put-stack filter, before the RSI discipline):
+    - **Suppress** (kind → `SKIPPED_ADD`) when **cash floor < 5% NLV**. After a margin-call experience this is non-negotiable — adding equity into a low-cash posture compounds the exact problem the system is trying to fix. Reason rendered: "cash floor breached — only X% NLV in cash; deploy into a low-conviction starter while defensive room is thin is the lesson Friday's margin call taught us."
+    - **Suppress** (kind → `SKIPPED_ADD`) when **stress coverage < 0.30×**. System is in defensive mode; new long exposure compounds the problem.
+    - **Demote** (kind → `DEFERRED_ADD_HAS_CSP`) when the **user already has a short put on the name**. The CSP IS the entry mechanism — assignment puts you long at the strike, which is usually $5-25 below the current spot. Buying equity at spot DOUBLES the exposure at a WORSE cost basis than the put assignment price. Reason rendered: "you already have N short put(s) at strike(s) $X — the CSP IS the entry mechanism; let it work or sell another CSP at a lower strike rather than buying equity at the higher current price."
+    - **Promote** (concrete_trade size $5K → $20K) when **third-party tier ≥ 4** (Top 15 Stock / Top Stock to Buy per Parkev's ladder) AND **no existing CSP**. Tier-4 names are high-conviction catalysts; $5K starter on a high-conviction read is indecision masquerading as discipline. Promote to $20K to express the conviction. Adds badge: "🌟 Parkev tier-N high-conviction — sized meaningfully."
+    Config: `briefing.yaml` → `lt_add_discipline`: `suppress_below_cash_pct` (default 0.05), `suppress_below_coverage` (default 0.30), `promote_tier_min` (default 4), `promote_to_size_usd` (default 20000). Source: `steps/long_term_opportunities.py::generate_long_term_opportunities_step` post-processing block. Lesson learned from a real conversation where the user pushed back: "are these good investments? say more about these" — and the right answer turned out to be "they're filler unless context says otherwise." The system should encode that judgement.
+
+## Third-party recommendations — Parkev's Google Sheet (fetched every run)
+
+The "third-party rec" column in every surface of the briefing (Watch panel
+`Third-party: Buy (tier 3, 1d old)` notes, scout verdicts, When-To-Enter
+`rec BUY` tags, the Long-Term Opportunities EXIT decisions, the Capital Plan's
+SELL routing) all draw from **one source: Parkev Tatevosian's Google Sheet**.
+
+- **Sheet:** `https://docs.google.com/spreadsheets/d/12Fs_d8Zr4sKnoCxb5EaEbe2FciXIGPVTFGM9iehZq3M/`
+- **Fetcher skill:** `skills/recommendation-list-fetcher/` (CSV export via `gviz/tq?tqx=out:csv`)
+- **Briefing call site:** `run_briefing.py` Step 1.6 — `fetch_recommendations(snapshot_dir)`.
+  Runs **unconditionally on every briefing**, before snapshot_inputs. No `--refresh`
+  flag — the sheet is the authoritative source of truth and a fresh pull is part
+  of the canonical run.
+
+**Rating tier propagates through the scout** — `recs_map` in `run_briefing.py`
+and `scout._load_recs_and_weights()` carries the FULL rec dict (recommendation +
+rating_tier + aging + date_updated), not just the normalized BUY/HOLD/SELL
+string. `_research_ticker` accepts either shape for backward compatibility, but
+the briefing pipeline uses the dict form so `ScoutResult.rating_tier` (and
+`.aging`) flow into the scout cache and out to every downstream surface
+(`results_by_theme[*].rating_tier` is set).
+
+**Tier-aware rendering in When-To-Enter** — `classify()` reads
+`r.get("rating_tier")` and promotes tier ≥ 4 ENTRY NOW cards from
+`🟢 ENTRY NOW — BUY` to **`🌟 STRONG BUY — ENTRY NOW`** (or `🌟 STRONG BUY — ENTRY
+NOW (CSP)` for CSP setups). The read line annotates with `Parkev tier-N
+(raw_recommendation) — high-conviction catalyst`, and the trigger upgrades
+sizing guidance from "1/3 of target weight" (standard) to "1/2 of target weight
+is reasonable" (tier 4-5). Tier-5 is the rare "Top Stock to Buy" — Parkev's
+single strongest signal; tier-4 is "Top 15 Stock" / "Top 25 Stock." Tier-3
+("Buy") keeps the standard 🟢 label and 1/3 sizing.
+
+The underlying RSI gate is *unchanged* — tier doesn't loosen the favored-band
+(35-55) requirement, doesn't override the overbought block (RSI ≥ 70 still
+WAITs even on tier-5), and doesn't bypass the position-aware long-put-cancel
+guard. The tier only differentiates *within* the already-actionable set so the
+user can size accordingly.
+
+Rating ladder (`raw_recommendation` → normalized `recommendation` + `rating_tier`):
+
+| Raw value | Normalized | Tier |
+|-----------|------------|------|
+| `Top Stock to Buy` | BUY | 5 |
+| `Top 15 Stock` / `Top 25 Stock` | BUY | 4 |
+| `Buy` | BUY | 3 |
+| `Borderline Buy` | BUY | 2 |
+| `Hold/ Market Perform` | HOLD | 1 |
+| `Borderline Sell` | SELL | 0 |
+| `Sell` / `Top Stock to Sell` | SELL | 0 |
+
+Each row also carries `date_updated`, `age_days`, and an `aging: true` flag when
+the rec is >14 days old — the verdict logic gives more weight to fresh recs.
+
+**Universe alignment between Parkev's sheet and the scout's themes** is a known
+asymmetry. The sheet is broader (~200 names spanning consumer, healthcare,
+finance, AI/tech, etc.); the scout's `theme_universes.yaml` is intentionally
+narrow (AI Buildout + Ancillary + Adjacent, ~79 anchors). A ticker can be:
+
+- **In both** → full treatment (rec drives verdict, scout adds technicals/chain, full When-To-Enter card).
+- **In Parkev only** → "orphan" — rec is fetched and appears on relevant equity reviews but the scout never grades it. *No When-To-Enter card, no Candidate Trades visibility.* Add to `theme_universes.yaml` if the name fits an existing theme; otherwise it stays an out-of-universe rec.
+- **In scout only** → covered by technicals but verdict tends to land WATCH for lack of a third-party catalyst.
+
+When you see a name in the briefing that you expect to be in the scout but
+isn't, it's almost always this asymmetry. The fix is either adding the anchor
+to `theme_universes.yaml` (one-line config change, picked up on the next run
+that uses `--refresh-scout` or the 24h cache cycle) or creating a new theme
+for an out-of-AI-thesis name worth tracking.
+
+**Failure mode:** if `fetch_recommendations` errors (sheet unreachable / format
+change), the briefing continues with an empty rec list — downstream surfaces
+just don't get third-party annotations. The fetcher itself logs the failure
+to stderr. Watch for "Fetched 0 recommendations" on a run that should have had
+~200.
 
 ## Pipeline overview
 
@@ -384,7 +610,7 @@ The briefing orchestrator runs these steps (see `scripts/run_briefing.py`):
 
 1. Pre-flight (config, yesterday's briefing for diffing)
 2. Load directives
-3. Fetch third-party recommendations
+3. Fetch third-party recommendations  — Parkev's sheet, every run (see above)
 4. Snapshot inputs (E*TRADE positions + parallel yfinance technicals + chains)
 5. Classify regime (VIX/SPY)
 6. Review equities (per-position decision)

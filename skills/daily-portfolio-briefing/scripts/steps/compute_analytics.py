@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from analysis.stress_coverage import compute_stress_coverage
 from analysis.concentration_drift import detect_concentration_drift
-from analysis.expiration_ladder import analyze_expiration_ladder
+from analysis.expiration_ladder import analyze_expiration_ladder, analyze_put_buckets
 from analysis.hedge_book import build_hedge_book
 
 
@@ -149,6 +149,22 @@ def compute_analytics(
     # Compute expiration ladder (for options)
     expirations = analyze_expiration_ladder(enriched, float(nlv))
 
+    # NEW: Cash-secured put concentration per single Friday — severity-tiered.
+    # Surfaces dates where simultaneous assignment would land a meaningful slice
+    # of NLV at once, separately from the static stress-coverage ratio (which
+    # assumes ALL puts assign at once — a fantasy on a well-laddered book).
+    # Bands are read from briefing.yaml → expiration_bucket: { critical_pct,
+    # warning_pct, info_pct } when present; defaults are 30/20/10.
+    from datetime import date as _date
+    _eb_cfg = (config or {}).get("expiration_bucket", {}) or {}
+    put_buckets = analyze_put_buckets(
+        enriched, float(nlv),
+        today=_date.today(),
+        critical_pct=float(_eb_cfg.get("critical_pct", 0.30)),
+        warning_pct=float(_eb_cfg.get("warning_pct", 0.20)),
+        info_pct=float(_eb_cfg.get("info_pct", 0.10)),
+    )
+
     # Compute hedge book.
     # Long delta = sum of long-equity shares (each share = 1 delta-share)
     # plus contributions from any short calls (which reduce effective long delta).
@@ -179,6 +195,7 @@ def compute_analytics(
         "stress_coverage": stress_coverage,
         "concentration": concentration,
         "expirations": expirations,
+        "put_buckets": put_buckets,
         "hedge_book": hedge_book,
         "nlv": nlv,
         "cash": cash,

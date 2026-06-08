@@ -54,6 +54,43 @@ def test_diff_renders_added_and_removed():
     assert "GOOG" in text  # added
 
 
+def test_same_contract_changed_price_is_not_added_and_removed():
+    """The MU bug: a recommendation whose only day-over-day change is the
+    buy-to-close limit price must NOT be reported as both executed and new."""
+    today = (
+        "## Today's Action List\n\n"
+        "1. **CLOSE** MU_PUT_700_20261218 — +33% ($+5,522); buy-to-close limit $115.34\n"
+        "## Watch\n"
+    )
+    yesterday = (
+        "## Today's Action List\n\n"
+        "1. **CLOSE** MU_PUT_700_20261218 — +33% ($+5,399); buy-to-close limit $116.63\n"
+        "## Watch\n"
+    )
+    panel = render_diff_panel(today, yesterday)
+    text = "\n".join(panel)
+    # No net change → the whole panel is suppressed (added/removed both empty).
+    assert panel == []
+    # And explicitly: MU is not double-counted.
+    assert "Resolved or Executed" not in text
+    assert "New Today" not in text
+
+
+def test_signature_stable_across_price_and_profit_changes():
+    from analysis.briefing_diff import _signature_for_action
+    a = _signature_for_action("5. **CLOSE** MU_PUT_700_20261218 — +33% ($+5,522); buy-to-close limit $115.34")
+    b = _signature_for_action("3. **CLOSE** MU_PUT_700_20261218 — +31% ($+5,399); buy-to-close limit $116.63")
+    assert a == b == "CLOSE|MU_PUT_700_20261218"
+
+
+def test_signature_handles_equity_and_hedge():
+    from analysis.briefing_diff import _signature_for_action
+    assert _signature_for_action("2. **EXIT** TSLA — SELL TSLA — exit position") == "EXIT|TSLA"
+    # Hedge keys on the underlying, stable as strike/qty drift day to day.
+    sig = _signature_for_action("9. **HEDGE** Buy 13× SPY put $711P Fri Jul 03 '26 (~$9,740)")
+    assert sig == "HEDGE|SPY"
+
+
 def test_diff_returns_empty_when_no_changes():
     md = "## Today's Action List\n\n1. **CLOSE** ABNB_PUT — +30%\n## Watch"
     panel = render_diff_panel(md, md)

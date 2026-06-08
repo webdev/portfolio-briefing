@@ -344,14 +344,45 @@ def render_health(equity_reviews: list, nlv: float, options_positions: list = No
     return lines
 
 
-def render_risk_alerts(equity_reviews: list, options_reviews: list, regime_data: dict) -> list:
-    """Real risk alerts — surface anything material from the reviews."""
+def render_risk_alerts(
+    equity_reviews: list, options_reviews: list, regime_data: dict,
+    put_buckets: list | None = None,
+) -> list:
+    """Real risk alerts — surface anything material from the reviews.
+
+    ``put_buckets`` is the list of PutBucketCluster objects from
+    analyze_put_buckets — critical-severity buckets get a dedicated Risk Alert
+    so users see them at the top of the briefing, distinct from the static
+    stress-coverage ratio (which assumes ALL puts assign at once and overstates
+    real risk on a well-laddered book)."""
     lines = ["## Risk Alerts", ""]
     alerts = []
 
     regime = (regime_data or {}).get("regime", "NORMAL")
     if regime in ("CAUTION", "RISK_OFF"):
         alerts.append(f"⚠️ Regime is **{regime}** — new long entries suppressed")
+
+    # Put-bucket concentration on a single Friday.
+    # Critical (≥30% NLV) gets ⚠️; Warning (≥20% NLV) gets 📊. This is separate
+    # from the per-name 10% cap (equity concentration) and from the stress-
+    # coverage ratio (which assumes simultaneous assignment — a fantasy on a
+    # laddered book).
+    for bucket in (put_buckets or []):
+        sev = getattr(bucket, "severity", None)
+        if sev not in ("critical", "warning"):
+            continue
+        exp_str = bucket.expiration.strftime("%a %b %d '%y")
+        names_sorted = sorted(bucket.names.items(), key=lambda kv: -kv[1])
+        top_names = ", ".join(t for t, _ in names_sorted[:5])
+        more = f" + {len(names_sorted) - 5} more" if len(names_sorted) > 5 else ""
+        days = f", {bucket.days_to_expiry}d out" if bucket.days_to_expiry is not None else ""
+        emoji = "⚠️" if sev == "critical" else "📊"
+        verdict = "over 30% NLV cluster" if sev == "critical" else "approaching 30% NLV cap"
+        alerts.append(
+            f"{emoji} Expiration cluster on **{exp_str}**{days} — "
+            f"{bucket.contract_count} short puts, ${bucket.total_obligation:,.0f} obligation "
+            f"({bucket.pct_of_nlv*100:.1f}% NLV, {verdict}). Names: {top_names}{more}"
+        )
 
     # Concentration warnings
     for rev in equity_reviews:
@@ -882,6 +913,17 @@ def render_action_list(
             is_put = opt_type == "PUT"
             higher_strike = new_strike > cur_strike
 
+            # CLAUDE.md #14: a covered call that's still OTM has no real
+            # assignment risk — only a genuine roll-UP (higher strike) belongs
+            # in the action list. A same-strike calendar or down-roll just
+            # re-caps a bullish name to harvest premium (the SMH/SOXX bug,
+            # where the only credit-positive candidate was a same-strike
+            # re-cap mislabeled as "up-and-out"). Defer to HOLD here; the
+            # Watch ROLL ANALYSIS table still shows the full menu.
+            if opt_type == "CALL" and not genuinely_itm and not higher_strike:
+                seen_contracts.add(contract)
+                continue
+
             if is_put and higher_strike and not is_calendar:
                 # Surfacing a put-roll UP would guarantee/accelerate assignment.
                 # Skip this candidate entirely — the ranker shouldn't have
@@ -1225,6 +1267,23 @@ def render_action_list(
         # buy-to-close (which reads as a close and gives up the shares/cap).
         _ROLL_DECISIONS = {"ROLL_OUT", "ROLL_OUT_AND_UP", "ROLL_UP_AND_OUT", "ROLL_OUT_AND_DOWN"}
         if rec in _ROLL_DECISIONS:
+            # CLAUDE.md #14: defer to the position's own advisor. We only reach
+            # here when block #3 found no genuine credit-positive roll-up. For a
+            # covered call that's still OTM (no real assignment risk), that
+            # means the only "rolls" are same-strike re-caps or HOLD — so don't
+            # surface a roll directive that contradicts the advisor's HOLD (the
+            # SPY bug, where recommendedCandidateId was "A"). Real assignment
+            # risk (spot at/through the strike) still surfaces the directive.
+            _otype = (rev.get("type") or "").upper()
+            _strike_g = float(rev.get("strike") or 0)
+            _und_g = rev.get("underlying") or contract.split("_")[0]
+            _q_g = (snapshot_data or {}).get("quotes", {}) if snapshot_data else {}
+            _spot_g = float((_q_g.get(_und_g) or {}).get("last") or 0)
+            _call_itm = (_otype == "CALL" and _spot_g and _strike_g and _spot_g >= _strike_g)
+            if _otype == "CALL" and not _call_itm:
+                seen_contracts.add(contract)
+                continue
+
             qty = abs(float(rev.get("qty", 0) or 0))
             cur_mid = float(rev.get("current_mid", 0) or 0)
             up = ("UP" in rec)
@@ -1238,12 +1297,107 @@ def render_action_list(
                 f"   - **Why:** Decision matrix triggered `{rev.get('matrix_cell_id', '?')}` "
                 f"(regime + DTE + moneyness)."
             )
-            items.append(
-                f"   - **Order (two legs):** Buy-to-Close {int(qty)}× {contract} (current mid "
-                f"${cur_mid:.2f}) **and** Sell-to-Open {int(qty)}× a {new_side}-strike call further "
-                f"out — pick the target from the **ROLL ANALYSIS** table / live chain. Do NOT place "
-                f"the buy-to-close on its own (that closes the position and gives up the cap)."
-            )
+            # Fetch a REAL STO leg quote via the canonical chain fetcher — no
+            # more "pick from the ROLL ANALYSIS table" hand-wave. Delta-first
+            # (volatility-adaptive ~0.25), %OTM fallback. Tenor ≤ 120d
+            # (matches the action-list roll cap). Fail-soft: if the chain is
+            # unreachable, we surface "live chain unavailable, verify manually"
+            # rather than make up numbers.
+            sto_strike = sto_exp_pretty = None
+            sto_bid = sto_mid = sto_ask = sto_dte = None
+            sto_delta = None
+            try:
+                import importlib.util as _ilu_r
+                _fp = Path(__file__).resolve().parents[3] / "etrade-chain-fetcher" / "scripts" / "fetch.py"
+                if _fp.exists():
+                    _spec = _ilu_r.spec_from_file_location("etrade_chain_fetcher", _fp)
+                    _mod = _ilu_r.module_from_spec(_spec)
+                    sys.modules["etrade_chain_fetcher"] = _mod
+                    _spec.loader.exec_module(_mod)
+                    if _mod.is_available():
+                        _c = _mod.ChainCache()
+                        # Target ~90d DTE within the 120d action-list cap.
+                        _target_exp = _mod.choose_expiration(
+                            symbol=_und_g, target_dte=90, tolerance_days=45, cache=_c,
+                        )
+                        if _target_exp and _spot_g:
+                            _qd = None
+                            if up:
+                                # Roll-UP: target ~0.25 delta on the new CALL
+                                # (volatility-adaptive; further OTM on high-IV
+                                # names, closer on low-IV — exactly the rule we
+                                # apply to new CC writes).
+                                _qd = _mod.find_strike_near_delta(
+                                    symbol=_und_g, expiration=_target_exp,
+                                    target_delta=0.25,
+                                    opt_type=_otype, spot=_spot_g,
+                                    tolerance=0.12, cache=_c,
+                                )
+                                if not _qd:
+                                    # %OTM fallback when chain has no usable deltas
+                                    _qd = _mod.find_strike_at_otm_pct(
+                                        symbol=_und_g, expiration=_target_exp,
+                                        otm_pct=6.0, opt_type=_otype, spot=_spot_g,
+                                        cache=_c,
+                                    )
+                            elif down:
+                                # Roll-DOWN (defensive on a PUT): same ~0.25
+                                # delta target, just below spot.
+                                _qd = _mod.find_strike_near_delta(
+                                    symbol=_und_g, expiration=_target_exp,
+                                    target_delta=0.25,
+                                    opt_type=_otype, spot=_spot_g,
+                                    tolerance=0.12, cache=_c,
+                                )
+                            else:
+                                # Out in time (same strike — only valid here
+                                # if there's a genuine reason; block #3's
+                                # discipline normally would have handled it).
+                                _qd = _mod.quote_contract(
+                                    symbol=_und_g, strike=_strike_g,
+                                    expiration=_target_exp, opt_type=_otype, cache=_c,
+                                )
+                            if _qd:
+                                sto_strike = _qd.get("strike")
+                                sto_bid = _qd.get("bid")
+                                sto_mid = _qd.get("mid")
+                                sto_ask = _qd.get("ask")
+                                _d = _qd.get("delta")
+                                sto_delta = abs(float(_d)) if _d is not None else None
+                                _exp_iso = _qd.get("expiration") or ""
+                                from datetime import datetime as _dtR
+                                try:
+                                    sto_exp_pretty = _dtR.strptime(str(_exp_iso)[:10], "%Y-%m-%d").strftime("%a %b %d '%y")
+                                except Exception:
+                                    sto_exp_pretty = str(_exp_iso)
+                                try:
+                                    _ed = _dtR.strptime(str(_exp_iso)[:10], "%Y-%m-%d").date()
+                                    from datetime import date as _dateR
+                                    sto_dte = (_ed - _dateR.today()).days
+                                except Exception:
+                                    sto_dte = None
+            except Exception:
+                pass
+
+            if sto_strike and sto_bid is not None and sto_ask is not None:
+                _delta_s = f", δ {sto_delta:.2f}" if sto_delta is not None else ", δ n/a"
+                _net = ((sto_mid or 0) - cur_mid) * 100 * int(qty)
+                _net_s = f"+${_net:,.0f} credit" if _net >= 0 else f"−${abs(_net):,.0f} debit"
+                items.append(
+                    f"   - **Order (two legs):** Buy-to-Close {int(qty)}× {contract} (current mid "
+                    f"${cur_mid:.2f}) **and** Sell-to-Open {int(qty)}× **${sto_strike:g}{_otype[:1]} "
+                    f"{sto_exp_pretty}** — bid ${sto_bid:.2f} / mid ${sto_mid:.2f} / ask ${sto_ask:.2f}"
+                    f" ({sto_dte}d{_delta_s}). Net: {_net_s}. Do NOT place the BTC alone."
+                )
+                items.append(f"   - **Source:** Live E*TRADE chain")
+            else:
+                items.append(
+                    f"   - **Order (two legs):** Buy-to-Close {int(qty)}× {contract} (current mid "
+                    f"${cur_mid:.2f}) **and** Sell-to-Open {int(qty)}× a {new_side}-strike "
+                    f"call further out — **live chain unavailable, verify the STO leg at the broker "
+                    f"before placing**. Do NOT place the BTC on its own."
+                )
+
             if up:
                 items.append(
                     "   - Prefer a strike above spot for headroom and a tenor ≤120 days; "

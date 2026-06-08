@@ -23,6 +23,7 @@ import yfinance as yf  # noqa: E402  (already a dependency)
 
 from .fetch_earnings import fetch_earnings_dates
 from .fetch_ytd_pnl import fetch_ytd_options_pnl_auto
+from analysis import support_resistance as sr_mod
 
 
 WATCHLIST = ["SPY", "QQQ", "^VIX"]
@@ -88,14 +89,17 @@ def _historical_volatility_rank(ticker: str) -> float | None:
 
 
 def _full_technicals(ticker: str) -> dict | None:
-    """Pull 300d history once and compute IV-rank, RSI(14), 200-SMA, drawdown.
+    """Pull 300d history once and compute IV-rank, RSI(14), 200-SMA, drawdown, S/R.
 
     Returns dict with keys (any may be None on insufficient data):
       - iv_rank: percentile of 20d realized vol over past 252 obs
       - rsi_14: Wilder's RSI(14)
+      - sma_50: 50-day simple moving average (used for S/R confluence)
       - sma_200: 200-day simple moving average
       - drawdown_pct: % off rolling 252-day high (positive number = below high)
       - spot: latest close
+      - support_resistance: dict from SupportResistance.to_dict() — fail-closed
+        when there's insufficient history (kept under one key for downstream wiring)
     Returns None on fetch failure.
     """
     t = _fetch_price_history(ticker, days=300)
@@ -142,6 +146,11 @@ def _full_technicals(ticker: str) -> dict | None:
             else:
                 rsi_14 = 50.0
 
+        # 50-SMA (used for S/R confluence)
+        sma_50: float | None = None
+        if len(closes) >= 50:
+            sma_50 = round(float(closes.tail(50).mean()), 2)
+
         # 200-SMA
         sma_200: float | None = None
         if len(closes) >= 200:
@@ -155,12 +164,29 @@ def _full_technicals(ticker: str) -> dict | None:
             if high > 0:
                 drawdown_pct = round((high - spot) / high * 100.0, 1)
 
+        # Support/Resistance — computed from the same OHLC DataFrame (no extra fetch).
+        # Fail-closed: missing data → SupportResistance with note + empty levels,
+        # which serializes to a dict downstream consumers can render or skip.
+        sr_data: dict | None = None
+        try:
+            sr_result = sr_mod.compute_sr(
+                hist,
+                spot=float(spot),
+                sma_50=sma_50,
+                sma_200=sma_200,
+            )
+            sr_data = sr_result.to_dict()
+        except Exception as e:
+            print(f"    [warn] S/R compute for {ticker}: {e}", file=sys.stderr)
+
         return {
             "iv_rank": iv_rank,
             "rsi_14": rsi_14,
+            "sma_50": sma_50,
             "sma_200": sma_200,
             "drawdown_pct": drawdown_pct,
             "spot": round(spot, 2),
+            "support_resistance": sr_data,
         }
     except Exception as e:
         print(f"    [warn] technicals fetch for {ticker}: {e}", file=sys.stderr)

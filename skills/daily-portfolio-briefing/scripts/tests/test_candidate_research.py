@@ -133,6 +133,94 @@ def test_briefing_as_section_uses_demoted_headers():
     assert "# Candidate Trade Briefing" not in md  # no standalone H1 when embedded
 
 
+def test_long_puts_by_ticker_tallies_long_puts_only():
+    positions = [
+        {"assetType": "OPTION", "type": "PUT", "underlying": "META", "strike": 570.0, "qty": 1.0},   # long
+        {"assetType": "OPTION", "type": "PUT", "underlying": "META", "strike": 530.0, "qty": -1.0},  # short → ignore
+        {"assetType": "OPTION", "type": "CALL", "underlying": "META", "strike": 725.0, "qty": -1.0}, # call → ignore
+    ]
+    m = cr.long_puts_by_ticker(positions)
+    assert m["META"]["count"] == 1
+    assert m["META"]["strikes"] == [570.0]
+
+
+def test_candidate_briefing_blocks_short_put_that_cancels_protection():
+    """The META bug: user holds long $570P as a collar floor; a CSP candidate
+    at the same strike would cancel the hedge. Must be suppressed with a clear
+    'this cancels your protection' note, not just listed as a 'stack.'"""
+    payload = {
+        "themes": {"applications": {"name": "Applications", "anchors": ["META"]}},
+        "results_by_theme": {
+            "applications": [{
+                "ticker": "META", "spot": 610.0, "rsi_14": 55, "iv_rank": 56,
+                "sma_200": 540, "drawdown_pct": 18, "fivedayret_pct": -1.0,
+                "verdict": "CSP ENTRY (fat premium)", "rationale": ["fat premium"],
+                "csp_entry": {"strike": 570, "mid": 18.38, "bid": 18.10, "ask": 18.65,
+                              "expiration": "2026-08-21", "dte": 85},
+            }],
+        },
+    }
+    elp = {"META": {"count": 1, "strikes": [570.0]}}  # held LONG $570P (collar floor)
+    md = cr.render_candidate_briefing(payload, fv_by_ticker={}, config={},
+                                      generated_at="T", existing_long_puts=elp)
+    # META does NOT appear as an actionable candidate
+    assert "🎯 Today's Candidates (0)" in md or "🎯 Today's Candidates (1)" not in md.split("META")[0]
+    # The cancellation is surfaced with the protective-put language
+    assert "cancel" in md.lower()
+    assert "protection" in md.lower() or "collar floor" in md.lower()
+    # The protective-put icon distinguishes it from a plain duplicate
+    assert "🛡️" in md
+    assert "LONG $570P" in md
+
+
+def test_short_puts_by_ticker_tallies_short_puts_only():
+    positions = [
+        {"assetType": "OPTION", "type": "PUT", "underlying": "AMD", "strike": 135.0, "qty": -1.0},
+        {"assetType": "OPTION", "type": "PUT", "underlying": "AMD", "strike": 120.0, "qty": -2.0},
+        {"assetType": "OPTION", "type": "CALL", "underlying": "AMD", "strike": 200.0, "qty": -1.0},  # call → ignore
+        {"assetType": "OPTION", "type": "PUT", "underlying": "NVDA", "strike": 190.0, "qty": 1.0},   # long put → ignore
+        {"assetType": "EQUITY", "symbol": "AMD", "qty": 100},                                         # equity → ignore
+    ]
+    m = cr.short_puts_by_ticker(positions)
+    assert m["AMD"]["count"] == 3                      # 1 + 2 contracts
+    assert sorted(m["AMD"]["strikes"]) == [120.0, 135.0]
+    assert "NVDA" not in m                             # long put not counted
+
+
+def test_candidate_briefing_suppresses_held_put_duplicate():
+    """The LITE-bug fix: a CSP candidate whose strike matches a put the user
+    already holds is pulled out of the actionable list into 'Already positioned'."""
+    esp = {"AMD": {"count": 1, "strikes": [135.0]}}   # exact match to AMD's $135 candidate
+    md = cr.render_candidate_briefing(_payload(), fv_by_ticker=_FV, config={},
+                                      generated_at="T", existing_short_puts=esp)
+    # AMD drops out of candidates (only INTC's BUY remains)
+    assert "🎯 Today's Candidates (1)" in md
+    assert "Already positioned" in md
+    already = md.split("Already positioned")[1]
+    assert "`AMD`" in already and "already hold" in already
+    # The AMD CSP entry ticket is NOT presented as a fresh actionable trade
+    assert "Entry (CSP):" not in md.split("Already positioned")[0].split("Today's Candidates")[1]
+
+
+def test_candidate_briefing_annotates_same_name_different_strike():
+    """A candidate at a DIFFERENT strike on a name you already hold a put on stays
+    actionable but is flagged as stacking."""
+    esp = {"AMD": {"count": 1, "strikes": [110.0]}}   # 110 vs 135 candidate → >5% apart
+    md = cr.render_candidate_briefing(_payload(), fv_by_ticker=_FV, config={},
+                                      generated_at="T", existing_short_puts=esp)
+    assert "🎯 Today's Candidates (2)" in md           # AMD still a candidate
+    assert "You already hold 1× AMD PUT" in md          # bold markdown sits between PUT and strike
+    assert "$110" in md
+    assert "stack single-name assignment risk" in md
+
+
+def test_candidate_briefing_no_positions_unchanged():
+    """With no existing puts passed, behavior is exactly as before."""
+    md = cr.render_candidate_briefing(_payload(), fv_by_ticker=_FV, config={}, generated_at="T")
+    assert "🎯 Today's Candidates (2)" in md
+    assert "Already positioned" not in md
+
+
 def test_briefing_candidate_tickers_small_set():
     tks = cr.briefing_candidate_tickers(_payload(), config={})
     assert "AMD" in tks and "INTC" in tks and "NVDA" in tks   # candidates + held

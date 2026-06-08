@@ -9,6 +9,14 @@
 account_desc_whitelist:
   - INDIVIDUAL
 
+# Brokerage backend for live pulls + chain data. "etrade" (default) or "schwab".
+# Set to "schwab" only on a Schwab-backed instance. When "schwab", also set
+# schwab_account_labels so account_desc_whitelist can match (Schwab exposes
+# only CASH/MARGIN as the account 'type', not a nickname).
+brokerage: etrade
+# schwab_account_labels:
+#   "123456789": INDIVIDUAL
+
 enabled_strategies:
   - wheel              # covered calls + cash-secured puts
   - dividend_growth    # pullback entry on dividend growers (optional)
@@ -114,6 +122,17 @@ wheel:
 # harvest long-dated time-value premium. Core names may extend 3× longer.
 roll:
   max_action_tenor_days: 120             # reject action-list rolls longer than this (non-core)
+
+# Covered-call strike selection — DELTA-FIRST (volatility-adaptive). The same
+# delta sits further OTM on a high-IV name (more headroom) and closer on a
+# low-IV name; a flat %OTM target caps volatile names too tight (the SOFI
+# $17-on-$16 case). Falls back to fallback_otm_pct ONLY when the chain carries
+# no usable deltas — and then the briefing renders "δ n/a", never a fabricated
+# delta. See scripts/steps/strategy_upgrades.py::_etrade_call_quote.
+covered_call:
+  target_delta: 0.25            # aim for a ~0.25-delta call (wheel 0.20-0.30 band)
+  delta_tolerance: 0.12         # accept the nearest strike within ±0.12 delta
+  fallback_otm_pct: 6.0         # used only when the chain has no deltas
 
 # RSI discipline — RSI(14) is shown on EVERY recommendation and hard-gates new
 # opens. Bands are read asymmetrically (overbought is bad for selling puts but

@@ -1,7 +1,34 @@
 """6-step roll target selection pipeline with multi-candidate enumeration."""
 
+from datetime import datetime
 from typing import Any, Dict, Optional, List
 from dataclasses import dataclass
+
+
+def _tenor_phrase(dte_ext: int) -> str:
+    """Human-friendly tenor phrase derived from the ACTUAL DTE extension —
+    never a hardcoded '4-6 weeks' / '10-15 months' label divorced from data.
+    """
+    if dte_ext <= 0:
+        return "same date"
+    if dte_ext <= 10:
+        return f"+{dte_ext}d"
+    if dte_ext <= 60:
+        return f"+{dte_ext}d (~{max(1, dte_ext // 7)}w)"
+    months = dte_ext / 30.44
+    if months < 18:
+        return f"+{dte_ext}d (~{months:.0f}mo)"
+    return f"+{dte_ext}d (~{months / 12:.1f}yr)"
+
+
+def _fmt_exp_short(exp: str) -> str:
+    """Format YYYY-MM-DD as 'Jul 17 '26' — includes year so a 2-year-out
+    candidate can't be confused with a near-term one (e.g. '1215' ambiguous
+    between 2026 and 2028 in the old MMDD format)."""
+    try:
+        return datetime.strptime(exp, "%Y-%m-%d").strftime("%b %d '%y")
+    except (ValueError, TypeError):
+        return str(exp)
 
 
 @dataclass
@@ -94,6 +121,7 @@ def enumerate_roll_candidates(
         candidate_exps.append(("up_later", all_expirations[current_exp_idx + 1], strike_up))
 
     # Build candidates B-E by searching for matching chain entries
+    type_letter = "C" if (option_type or "").upper() == "CALL" else "P"
     for idx, (strategy, exp, strike) in enumerate(candidate_exps[:4], start=1):
         cand_letter = chr(ord('A') + idx)  # B, C, D, E
 
@@ -121,12 +149,16 @@ def enumerate_roll_candidates(
         net_dollars = new_credit - close_cost_total
         dte_ext = max(0, new_dte - current_dte)
 
-        # Format description
+        # Description — REAL values from the snapshot, never hardcoded boilerplate:
+        #   - qty: actual contract count from the position (was hardcoded "4×")
+        #   - type_letter: C/P from the actual option type (was hardcoded "C")
+        #   - exp_short: year-disambiguated date (was MMDD which collided across years)
         days_str = f"+{dte_ext}d" if dte_ext > 0 else ""
-        if strike == current_strike:
-            desc = f"4× ${current_strike:.0f}C {exp.split('-')[1]}{exp.split('-')[2]} @ ${mid:.2f} {days_str}"
-        else:
-            desc = f"4× ${strike:.0f}C {exp.split('-')[1]}{exp.split('-')[2]} @ ${mid:.2f} {days_str}"
+        exp_short = _fmt_exp_short(exp)
+        desc = (
+            f"{qty}× ${strike:.0f}{type_letter} {exp_short} @ ${mid:.2f}"
+            + (f" {days_str}" if days_str else "")
+        )
 
         # Build instruction (sell to open)
         instruction = {
@@ -137,15 +169,19 @@ def enumerate_roll_candidates(
             "sell_ask": ask,
         }
 
-        # Determine notes based on strategy
+        # Notes — phrased from the ACTUAL tenor extension, never a hardcoded
+        # "4-6 weeks" / "10-15 months" label divorced from the data.
+        tenor = _tenor_phrase(dte_ext)
         if strategy == "same_next":
-            notes = "Same strike, extend 4-6 weeks (low delta risk)"
+            notes = f"Same strike, extend {tenor} — low delta risk"
         elif strategy == "same_later":
-            notes = "Same strike, extend 10-15 months (high theta decay)"
+            notes = f"Same strike, extend {tenor} — re-caps the name for that long; check if you're OK with the duration"
         elif strategy == "up_same":
-            notes = "Higher strike, same date (reduces concentration)"
+            diff = strike - current_strike
+            notes = f"Higher strike (+${diff:.0f}), same expiration — raises the cap, preserves more upside"
         elif strategy == "up_later":
-            notes = "Higher strike, later date (max time + concentration fix)"
+            diff = strike - current_strike
+            notes = f"Higher strike (+${diff:.0f}), extend {tenor} — raises the cap and adds more time"
         else:
             notes = ""
 

@@ -74,6 +74,82 @@ def test_long_dated_csp_on_high_iv():
     assert op.kind == "LONG_DATED_CSP"
 
 
+def test_long_dated_csp_anchors_strike_to_support_cluster():
+    """When SR levels are provided AND a support cluster sits in the 7-13%
+    OTM band, the LT_CSP strike snaps to it instead of the spot*0.90 default."""
+    sr_levels = [
+        # Strong support at $138 (8% OTM from $150 spot) — should win.
+        {"price": 138.0, "side": "support", "source": "swing",
+         "touches": 4, "strength": 3.5, "confluence": ["sma_200"]},
+        # Weaker support far outside the band — must be ignored.
+        {"price": 100.0, "side": "support", "source": "swing",
+         "touches": 2, "strength": 1.6, "confluence": []},
+    ]
+    op = evaluate_options_idea(
+        ticker="AMD", weight_pct=0, spot=150,
+        rsi=55, iv_rank=70, sma_200=145,
+        third_party_rec="BUY", has_cash=True,
+        sr_levels=sr_levels,
+    )
+    assert op is not None
+    assert op.kind == "LONG_DATED_CSP"
+    # Strike should be 140 (rounded from 138 to nearest $5), NOT the legacy 135.
+    assert "$140P" in op.concrete_trade
+    # Rationale should mention the anchor.
+    assert "anchored" in op.rationale.lower() or "support" in op.rationale.lower()
+
+
+def test_long_dated_csp_falls_back_when_no_support_in_band():
+    """If SR is supplied but no support sits in the 7-13% OTM band, fall back
+    to the legacy spot*0.90 strike (no fabricated anchor)."""
+    sr_levels = [
+        # Only a deep support far below the band.
+        {"price": 80.0, "side": "support", "source": "swing",
+         "touches": 3, "strength": 2.5, "confluence": []},
+    ]
+    op = evaluate_options_idea(
+        ticker="AMD", weight_pct=0, spot=150,
+        rsi=55, iv_rank=70, sma_200=145,
+        third_party_rec="BUY", has_cash=True,
+        sr_levels=sr_levels,
+    )
+    assert op is not None
+    # 150 * 0.90 = 135 → strike = 135 (legacy heuristic).
+    assert "$135P" in op.concrete_trade
+    assert "anchored" not in op.rationale.lower()
+
+
+def test_long_dated_csp_requires_min_strength_for_anchor():
+    """A weak (strength < 1.5) support in the band must NOT be used as an anchor."""
+    sr_levels = [
+        {"price": 138.0, "side": "support", "source": "swing",
+         "touches": 1, "strength": 0.5, "confluence": []},  # too weak
+    ]
+    op = evaluate_options_idea(
+        ticker="AMD", weight_pct=0, spot=150,
+        rsi=55, iv_rank=70, sma_200=145,
+        third_party_rec="BUY", has_cash=True,
+        sr_levels=sr_levels,
+    )
+    assert op is not None
+    assert "$135P" in op.concrete_trade  # legacy fallback
+
+
+def test_long_dated_csp_sr_none_preserves_legacy_behavior():
+    """sr_levels=None must reproduce the exact pre-S/R strike."""
+    op_with = evaluate_options_idea(
+        ticker="AMD", weight_pct=0, spot=150,
+        rsi=55, iv_rank=70, sma_200=145,
+        third_party_rec="BUY", has_cash=True, sr_levels=None,
+    )
+    op_without_arg = evaluate_options_idea(
+        ticker="AMD", weight_pct=0, spot=150,
+        rsi=55, iv_rank=70, sma_200=145,
+        third_party_rec="BUY", has_cash=True,
+    )
+    assert op_with.concrete_trade == op_without_arg.concrete_trade
+
+
 def test_full_pipeline():
     positions = {
         "NVDA": {"weight_pct": 15, "spot": 200},

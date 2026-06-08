@@ -27,6 +27,18 @@ themes:
       - QCOM   # mobile + automotive + edge
       - TXN    # analog / power management
       - SMCI   # AI server builder
+      - DELL   # AI server builder (PowerEdge XE9680 / Blackwell rack-scale) — added 2026-06-01
+      # === Parkev-sheet AI-fits added 2026-06-01 (semi-equipment + EDA "picks-and-shovels") ===
+      - CDNS   # Cadence Design — EDA monopoly for AI chip design
+      - SNPS   # Synopsys — EDA monopoly (chip design tools + IP)
+      - KLAC   # KLA — semi process metrology
+      - LRCX   # Lam Research — etch / deposition equipment
+      - AMAT   # Applied Materials — fab equipment leader
+      - "ON"   # OnSemiconductor — power semis + automotive AI (quoted: bare ON parses as YAML boolean True)
+      - ONTO   # Onto Innovation — semi metrology / inspection
+      # === Theme ETFs promoted to anchors 2026-06-01 (user actively trades these) ===
+      - SMH    # VanEck Semiconductor ETF — user holds short calls + shares
+      - SOXX   # iShares Semiconductor ETF — user holds short calls + shares
     etfs: [SMH, SOXX, QQQ, CHPX]   # CHPX = Global X AI Semiconductor & Quantum ETF (verified 2026-05-22)
     notes: "Hyperscaler capex cycle, Claude / GPT compute demand"
 
@@ -38,6 +50,8 @@ themes:
       - MU     # micron — HBM + DRAM
       - STX    # seagate — HDD
       - WDC    # western digital — NAND + HDD
+      - PSTG   # Pure Storage — enterprise flash arrays for AI workloads — added 2026-06-01
+      - DRAM   # Roundhill Memory ETF — promoted to anchor 2026-06-01 for direct tracking
     etfs: [DRAM]   # DRAM = Roundhill Memory ETF (SK hynix, Samsung, MU, SNDK, Kioxia); verified 2026-05-22
     notes: "HBM ramp for AI, NAND price recovery, hyperscale storage"
 
@@ -82,6 +96,11 @@ themes:
       - EOSE   # eos energy — zinc-based grid storage
       - SMR    # NuScale — SMR
       - ETN    # eaton — power management
+      # === Parkev-sheet AI-fits added 2026-06-01 (alt energy + storage) ===
+      - CCJ    # Cameco — uranium miner (nuclear fuel cycle)
+      - ENPH   # Enphase Energy — solar microinverters
+      - PLUG   # Plug Power — hydrogen fuel cells (Hold-rated; alt energy)
+      - QS     # QuantumScape — solid-state batteries / grid storage
     etfs: [URA, NLR, XLU, POWR, GRID]   # URA/NLR=nuclear; POWR=iShares US Power Infra, GRID=First Trust Smart Grid; verified 2026-05-22
     notes: "Datacenter power demand → nuclear renaissance, grid buildout"
 
@@ -99,7 +118,24 @@ themes:
       - MRVL   # custom ASIC
       - QCOM   # mobile + automotive + edge AI
       - TXN    # analog / power management
+      - CRM    # Salesforce — enterprise CRM + Einstein AI agents — added 2026-06-01
+      - INTU   # Intuit — TurboTax/QuickBooks SaaS, GenAI integration — added 2026-06-01
+      - SNOW   # Snowflake — data warehouse / AI workload platform — added 2026-06-01
+      # === Parkev-sheet AI-fits added 2026-06-01 (SaaS + AI software layer) ===
+      - ORCL   # Oracle — AI cloud + database, OCI growth story
+      - DDOG   # DataDog — observability for AI workloads
+      - MDB    # MongoDB — NoSQL data platform
+      - TEAM   # Atlassian — devops / collaboration SaaS
+      - WDAY   # Workday — HR SaaS + AI agents
+      - MNDY   # monday.com — work-management SaaS
+      - AI     # C3.ai — enterprise AI applications
+      - APP    # AppLovin — mobile ad-tech AI
+      - TWLO   # Twilio — communications APIs + AI agents
+      - ZM     # Zoom — video + AI Companion assistant
+      - DOCU   # DocuSign — e-signature + AI agreement intelligence
       - IGV    # iShares Expanded Tech-Software ETF (proxy)
+      - XLK    # Tech Select Sector SPDR — promoted to anchor 2026-06-01 for broad-tech read
+      - QQQ    # Nasdaq-100 ETF — promoted to anchor 2026-06-01 for broad-mega-cap-tech tape
     etfs: [IGV, XLK]
     notes: "Software + chips running AI workloads at the application layer"
 
@@ -134,8 +170,9 @@ themes:
       - TSLA   # tesla — Optimus + FSD as robotics platform
       - PATH   # UiPath — RPA / software robots
       - AMZN   # amazon — warehouse robotics
+      - UBER   # mobility / autonomy via Waymo partnerships — added 2026-06-01
     etfs: [BOTZ, ROBO]
-    notes: "Physical + software robotics"
+    notes: "Physical + software robotics, including autonomous-mobility platforms"
 
   ancillary_drones:
     name: "Drones"
@@ -171,6 +208,7 @@ themes:
       - QBTS   # d-wave — annealing
       - IBM    # superconducting (one of many bets)
       - HON    # honeywell — Quantinuum stake
+      - QTUM   # Defiance Quantum ETF — promoted to anchor 2026-06-01 for sector benchmark
     etfs: [QTUM, CHPX]   # QTUM=Defiance Quantum; CHPX=Global X AI Semiconductor & Quantum; verified 2026-05-22
     notes: "Early stage; high vol, mostly thematic"
 
@@ -186,8 +224,26 @@ themes:
       - OKTA   # identity
       - FTNT   # fortinet — firewalls + SASE
       - CYBR   # cyberark — privileged access
+      - RBRK   # Rubrik — data security / backup / cyber resilience — added 2026-06-01
+      # === Theme ETFs promoted to anchors 2026-06-01 (so they get full When-To-Enter cards) ===
+      - HACK   # ETFMG Prime Cyber Security ETF — sector benchmark
+      - CIBR   # First Trust NASDAQ Cybersecurity ETF — sector benchmark
     etfs: [HACK, CIBR]
     notes: "Cloud-native security shift, SASE/zero trust"
+
+  social_ad_tech_ai:
+    name: "Social & Ad-Tech AI"
+    group: "Adjacent"
+    anchors:
+      - META   # Meta Platforms — Llama, AI ad targeting; Parkev "Top Stock to Buy" (tier 5) — added 2026-06-01
+      - RDDT   # Reddit — AI training-data licensing (OpenAI/Google deals) + ad platform — added 2026-06-01
+      - PINS   # Pinterest — visual-AI shopping + ad targeting — added 2026-06-01
+      - SNAP   # Snap — AR + My AI chatbot + ad platform — added 2026-06-01
+      - TTD    # The Trade Desk — programmatic ad-tech AI (Koa AI) — added 2026-06-01
+      - SOCL   # Global X Social Media ETF — sector benchmark, promoted to anchor 2026-06-01
+      - XLC    # Communication Services Select Sector SPDR — promoted to anchor 2026-06-01
+    etfs: [SOCL, XLC]   # SOCL=Global X Social Media; XLC=Communication Services Select Sector
+    notes: "Social platforms riding the AI wave via training-data licensing + LLM-powered ad targeting"
 
 # Verdict thresholds — same logic as long-term-opportunity-advisor but tuned
 # for outbound research (slightly more permissive on WATCH).
