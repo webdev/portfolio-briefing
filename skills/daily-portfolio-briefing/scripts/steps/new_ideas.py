@@ -23,9 +23,11 @@ from adapters.etrade_market import get_option_chain, get_option_expirations
 
 try:
     from analysis import rsi_discipline
+    from analysis.capacity_gates import check_new_entry
 except ImportError:  # pragma: no cover - path fallback for standalone runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from analysis import rsi_discipline
+    from analysis.capacity_gates import check_new_entry
 
 # How many top recs to fetch chains for (one chain fetch per ticker is slow)
 MAX_CONCRETE_IDEAS = 3
@@ -283,11 +285,39 @@ def generate_new_ideas(
     config: dict,
     snapshot_dir: Path,
     recommendations_list: list = None,
+    gate_state=None,
 ) -> list:
-    """Generate concrete actionable ideas from the recommendation list + live chains."""
+    """Generate concrete actionable ideas from the recommendation list + live chains.
+
+    ``gate_state`` (optional ``analysis.capacity_gates.GateState``): when the
+    portfolio capacity gates are CLOSED, no new CSP ideas are generated at all —
+    a single blocked note is emitted instead. When OPEN, each concrete idea is
+    additionally checked against the per-name / per-expiry caps via
+    ``check_new_entry``; failures are demoted to watch-only with the reason in
+    the skip note. ``gate_state=None`` preserves legacy behavior exactly.
+    """
     ideas: list = []
     regime = (regime_data or {}).get("regime", "NORMAL")
     suppress_longs = regime in ("RISK_OFF", "CAUTION")
+
+    # Portfolio capacity gates — CLOSED means no new CSP entries anywhere
+    # (06-wheel-parameters.md §7A). Emit one blocked note, not zero ideas,
+    # so the briefing states WHY there are no entries today.
+    if gate_state is not None and not gate_state.open:
+        reasons = "; ".join(gate_state.reasons) or "capacity"
+        ideas.append({
+            "ticker": "CAPACITY",
+            "name": "",
+            "source": "capacity_gates_blocked",
+            "instruction": None,
+            "rationale": f"New CSP entries blocked: {reasons}",
+            "capacity_blocked": True,
+        })
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        with open(snapshot_dir / "new_ideas.json", "w") as f:
+            json.dump(ideas, f, indent=2, default=str)
+        print(f"  New CSP entries blocked by capacity gates: {reasons}")
+        return ideas
 
     suppressed = set()
     for d in (directives_active or []):
@@ -389,6 +419,28 @@ def generate_new_ideas(
                     f"{rec.get('raw_recommendation', '')} — {rv.reason} "
                     f"(would have sold ${idea.get('strike')}P)"
                 )
+            # Per-candidate capacity check — per-name put/collateral caps and
+            # the expiry-cluster cap (06-wheel-parameters.md §7A). Failures are
+            # demoted to watch-only with the failing gate in the skip note.
+            if gate_state is not None and idea.get("instruction"):
+                cap_ok, cap_reason = check_new_entry(
+                    ticker,
+                    idea.get("collateral"),
+                    idea.get("expiration"),
+                    gate_state.positions,
+                    gate_state.nlv,
+                    gate_state,
+                    config,
+                )
+                if not cap_ok:
+                    idea["instruction"] = None
+                    idea["source"] = "recommendation_list_capacity_blocked"
+                    idea["capacity_blocked"] = True
+                    idea["capacity_reason"] = cap_reason
+                    idea["rationale"] = (
+                        f"{rec.get('raw_recommendation', '')} — skipped: {cap_reason} "
+                        f"(would have sold ${idea.get('strike')}P)"
+                    )
             ideas.append(idea)
 
         candidate_count += 1

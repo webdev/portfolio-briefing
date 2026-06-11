@@ -9,7 +9,10 @@ passes the RSI discipline gate.
 
 It reuses the Scout's existing research (``scout_payload["results_by_theme"]``)
 so it adds no new technical fetches; the caller supplies cached fair values.
-Deterministic and side-effect free.
+Deterministic over its inputs; the only side effect is the per-run verdict
+state file (``state/scout_verdicts.yaml``, 12-entry-pipeline-spec §4/§7) that
+``render_candidate_report`` reads for the flip-audit section and rewrites so
+``when_to_enter`` can align its statuses with this report's verdicts.
 """
 
 from __future__ import annotations
@@ -21,10 +24,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from analysis import rsi_discipline, intrinsic_value
+    from analysis import rsi_discipline, intrinsic_value, verdict_state
+    from analysis.capacity_gates import check_new_entry
     from steps import thematic_research as _tr
 except ImportError:  # pragma: no cover - path fallback
-    from analysis import rsi_discipline, intrinsic_value
+    from analysis import rsi_discipline, intrinsic_value, verdict_state
+    from analysis.capacity_gates import check_new_entry
     import thematic_research as _tr  # type: ignore
 
 
@@ -56,13 +61,64 @@ def _status(r: dict, rsi_th: dict):
     return ("held_rsi" if rv.removed else "candidate"), rv
 
 
-def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict) -> list[str]:
+# DCF/FV estimates farther than this from spot trigger the sanity check
+# (12-entry-pipeline-spec §6).
+_FV_DIVERGENCE_PCT = 0.60
+
+
+def _fv_note(tk: str, spot, fv: dict | None, etf_set) -> str | None:
+    """FV line with DCF sanity suppression (12-entry-pipeline-spec §6).
+
+    When the DCF sits >60% from spot AND disagrees in direction with the
+    analyst price target, the number is replaced with an explicit
+    "unreliable" marker (a $11 DCF under a $138 spot with analysts at $170
+    undermines every other number on the page). With no analyst target to
+    arbitrate, the number is kept but flagged as a divergent model estimate.
+    """
+    note = intrinsic_value.format_fv_note(tk, spot, fv, etf_set=etf_set)
+    if not note or not fv or not spot:
+        return note
+    dcf = fv.get("dcf")
+    tgt = fv.get("analyst_target")
+    if not dcf:
+        return note
+    try:
+        divergence = abs(float(dcf) - float(spot)) / float(spot)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return note
+    if divergence <= _FV_DIVERGENCE_PCT:
+        return note
+    if tgt:
+        try:
+            disagrees = (float(dcf) - float(spot)) * (float(tgt) - float(spot)) < 0
+        except (TypeError, ValueError):
+            disagrees = False
+        if disagrees:
+            return "💵 FV: unreliable (model/consensus divergence)"
+        return note  # divergent from spot but consensus agrees on direction
+    return f"{note} (model estimate — large divergence from spot)"
+
+
+def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
+                 gate_state=None) -> list[str]:
     tk = (r.get("ticker") or "").upper()
     spot = r.get("spot")
     spot_s = f"${spot:.2f}" if spot else "?"
     status, rv = _status(r, rsi_th)
+    rsi_val = r.get("rsi_14")
+    # RSI override labelling (12-entry-pipeline-spec §5): a CANDIDATE whose
+    # RSI sits outside the 35-50 entry band only qualifies via the override
+    # path (deep drawdown + third-party BUY) — label it explicitly instead of
+    # presenting the RSI as favourable.
+    is_override = (status == "candidate" and rsi_val is not None
+                   and not verdict_state.rsi_in_band(rsi_val))
+    ovr = (verdict_state.override_label(rsi_val, drawdown=r.get("drawdown_pct"),
+                                        buy_rec=verdict_state.has_buy_rec(r))
+           if is_override else "")
     badge = ""
-    if rv and rv.promoted:
+    if is_override:
+        badge = ""  # never badge an out-of-band RSI as favourable
+    elif rv and rv.promoted:
         badge = " ✅ RSI favourable"
     elif rv and rv.badge:
         badge = f" {rv.badge}"
@@ -70,7 +126,9 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict) -> list[str
     out = [f"**{_STATUS_LABEL[status]} · `{tk}` · {spot_s}**{badge}"]
 
     metrics = []
-    if r.get("rsi_14") is not None:
+    if is_override:
+        metrics.append(ovr)
+    elif r.get("rsi_14") is not None:
         metrics.append(rsi_discipline.tag(r["rsi_14"]))  # side-agnostic read
     tp = _tr._trend_phrase(r)
     if tp:
@@ -90,25 +148,37 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict) -> list[str
     # RSI-coverage audit always finds an RSI within its window).
     if status == "candidate":
         q = r.get("csp_entry")
-        if q:
+        if gate_state is not None and not gate_state.open:
+            # Capacity gates CLOSED — no concrete entry ticket anywhere
+            # (06-wheel-parameters.md §7A). Name stays analyzable; the
+            # actionable line is replaced with the failing gate.
+            first = gate_state.reasons[0] if gate_state.reasons else "capacity"
+            out.append(f"  - — blocked: {first}")
+        elif rsi_val is None:
+            # A concrete ticket may never render without an RSI value
+            # (12-entry-pipeline-spec §5 — fail closed, live-data rule #1).
+            out.append("  - — no ticket: RSI unavailable (fail closed)")
+        elif q:
             exp = q.get("expiration") or ""
             try:
                 exp = date.fromisoformat(q["expiration"]).strftime("%a %b %d '%y")
             except (ValueError, KeyError, TypeError):
                 pass
+            ovr_s = f" · {ovr}" if is_override else ""
             out.append(
                 f"  - **Entry (CSP):** SELL 1× {tk} ${q.get('strike', 0):g}P exp **{exp}** "
                 f"({q.get('dte', '?')} DTE) · mid ${q.get('mid', 0):.2f} "
-                f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_"
+                f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}"
             )
         elif (r.get("verdict") or "").upper().startswith("BUY"):
-            out.append(f"  - **Entry (equity):** BUY `{tk}` on this pullback — RSI favourable; size per your plan.")
+            rsi_read = ovr if is_override else "RSI favourable"
+            out.append(f"  - **Entry (equity):** BUY `{tk}` on this pullback — {rsi_read}; size per your plan.")
         else:
             out.append("  - _Entry: setup qualifies, but no live chain ticket available — verify before placing._")
     elif status == "held_rsi" and rv:
         out.append(f"  - _Held back by RSI: {rv.reason}_")
 
-    note = intrinsic_value.format_fv_note(tk, spot, fv_by_ticker.get(tk), etf_set=etf_set)
+    note = _fv_note(tk, spot, fv_by_ticker.get(tk), etf_set)
     if note:
         out.append(f"  - {note}")
 
@@ -123,10 +193,28 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict) -> list[str
 
 
 def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | None,
-                            config: dict | None, generated_at: str) -> str:
-    """Render the full per-company candidate research report as markdown."""
+                            config: dict | None, generated_at: str,
+                            gate_state=None, verdict_state_path=None) -> str:
+    """Render the full per-company candidate research report as markdown.
+
+    ``gate_state`` (optional ``analysis.capacity_gates.GateState``) makes the
+    report capacity-aware (06-wheel-parameters.md §7A / 12-entry-pipeline-spec):
+    the gate banner is the first line; when gates are CLOSED no entry ticket is
+    rendered (cards show "— blocked: <reason>" instead); headline CANDIDATE
+    cards are capped at 3 (overflow one-lined under "More qualifying names");
+    and names failing the per-name/per-expiry caps render under "Blocked"
+    instead of as CANDIDATE. ``gate_state=None`` preserves legacy behavior.
+
+    Verdict-flip audit trail (12-entry-pipeline-spec §4): this run's verdict
+    classes are diffed against the previous run's stored verdicts
+    (``verdict_state_path``, default ``state/scout_verdicts.yaml``); any class
+    change prints under "Verdict changes since last run" with the trigger
+    derived from the changed key inputs. The state file is then rewritten so
+    the next run — and the same-run ``when_to_enter`` renderer (§7) — reads
+    THIS run's verdicts."""
     if not scout_payload:
-        return f"# Candidate Research — {generated_at}\n\n_No scout data available._\n"
+        head = f"{gate_state.banner}\n\n" if gate_state is not None else ""
+        return f"{head}# Candidate Research — {generated_at}\n\n_No scout data available._\n"
 
     rsi_th = rsi_discipline.load_thresholds(config)
     etf_set = intrinsic_value.default_etf_set(config)
@@ -135,17 +223,72 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
     themes_meta = _tr._fresh_theme_meta() or scout_payload.get("themes", {})
     results_by_theme = scout_payload.get("results_by_theme", {})
 
-    # Tally statuses across the universe.
+    # Capacity pre-pass — per-name blocks + headline cap (only when the caller
+    # supplied a gate_state; otherwise everything below is a no-op).
+    blocked_by_name: dict[str, str] = {}
+    headline: set | None = None
+    overflow: list = []
+    if gate_state is not None:
+        cand_by_tk: dict[str, dict] = {}
+        for results in results_by_theme.values():
+            for r in results:
+                if (r.get("verdict") or "").startswith("NO DATA") or r.get("spot") is None:
+                    continue
+                tk = (r.get("ticker") or "").upper()
+                if not tk or tk in cand_by_tk:
+                    continue
+                if _status(r, rsi_th)[0] == "candidate":
+                    cand_by_tk[tk] = r
+        if gate_state.open:
+            # Per-name / per-expiry caps only matter when gates are open —
+            # when closed, every entry is already blocked globally.
+            for tk, r in cand_by_tk.items():
+                q = r.get("csp_entry") or {}
+                coll = float(q.get("strike") or 0) * 100 if q else 0.0
+                ok, why = check_new_entry(
+                    tk, coll, q.get("expiration"),
+                    gate_state.positions, gate_state.nlv, gate_state, config,
+                )
+                if not ok:
+                    blocked_by_name[tk] = why
+        passing = [(tk, r) for tk, r in cand_by_tk.items() if tk not in blocked_by_name]
+        # Rank by conviction score (rating tier, then IV rank) — top 3 headline.
+        passing.sort(key=lambda item: (-(item[1].get("rating_tier") or 0),
+                                       -(item[1].get("iv_rank") or 0),
+                                       item[0]))
+        headline = {tk for tk, _ in passing[:3]}
+        overflow = passing[3:]
+
+    # Tally statuses across the universe + collect this run's verdict classes
+    # (one per ticker — first occurrence wins, matching the briefing de-dup)
+    # for the flip audit + the when_to_enter consistency contract (§4/§7).
     tally = {"candidate": 0, "held_rsi": 0, "watch": 0, "avoid": 0}
     total = 0
+    run_date = date.today().isoformat()
+    curr_verdicts: dict = {}
     for results in results_by_theme.values():
         for r in results:
             if (r.get("verdict") or "").startswith("NO DATA") or r.get("spot") is None:
                 continue
             total += 1
-            tally[_status(r, rsi_th)[0]] += 1
+            st = _status(r, rsi_th)[0]
+            tally[st] += 1
+            tk = (r.get("ticker") or "").upper()
+            if tk and tk not in curr_verdicts:
+                curr_verdicts[tk] = {
+                    "verdict": st.upper(),
+                    "date": run_date,
+                    "key_inputs": verdict_state.key_inputs(r),
+                }
+    prev_verdicts = verdict_state.load(verdict_state_path)
+    flips = verdict_state.flip_lines(prev_verdicts, curr_verdicts)
 
-    lines = [
+    lines = []
+    if gate_state is not None:
+        # Capacity banner — mandatory first line (12-entry-pipeline-spec §1).
+        lines.append(gate_state.banner)
+        lines.append("")
+    lines += [
         f"# Candidate Research — {generated_at}",
         "",
         "_Per-company research across every Scout theme. Each company gets a card "
@@ -159,6 +302,15 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
         f"{tally['avoid']} 🔴 AVOID",
         "",
     ]
+
+    if flips:
+        # Verdict-flip audit trail (12-entry-pipeline-spec §4) — same standard
+        # as the briefing's Step 7: no flip without a named trigger.
+        lines.append("## Verdict changes since last run")
+        lines.append("")
+        for fl in flips:
+            lines.append(f"- {fl}")
+        lines.append("")
 
     current_group = None
     for theme_key, results in results_by_theme.items():
@@ -182,8 +334,42 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
         lines.append("")
         usable.sort(key=lambda r: (_STATUS_ORDER.get(_status(r, rsi_th)[0], 9), r.get("ticker", "")))
         for r in usable:
-            lines.extend(_format_card(r, fv_by_ticker, etf_set, rsi_th))
+            tk = (r.get("ticker") or "").upper()
+            if gate_state is not None and _status(r, rsi_th)[0] == "candidate":
+                if tk in blocked_by_name:
+                    continue  # rendered under "Blocked" below, never as CANDIDATE
+                if headline is not None and tk not in headline:
+                    continue  # over the 3-headline cap — one-lined below
+            lines.extend(_format_card(r, fv_by_ticker, etf_set, rsi_th,
+                                      gate_state=gate_state))
             lines.append("")
+
+    if gate_state is not None and overflow:
+        lines.append("## More qualifying names")
+        lines.append("")
+        lines.append("_Setup qualifies, but only the top 3 candidates get headline "
+                     "cards (12-entry-pipeline-spec §3)._")
+        lines.append("")
+        for tk, r in overflow:
+            rsi = r.get("rsi_14")
+            rsi_s = f"RSI {rsi:.0f} · " if rsi is not None else ""
+            lines.append(f"- `{tk}` — {r.get('verdict', '')} · {rsi_s}"
+                         f"spot ${r.get('spot', 0):,.2f}")
+        lines.append("")
+
+    if gate_state is not None and blocked_by_name:
+        lines.append("## Blocked — capacity gates")
+        lines.append("")
+        lines.append("_These names may not render as CANDIDATE — a per-name or "
+                     "per-expiry capacity gate failed (06-wheel-parameters.md §7A)._")
+        lines.append("")
+        for tk in sorted(blocked_by_name):
+            lines.append(f"- `{tk}` — blocked: {blocked_by_name[tk]}")
+        lines.append("")
+
+    # Persist this run's verdicts AFTER the diff so the next run (and the
+    # same-run when_to_enter renderer, §7) reads this run's state. Fail-soft.
+    verdict_state.save(curr_verdicts, verdict_state_path)
 
     return "\n".join(lines)
 
@@ -297,7 +483,8 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                               config: dict | None, generated_at: str,
                               as_section: bool = False,
                               existing_short_puts: dict | None = None,
-                              existing_long_puts: dict | None = None) -> str:
+                              existing_long_puts: dict | None = None,
+                              gate_state=None) -> str:
     """Focused, action-first briefing built FROM the candidates: only the names
     whose setup qualifies AND passes the RSI gate (full entry cards), with the
     RSI-blocked names listed below as 'on deck'. Condensed market context up top.
@@ -369,6 +556,13 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     lines = [
         _h_top,
         "",
+    ]
+    if gate_state is not None:
+        # Capacity banner (06-wheel-parameters.md §7A) — when CLOSED, no
+        # concrete entry tickets render in the cards below.
+        lines.append(f"**{gate_state.banner}**")
+        lines.append("")
+    lines += [
         "_Action-first: trade candidates pulled from the per-company Scout research — "
         "names where the setup qualifies AND passes the RSI gate. Each carries a live "
         "entry, RSI, valuation, and rationale. Not advice; verify before placing._",
@@ -392,7 +586,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
         lines.append(f"{_h_sub} 🎯 Today's Candidates ({len(cands)})")
         lines.append("")
         for tname, r in sorted(cands, key=lambda x: (x[0], x[1].get("ticker", ""))):
-            card = _format_card(r, fv_by_ticker, etf_set, rsi_th)
+            card = _format_card(r, fv_by_ticker, etf_set, rsi_th, gate_state=gate_state)
             card[0] = f"{card[0]}  · _{tname}_"
             # Same-name (different-strike) stacking note — kept, but flagged.
             tk = (r.get("ticker") or "").upper()

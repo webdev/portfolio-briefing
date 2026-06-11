@@ -68,6 +68,8 @@ def aggregate_briefing(
     long_term_opportunities: list | None = None,
     capital_plan: dict | None = None,
     scout_payload: dict | None = None,
+    gate_state=None,
+    aging_info: dict | None = None,
 ) -> tuple:
     """
     Aggregate all step outputs into final briefing markdown and JSON.
@@ -94,14 +96,26 @@ def aggregate_briefing(
     # Make config visible to render layer (used for core_positions/ltcg_rate/etc.)
     snapshot_data["_config"] = config
 
-    # Generate action list to count items (must happen before header render)
-    action_list_lines = render_action_list(equity_reviews, options_reviews, new_ideas, analytics, snapshot_data, date_str=date_str)
+    # Generate action list to count items (must happen before header render).
+    # Step 7.5: aging_info (fill reconciliation + recommendation aging) is
+    # threaded through render_action_list, which mutates it in place with
+    # "aged" / "updated_state" / "actions_export".
+    action_list_lines = render_action_list(equity_reviews, options_reviews, new_ideas, analytics, snapshot_data, date_str=date_str, aging_info=aging_info)
     # Count actual numbered items in action list (lines starting with "N."; strip whitespace first)
     action_count = sum(1 for line in action_list_lines if line and line.lstrip() and line.lstrip()[0].isdigit() and "." in line.lstrip()[:5])
 
     # Build markdown
     lines = []
-    lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl))
+    # Step 7.5: stalled items (≥6 consecutive IGNORED days) render at the VERY
+    # TOP — above the header — so they're the first thing the operator sees.
+    if aging_info and aging_info.get("aged"):
+        try:
+            from analysis.rec_aging import render_stalled_panel
+            lines.extend(render_stalled_panel(aging_info["aged"]))
+        except Exception as _stall_e:
+            import sys as _sys
+            print(f"[aggregate] stalled panel failed: {_stall_e}", file=_sys.stderr)
+    lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl, gate_state=gate_state))
     lines.extend(render_market_context(regime_data, quotes))
     # Pass option positions (with real Greeks from E*TRADE) for the net-Greeks aggregate.
     # If theta is missing on positions, estimate it from current_mid + days_to_expiry as a
@@ -194,6 +208,7 @@ def aggregate_briefing(
                 generated_at=date_str, as_section=True,
                 existing_short_puts=_esp_cb,
                 existing_long_puts=_elp_cb,
+                gate_state=gate_state,
             )
             lines.extend(_cand_section.splitlines())
         except Exception as _cbe:
@@ -325,9 +340,13 @@ def aggregate_briefing(
     try:
         snapshot_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
         yesterday_md = load_yesterday_briefing(date_str, snapshot_root)
-        # Build the today_md from what we have so far so we can diff
+        # Build the today_md from what we have so far so we can diff.
+        # When Step 7.5 reconciliation ran, removed items get definitive
+        # statuses (✅ EXECUTED / ◐ PARTIAL / ✗ IGNORED / ❔ UNVERIFIED)
+        # instead of "likely executed".
         today_so_far = "\n".join(lines)
-        diff_panel = render_diff_panel(today_so_far, yesterday_md)
+        recon_for_diff = (aging_info or {}).get("reconciliation") if aging_info else None
+        diff_panel = render_diff_panel(today_so_far, yesterday_md, recon_status=recon_for_diff)
         if diff_panel:
             # Insert near the top, after the header but before market context
             # For simplicity, append at the end before manifest
@@ -569,5 +588,10 @@ def aggregate_briefing(
         "directives_expired_count": len(directives_expired),
         "snapshot_dir": str(snapshot_dir),
     }
+    # Step 7.5: per-action aging — tomorrow's run reads this back for
+    # reconciliation (each: {key, kind, ident, summary, first_flagged,
+    # days_flagged, recon_status}).
+    if aging_info and aging_info.get("actions_export") is not None:
+        briefing_json["actions"] = aging_info["actions_export"]
 
     return briefing_markdown, briefing_json

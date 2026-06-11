@@ -186,6 +186,7 @@ def render_header(
     confidence: str = "MEDIUM",
     regime_rationale: str = "",
     ytd_pnl: dict = None,
+    gate_state=None,
 ) -> list:
     """Render header panel with date, regime, portfolio metrics, and YTD P&L if available."""
     cash_pct = (cash / nlv * 100) if nlv else 0
@@ -214,10 +215,13 @@ def render_header(
     # action list when snapshot_data is available there.
     if regime_rationale:
         lines.append(f"  - {regime_rationale}")
-    lines.extend([
-        f"**Portfolio NLV:** ${nlv:,.0f} | **Cash:** ${cash:,.0f} ({cash_pct:.1f}%)",
-        f"**Action Items:** {action_count}",
-    ])
+    lines.append(f"**Portfolio NLV:** ${nlv:,.0f} | **Cash:** ${cash:,.0f} ({cash_pct:.1f}%)")
+    # Capacity gate banner — printed daily right after the cash line
+    # (06-wheel-parameters.md §7A) so the operator never has to compute
+    # whether the portfolio has room for new short puts.
+    if gate_state is not None and getattr(gate_state, "banner", ""):
+        lines.append(f"**{gate_state.banner}**")
+    lines.append(f"**Action Items:** {action_count}")
 
     # Add YTD P&L if available and not error
     if ytd_pnl and not ytd_pnl.get("error"):
@@ -593,6 +597,7 @@ def render_action_list(
     analytics: dict | None = None,
     snapshot_data: dict | None = None,
     date_str: str | None = None,
+    aging_info: dict | None = None,
 ) -> list:
     """Prioritized action list — synthesized from EVERY actionable signal in the briefing.
 
@@ -602,6 +607,14 @@ def render_action_list(
 
     Order: URGENT → CLOSE WINNERS → EXECUTE ROLLS (high credit) → matrix actionable rec
     → CONCENTRATION TRIM → HEDGE if stress < target → equity non-HOLD → top new CSPs.
+
+    When ``aging_info`` is provided (Step 7.5 fill reconciliation + recommendation
+    aging), each item is aged against state/rec_aging.yaml: day-3+ IGNORED repeats
+    get a ⏳ tag and sort first; day-5+ items render a binary execute-or-directive
+    prompt; the headline is capped at 5 items with the rest under
+    "### Appendix: Full Action Queue". ``aging_info`` is mutated in place with
+    "aged" / "updated_state" / "actions_export" for the stalled panel, the JSON
+    sidecar and state persistence. ``aging_info=None`` → legacy behavior.
     """
     pretty_date = date_str or ""
     if date_str:
@@ -2069,6 +2082,17 @@ def render_action_list(
     _rsi_tech = (snapshot_data or {}).get("technicals", {}) or {}
     _rsi_th = rsi_discipline.load_thresholds(config_local)
     display_items = rsi_discipline.annotate_action_lines(items, _rsi_tech, _rsi_th)
+
+    # Step 7.5: recommendation aging — ⏳ tags, day-5 binary prompts, headline
+    # cap of 5 + appendix. Runs only when the orchestrator passed aging_info
+    # (legacy callers get unchanged behavior). Fail-soft: aging must never
+    # break the briefing.
+    if aging_info is not None:
+        try:
+            from analysis.rec_aging import apply_aging_to_action_items
+            display_items = apply_aging_to_action_items(display_items, aging_info)
+        except Exception as _age_e:
+            print(f"[action_list] recommendation aging failed: {_age_e}", file=sys.stderr)
 
     if display_items:
         lines.extend(display_items)

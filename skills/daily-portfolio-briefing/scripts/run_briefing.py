@@ -46,6 +46,7 @@ from steps.consistency_check import check_consistency
 from steps.aggregate import aggregate_briefing
 from steps.quality_gate import run_quality_gate
 from steps.deliver import deliver_briefing
+from analysis.capacity_gates import evaluate_gates
 
 
 def main():
@@ -118,7 +119,13 @@ def main():
         return 1
 
     today_date_str = datetime.now().strftime("%Y-%m-%d")
-    snapshot_dir = Path("state/briefing_snapshots") / today_date_str
+    # Fixture and dry-run modes must NEVER overwrite the canonical dated
+    # snapshot — a test run would clobber the real morning run's snapshot,
+    # breaking next-day reconciliation/diffs (this happened on 2026-06-11).
+    snapshot_subdir = today_date_str
+    if args.etrade_fixture or args.dry_run:
+        snapshot_subdir = f"{today_date_str}.test"
+    snapshot_dir = Path("state/briefing_snapshots") / snapshot_subdir
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -163,6 +170,19 @@ def main():
             snapshot_data, regime_data, directives_active, snapshot_dir
         )
 
+        # Step 5.5: Portfolio capacity gates — hard blocks on new short-put
+        # entries (06-wheel-parameters.md §7A). Evaluated BEFORE any new entry
+        # is proposed anywhere in the pipeline (new-ideas panel, candidates
+        # file, when-to-enter file).
+        print("[Step 5.5] Evaluating portfolio capacity gates...")
+        gate_state = evaluate_gates(
+            snapshot_data.get("positions", []) or [],
+            (snapshot_data.get("balance", {}) or {}).get("cash", 0) or 0,
+            (snapshot_data.get("balance", {}) or {}).get("accountValue", 0) or 0,
+            config,
+        )
+        print(f"  {gate_state.banner}")
+
         # Step 6: New ideas
         print("[Step 6] Generating new ideas...")
         new_ideas = generate_new_ideas(
@@ -172,6 +192,7 @@ def main():
             config,
             snapshot_dir,
             recommendations_list=recommendations_list,
+            gate_state=gate_state,
         )
 
         # Step 6.5: Long-term opportunities (3-12mo horizon)
@@ -233,6 +254,45 @@ def main():
             ttl_hours=24,
         )
 
+        # Step 7.4: Fill reconciliation + recommendation aging (spec Step 7.5).
+        # Reconcile YESTERDAY's action list against actual position diffs
+        # between daily snapshots (etrade-mcp has no list_transactions; the
+        # position diff + open_orders.json are the broker evidence). The
+        # resulting context is threaded into aggregate_briefing → the action
+        # list renderer ages each item (⏳ tags at 3 days, binary prompt at 5,
+        # ⛔ Stalled panel at 6+) and the state file is persisted after render.
+        print("[Step 7.4] Fill reconciliation + recommendation aging...")
+        aging_info = None
+        # Test/fixture runs use a separate aging-state file so they can't
+        # advance the real day counters (same rationale as the .test snapshot dir).
+        rec_aging_state_path = (
+            Path("state/rec_aging.test.yaml")
+            if (args.etrade_fixture or args.dry_run)
+            else Path("state/rec_aging.yaml")
+        )
+        try:
+            from analysis import rec_aging
+            aging_info = rec_aging.build_aging_context(
+                today_date_str,
+                snapshot_root=snapshot_dir.parent,
+                state_path=rec_aging_state_path,
+                today_positions=snapshot_data.get("positions"),
+                open_orders=snapshot_data.get("open_orders"),
+            )
+            _recon = aging_info.get("reconciliation") or {}
+            if _recon:
+                _counts: dict = {}
+                for _st in _recon.values():
+                    _counts[_st] = _counts.get(_st, 0) + 1
+                _summary = ", ".join(f"{v} {k}" for k, v in sorted(_counts.items()))
+                print(f"  Reconciled {len(_recon)} prior action(s) vs "
+                      f"{aging_info.get('prev_date')}: {_summary}")
+            else:
+                print("  No prior actions to reconcile (first run or no prior briefing).")
+        except Exception as _ae:
+            print(f"  WARNING: recommendation aging unavailable: {_ae}", file=sys.stderr)
+            aging_info = None
+
         # Step 7: Consistency check
         print("[Step 7] Day-over-day consistency check...")
         consistency_report, flagged_inconsistencies = check_consistency(
@@ -285,6 +345,8 @@ def main():
             long_term_opportunities=long_term_ops,
             capital_plan=capital_plan_dict,
             scout_payload=scout_payload,
+            gate_state=gate_state,
+            aging_info=aging_info,
         )
 
         # Step 9: Quality gate
@@ -327,6 +389,21 @@ def main():
         with open(json_output_path, "w") as f:
             json.dump(briefing_json, f, indent=2)
 
+        # Persist the recommendation-aging state (skipped on --dry-run above,
+        # so re-renders never double-increment days_flagged).
+        if aging_info is not None and aging_info.get("updated_state") is not None:
+            try:
+                from analysis import rec_aging as _ra_save
+                _ra_save.save_state(
+                    rec_aging_state_path,
+                    aging_info["updated_state"],
+                    updated=today_date_str,
+                )
+                print(f"Recommendation-aging state: {rec_aging_state_path}")
+            except Exception as _se:
+                print(f"  WARNING: failed to persist rec_aging state: {_se}",
+                      file=sys.stderr)
+
         print(f"\nBriefing written to: {actual_output_path}")
         print(f"Machine-readable JSON: {json_output_path}")
 
@@ -349,9 +426,16 @@ def main():
                     cache_path=snapshot_dir.parent / "intrinsic_value_cache.json",
                     api_key=_fmp_c,
                 )
+            # Test/fixture runs write verdict state to a side file so the
+            # flip-audit history of real runs is never polluted.
+            _verdict_path = None
+            if args.etrade_fixture or args.dry_run:
+                _verdict_path = Path("state/scout_verdicts.test.yaml")
             _cand_md = _cand.render_candidate_report(
                 scout_payload, fv_by_ticker=_cand_fv, config=config,
                 generated_at=_dt_c.now().strftime("%A, %B %d, %Y · %I:%M %p"),
+                gate_state=gate_state,
+                **({"verdict_state_path": _verdict_path} if _verdict_path else {}),
             )
             # S/R annotation pass — appends "S: $X · R: $Y" to the candidate
             # research cards. Merges snapshot technicals (held names) WITH the
@@ -420,10 +504,15 @@ def main():
             for _sym_w, _t_w in _tech_wte.items():
                 if isinstance(_t_w, dict) and isinstance(_t_w.get("support_resistance"), dict):
                     _sr_wte[str(_sym_w).upper()] = _t_w["support_resistance"]
+            _wte_verdict_path = None
+            if args.etrade_fixture or args.dry_run:
+                _wte_verdict_path = Path("state/scout_verdicts.test.yaml")
             _wte_md = _wte.render_when_to_enter_report(
                 scout_payload, config=config,
                 generated_at=_dt_w.now().strftime("%A, %B %d, %Y · %I:%M %p"),
                 sr_by_sym=_sr_wte,
+                gate_state=gate_state,
+                **({"verdict_state_path": _wte_verdict_path} if _wte_verdict_path else {}),
             )
             if _wte_md:
                 _wte_path = output_path.parent / f"when_to_enter_{today_date_str}.md"

@@ -43,6 +43,11 @@ try:
 except ImportError:  # pragma: no cover - path fallback
     _sr = None
 
+try:
+    from analysis import verdict_state as _vs
+except ImportError:  # pragma: no cover - path fallback
+    _vs = None
+
 
 # When spot is within this percentage of a support/resistance cluster the
 # trigger phrasing switches from "wait for X-Y% pullback" to the explicit
@@ -66,6 +71,15 @@ THEME_ORDER = [
 # 2026-06-01). When you add a new theme to the YAML, append its key here too.
 
 STATUS_RANK = {"enter": 0, "watch": 1, "wait": 2, "avoid": 3}
+
+# Candidates-report verdict class → the (status, label) this report downgrades
+# an ENTRY NOW to when the two disagree (12-entry-pipeline-spec §7). Always
+# the more conservative side.
+_ALIGN_DOWNGRADE = {
+    "HELD_RSI": ("wait", "🟡 WAIT — held by RSI"),
+    "WATCH": ("watch", "🟡 WATCH — neutral"),
+    "AVOID": ("avoid", "🔴 AVOID"),
+}
 
 
 def _trend_phrase(spot, sma) -> str | None:
@@ -244,6 +258,15 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
 
     # Favored pullback band
     if rsi is not None and 35 <= rsi <= 55:
+        # RSI override labelling (12-entry-pipeline-spec §5): the entry band is
+        # 35-50. A name entering with RSI above 50 only qualifies via the
+        # override path (deep drawdown + third-party BUY) — say so explicitly
+        # instead of presenting the out-of-band RSI as a favourable pullback.
+        if _vs is not None and not _vs.rsi_in_band(rsi):
+            rsi_read = _vs.override_label(rsi, drawdown=dd,
+                                          buy_rec=_vs.has_buy_rec(r))
+        else:
+            rsi_read = f"RSI {rsi:.0f} in pullback zone"
         # Parkev's rating tier (5=Top Stock to Buy, 4=Top 15/25 Stock, 3=Buy, ...)
         # — a tier ≥ 4 catalyst is a much stronger conviction signal than a
         # plain "Buy." When the technical setup AND the high-conviction rec line
@@ -284,7 +307,7 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
                     strike_note = f" Strike sits {_at_level_label(anchor)} — assignment puts you at a real support."
             label = "🌟 STRONG BUY — ENTRY NOW (CSP)" if is_top_tier else "🟢 ENTRY NOW — CSP"
             return ("enter", label,
-                    f"RSI {rsi:.0f} in pullback zone, IV rank {iv:.0f}, drawdown {dd:.0f}%, {tp}. "
+                    f"{rsi_read}, IV rank {iv:.0f}, drawdown {dd:.0f}%, {tp}. "
                     f"Favorable spot to get paid to maybe buy lower.{tier_note}{confluence_note}",
                     f"SELL 1× ${strike:g}P exp **{exp_p}** ({csp.get('dte')} DTE) · "
                     f"mid ${csp.get('mid', 0):.2f} (bid ${csp.get('bid', 0):.2f} / "
@@ -303,7 +326,7 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
                 f"{scale_target}. Average down on confirmed support."
             )
             return ("enter", label,
-                    f"RSI {rsi:.0f} in pullback zone, drawdown {dd:.0f}%, {tp}, "
+                    f"{rsi_read}, drawdown {dd:.0f}%, {tp}, "
                     f"third-party BUY-rated.{tier_note}{confluence_note}",
                     trigger)
         # WATCH/neutral — refine the monitor trigger with explicit support price
@@ -323,7 +346,8 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
     if rsi is None:
         return ("watch", "🟡 WATCH — no RSI",
                 "RSI data unavailable; can't gate.",
-                "Verify the ticker manually before any entry — fail closed.")
+                "— no ticket: RSI unavailable (fail closed). "
+                "Verify the ticker manually before any entry.")
 
     if 25 <= rsi < 35:
         sup_note = (f" Key support: ${nearest_sup.price:g}." if nearest_sup else "")
@@ -344,16 +368,62 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
 def render_when_to_enter_report(scout_payload: dict | None, *,
                                  config: dict | None = None,
                                  generated_at: str = "",
-                                 sr_by_sym: dict | None = None) -> str:
+                                 sr_by_sym: dict | None = None,
+                                 gate_state=None,
+                                 verdict_state_path=None) -> str:
     """Build the markdown report. Empty-string when no scout payload.
 
     ``sr_by_sym`` maps uppercase ticker → ``SupportResistance`` or its
     ``to_dict()`` shape from the snapshot. When provided, every card's
     trigger text uses real S/R levels instead of generic pullback %s.
-    Backwards-compatible: omit it for the legacy phrasing."""
+    Backwards-compatible: omit it for the legacy phrasing.
+
+    ``gate_state`` (optional ``analysis.capacity_gates.GateState``): the
+    capacity banner is the report's first line, and when gates are CLOSED
+    every ENTRY NOW status is downgraded to "WAIT — entry gates closed"
+    (no entry ticket rendered). ``gate_state=None`` is the legacy behavior.
+
+    Consistency contract (12-entry-pipeline-spec §7): the candidates report
+    (rendered first in the daily run) persists its verdict classes to
+    ``state/scout_verdicts.yaml``; this renderer reads back the SAME-DATE
+    entries and downgrades any ENTRY NOW whose candidate verdict is not
+    CANDIDATE — the two files may not contradict each other. A missing or
+    stale-dated state file disables the alignment (legacy behavior)."""
     sr_by_sym = sr_by_sym or {}
     if not scout_payload:
         return ""
+
+    gates_closed = gate_state is not None and not gate_state.open
+    _gate_reason = (gate_state.reasons[0]
+                    if (gates_closed and gate_state.reasons) else "capacity")
+
+    # Same-run candidate verdicts ({TICKER: CANDIDATE|HELD_RSI|WATCH|AVOID}).
+    # Empty when the state file is missing/stale → no alignment applied.
+    cand_verdicts: dict = {}
+    if _vs is not None:
+        try:
+            cand_verdicts = _vs.same_date_verdicts(_vs.load(verdict_state_path))
+        except Exception:
+            cand_verdicts = {}
+
+    def _classify(r, sr=None):
+        """classify(), downgrading ENTRY NOW when capacity gates are closed
+        or when the candidates report disagrees (consistency contract §7)."""
+        status, label, read, trigger = classify(r, sr=sr)
+        if gates_closed and status == "enter":
+            return ("wait", "🟡 WAIT — entry gates closed", read,
+                    f"WAIT — entry gates closed ({_gate_reason}). Setup qualifies; "
+                    "re-check when the capacity gates reopen.")
+        if status == "enter" and cand_verdicts:
+            cv = cand_verdicts.get((r.get("ticker") or "").upper())
+            if cv and cv != "CANDIDATE":
+                d_status, d_label = _ALIGN_DOWNGRADE.get(
+                    cv, ("watch", "🟡 WATCH — neutral"))
+                return (d_status, f"{d_label} (aligned to candidates report)", read,
+                        f"No ticket — the candidates report classifies this name "
+                        f"{cv}; downgraded to the more conservative status "
+                        "(aligned to candidates report).")
+        return status, label, read, trigger
     themes_meta = scout_payload.get("themes", {}) or {}
     rbt = scout_payload.get("results_by_theme", {}) or {}
     gen_iso = scout_payload.get("generated_at_iso", "")
@@ -389,10 +459,14 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
     counts = {"enter": 0, "wait": 0, "avoid": 0, "watch": 0}
     for tk, (_, r) in seen.items():
         sr = sr_by_sym.get(tk.upper())
-        s, *_ = classify(r, sr=sr)
+        s, *_ = _classify(r, sr=sr)
         counts[s] = counts.get(s, 0) + 1
 
     lines: list[str] = []
+    if gate_state is not None:
+        # Capacity banner — mandatory first line (12-entry-pipeline-spec §1).
+        lines.append(gate_state.banner)
+        lines.append("")
     title = f"# When-To-Enter Report — {generated_at}" if generated_at else "# When-To-Enter Report"
     lines.append(title)
     lines.append("")
@@ -418,7 +492,7 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
     for tk, (_, r) in sorted(seen.items()):
         if not _is_etf(tk):
             continue
-        s, label, *_ = classify(r, sr=sr_by_sym.get(tk.upper()))
+        s, label, *_ = _classify(r, sr=sr_by_sym.get(tk.upper()))
         spot = r.get("spot")
         spot_s = f"${spot:,.2f}" if spot else "?"
         # Strip the emoji prefix from label for the compact one-liner
@@ -467,7 +541,7 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         sma = r.get("sma_200")
         tp = _trend_phrase(spot, sma) or "trend n/a"
         sr_card = sr_by_sym.get(tk.upper())
-        _status, label, read, trigger = classify(r, sr=sr_card)
+        _status, label, read, trigger = _classify(r, sr=sr_card)
         others = [t for t in ticker_themes.get(tk, []) if t != tname]
         also = f" · also in: {', '.join(others)}" if others else ""
         etf_tag = " 🪙 **ETF**" if _is_etf(tk) else ""
@@ -519,7 +593,7 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
                 continue
             tname = themes_meta.get(tkey, {}).get("name", tkey)
             theme_etfs.sort(key=lambda item: (
-                STATUS_RANK.get(classify(item[1], sr=sr_by_sym.get(item[0].upper()))[0], 9),
+                STATUS_RANK.get(_classify(item[1], sr=sr_by_sym.get(item[0].upper()))[0], 9),
                 item[0],
             ))
             lines.append(f"### {tname} ({len(theme_etfs)})")
@@ -541,7 +615,7 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
 
             def _sk(item):
                 tk_sk, r = item
-                s, *_ = classify(r, sr=sr_by_sym.get(tk_sk.upper()))
+                s, *_ = _classify(r, sr=sr_by_sym.get(tk_sk.upper()))
                 return (STATUS_RANK.get(s, 9), tk_sk)
 
             rows.sort(key=_sk)

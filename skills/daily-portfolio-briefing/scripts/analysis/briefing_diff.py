@@ -91,8 +91,23 @@ def load_yesterday_briefing(today_iso: str, snapshots_root: Path) -> Optional[st
     return None
 
 
-def render_diff_panel(today_md: str, yesterday_md: Optional[str]) -> list[str]:
-    """Render a "## Since Yesterday" panel comparing the two briefings."""
+_RECON_STATUS_LABELS = {
+    "EXECUTED": "✅ EXECUTED (position diff confirms; or overtaken by events)",
+    "PARTIAL": "◐ PARTIAL (position reduced, not fully closed)",
+    "IGNORED": "✗ NOT FILLED (position unchanged — dropped without execution)",
+    "UNVERIFIED": "❔ UNVERIFIED (insufficient broker data — do not assume executed)",
+}
+
+
+def render_diff_panel(today_md: str, yesterday_md: Optional[str],
+                      recon_status: Optional[dict] = None) -> list[str]:
+    """Render a "## Since Yesterday" panel comparing the two briefings.
+
+    ``recon_status`` (optional) maps action keys (``KIND:IDENT``, from
+    analysis.rec_aging.reconcile) to fill-reconciliation statuses. When
+    provided, removed items render a definitive status instead of the legacy
+    "likely executed" guess; when absent, the old wording is kept as fallback.
+    """
     if not yesterday_md:
         return []  # nothing to diff against on first run
 
@@ -111,8 +126,21 @@ def render_diff_panel(today_md: str, yesterday_md: Optional[str]) -> list[str]:
         lines.append(f"### ✅ Resolved or Executed ({len(removed)})")
         for sig in sorted(removed):
             kind, ticker = (sig.split("|") + [""])[:2]
-            lines.append(f"- {kind.strip()} {ticker.strip()} — no longer in today's list "
-                         f"(likely executed or position closed)")
+            status_note = None
+            if recon_status:
+                try:
+                    from analysis.rec_aging import key_from_signature
+                    status = recon_status.get(key_from_signature(sig))
+                except Exception:
+                    status = None
+                if status:
+                    status_note = _RECON_STATUS_LABELS.get(
+                        status, f"❔ {status}")
+            if status_note:
+                lines.append(f"- {kind.strip()} {ticker.strip()} — {status_note}")
+            else:
+                lines.append(f"- {kind.strip()} {ticker.strip()} — no longer in today's list "
+                             f"(likely executed or position closed)")
         lines.append("")
 
     if added:

@@ -134,6 +134,23 @@ covered_call:
   delta_tolerance: 0.12         # accept the nearest strike within ±0.12 delta
   fallback_otm_pct: 6.0         # used only when the chain has no deltas
 
+# Portfolio capacity gates — HARD blocks on new short-put entries
+# (06-wheel-parameters.md §7A, added 2026-06-11). Portfolio-level gates close
+# ALL new CSP entries (coverage floor / cash floor / total-obligation ceiling);
+# per-name and per-expiry caps block individual candidates. The gate banner is
+# printed in the briefing header and at the top of the candidates and
+# when-to-enter reports. See scripts/analysis/capacity_gates.py. Every key has
+# an in-code default, so deleting this block does not break the pipeline.
+capacity_gates:
+  min_stress_coverage_for_new_puts: 0.50   # block all new puts below 0.50x coverage
+  min_cash_pct_for_new_puts: 0.05          # block all new puts below 5% NLV cash
+  max_short_puts_per_name: 1               # one short put per underlying
+  second_put_exception_max_collateral_pct: 0.06   # 2nd OK if combined ≤ 6% NLV...
+  second_put_exception_min_expiry_gap_days: 60    # ...AND expirations ≥ 60d apart
+  max_collateral_per_name_pct: 0.06        # total per-name put collateral ≤ 6% NLV
+  max_obligation_per_expiry_pct: 0.25      # single expiration's obligation ≤ 25% NLV
+  max_total_put_obligation_pct: 0.80       # whole-book put obligation ≤ 80% NLV
+
 # RSI discipline — RSI(14) is shown on EVERY recommendation and hard-gates new
 # opens. Bands are read asymmetrically (overbought is bad for selling puts but
 # good for selling covered calls). The gate suppresses only NEW opens; existing
