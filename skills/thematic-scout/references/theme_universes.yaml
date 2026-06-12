@@ -154,6 +154,9 @@ themes:
     name: "Space"
     group: "Ancillary"
     anchors:
+      - SPCX   # SpaceX — launch + Starlink. Nasdaq IPO Jun 12 '26 ($135 offer); verified 2026-06-12.
+               # Day-1 listing: RSI(14)/200-SMA/IV-rank/drawdown need price history — scout
+               # fail-closed rules render n/a until the window fills. Options may lag the IPO.
       - ASTS   # AST SpaceMobile — direct-to-cell satellites
       - FLY    # Firefly Aerospace
       - RKLB   # Rocket Lab — launch + Neutron
@@ -161,7 +164,7 @@ themes:
       - LUNR   # Intuitive Machines — lunar lander
       - BKSY   # BlackSky — earth observation
     etfs: [UFO, ARKX]
-    notes: "Satellite buildout + earth observation feeding AI models"
+    notes: "Satellite buildout + earth observation feeding AI models. SPCX added at IPO 2026-06-12."
 
   ancillary_robotics:
     name: "Robotics"
