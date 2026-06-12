@@ -442,7 +442,13 @@ def age_actions(today_actions: list, state: dict, reconciliation: dict,
             days_flagged = 1
         elif recon_status == "IGNORED":
             first_flagged = prior.get("first_flagged") or today_iso
-            days_flagged = int(prior.get("days_flagged", 0) or 0) + 1
+            prev_days = int(prior.get("days_flagged", 0) or 0)
+            if prior.get("last_aged") == today_iso:
+                # Same-day re-run: the clock already ticked today. Re-running
+                # the briefing must not double-count an ignored day.
+                days_flagged = max(1, prev_days)
+            else:
+                days_flagged = prev_days + 1
         else:
             # UNVERIFIED / missing recon: carry forward, don't escalate.
             first_flagged = prior.get("first_flagged") or today_iso
@@ -453,6 +459,7 @@ def age_actions(today_actions: list, state: dict, reconciliation: dict,
             "first_flagged": first_flagged,
             "days_flagged": days_flagged,
             "last_status": status_label,
+            "last_aged": today_iso,
             "summary": (a.get("summary") or "")[:200],
         }
         updated_state[key] = entry

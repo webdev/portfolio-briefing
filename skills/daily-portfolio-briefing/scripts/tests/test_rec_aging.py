@@ -396,3 +396,27 @@ def test_state_round_trip(tmp_path):
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+def test_same_day_rerun_does_not_double_count():
+    """Re-running the briefing on the same date must not advance the clock twice."""
+    from analysis import rec_aging
+
+    actions = [{"kind": "CLOSE", "ident": "MU_PUT_700_20261218", "summary": "close it"}]
+    key = rec_aging.action_key("CLOSE", "MU_PUT_700_20261218")
+    recon = {key: "IGNORED"}
+
+    # Day 1, first run: seeded at days_flagged=2 from prior state (yesterday=1).
+    prior = {key: {"first_flagged": "2026-06-10", "days_flagged": 1,
+                   "last_status": "IGNORED", "last_aged": "2026-06-10"}}
+    state1, aged1 = rec_aging.age_actions(actions, prior, recon, today_iso="2026-06-11")
+    assert aged1[key]["days_flagged"] == 2
+
+    # Same-day re-run: counter must hold at 2, not jump to 3.
+    state2, aged2 = rec_aging.age_actions(actions, state1, recon, today_iso="2026-06-11")
+    assert aged2[key]["days_flagged"] == 2
+    assert state2[key]["last_aged"] == "2026-06-11"
+
+    # Next day: increments normally.
+    _, aged3 = rec_aging.age_actions(actions, state2, recon, today_iso="2026-06-12")
+    assert aged3[key]["days_flagged"] == 3
