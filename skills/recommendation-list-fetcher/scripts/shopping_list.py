@@ -100,6 +100,36 @@ def _parse_rating_tier(rating: str, config: ConfigDict) -> int:
     return rating_tiers.get(rating.strip(), 1)
 
 
+# Conviction level — Parkev's qualitative confidence in the rating
+# (CLAUDE.md hard rule #26). Three canonical values; everything else
+# normalizes to None so downstream callers can render `(conv: n/a)`
+# rather than guessing.
+_CONVICTION_NORMALIZE = {
+    "high": "High",
+    "medium": "Medium",
+    "med": "Medium",
+    "low": "Low",
+}
+_CONVICTION_SCORE = {"High": 3, "Medium": 2, "Low": 1}
+
+
+def _parse_conviction(raw: str) -> tuple[str | None, int | None]:
+    """Normalize the raw conviction string. Returns (canonical_label, score).
+
+    score is 3/2/1 (High/Medium/Low) for arithmetic use downstream
+    (e.g., composite ranking = rating_tier × conviction_score / 3).
+    Unknown / empty values return (None, None) — fail-closed, never invent
+    a conviction.
+    """
+    if not raw:
+        return None, None
+    key = raw.strip().lower()
+    label = _CONVICTION_NORMALIZE.get(key)
+    if label is None:
+        return None, None
+    return label, _CONVICTION_SCORE[label]
+
+
 def _tier_to_recommendation(tier: int, config: ConfigDict) -> str:
     """Map numeric tier to canonical recommendation enum."""
     mapping = config["normalization"].get("tier_to_recommendation", {
@@ -248,9 +278,12 @@ def _parse_csv_rows(
 
         name = get_col(col_map["name"]).strip()
         rating = get_col(col_map["recommendation"]).strip()
-        date_str = get_col(col_map.get("date_updated", "C")).strip()
-        pt_2026_str = get_col(col_map.get("price_target_2026", "D")).strip()
-        pt_2027_str = get_col(col_map.get("price_target_2027", "F")).strip()
+        # date_updated default is now D (was C before the 2026-06-24
+        # Conviction Level column was inserted).
+        date_str = get_col(col_map.get("date_updated", "D")).strip()
+        conviction_str = get_col(col_map.get("conviction_level", "C")).strip()
+        pt_2026_str = get_col(col_map.get("price_target_2026", "E")).strip()
+        pt_2027_str = get_col(col_map.get("price_target_2027", "G")).strip()
 
         # Skip header and empty rows
         if not name or not rating:
@@ -275,9 +308,10 @@ def _parse_csv_rows(
             row_num += 1
             continue
 
-        # Parse rating
+        # Parse rating + conviction (hard rule #26)
         rating_tier = _parse_rating_tier(rating, config)
         recommendation = _tier_to_recommendation(rating_tier, config)
+        conviction_label, conviction_score = _parse_conviction(conviction_str)
 
         # Parse date
         date_updated = _parse_date(date_str, config)
@@ -306,6 +340,11 @@ def _parse_csv_rows(
             "recommendation": recommendation,
             "raw_recommendation": rating,
             "rating_tier": rating_tier,
+            # CLAUDE.md hard rule #26: conviction is the analyst's qualitative
+            # confidence in the rating. None when the sheet cell is empty or
+            # unrecognized — never invent one.
+            "conviction": conviction_label,         # "High" / "Medium" / "Low" / None
+            "conviction_score": conviction_score,   # 3 / 2 / 1 / None
             "date_updated": date_updated.isoformat() if date_updated else None,
             "age_days": age_days,
             "aging": aging,

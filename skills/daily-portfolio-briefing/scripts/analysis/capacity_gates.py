@@ -140,6 +140,15 @@ def evaluate_gates(positions: list, cash, nlv, config: dict | None) -> GateState
     """
     cash_d = Decimal(str(cash or 0))
     nlv_d = Decimal(str(nlv or 0))
+    # Guard against NaN/Infinity Decimals — `Decimal(str("nan"))` is a real
+    # NaN, and `nan > 0` raises decimal.InvalidOperation. Upstream snapshot
+    # has been seen to produce NaN NLV when E*TRADE returns malformed
+    # account totals (~2026-06-18 run). Fail closed: treat as zero so the
+    # gate evaluates as CLOSED instead of crashing the pipeline.
+    if not cash_d.is_finite():
+        cash_d = Decimal(0)
+    if not nlv_d.is_finite():
+        nlv_d = Decimal(0)
     cfg = _gate_cfg(config)
 
     norm = _normalize_positions(positions)

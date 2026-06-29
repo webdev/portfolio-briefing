@@ -266,6 +266,48 @@ class TestTaxCPA:
             for issue in result.issues
         )
 
+    def test_pass_pullback_csp_with_earnings_warn_uses_prefix(self):
+        """Regression for 2026-06-26: when earnings was inside the contract
+        window the renderer previously emitted only the badge `⚠️ Earnings
+        Nd away, -2d before expiration` WITHOUT the `Earnings check:` prefix,
+        which blocked the entire briefing. The renderer must ALWAYS prefix
+        with `Earnings check:` even in warn / block branches."""
+        # New renderer output — includes the prefix even on a warn:
+        md = """## Today's Action List
+
+11. **PULLBACK CSP** META — sell $485P exp Fri Jul 31 for $6.82 premium
+   - Yield: 14.7% ann.
+   - **Source:** Live E*TRADE chain
+   - **Wash-sale check:** ✅ META clear
+   - **Earnings check:** ⚠️ Earnings 33d away, -2d before expiration
+   - **Why:** Core META long position.
+   - **Account:** Taxable
+"""
+        result = tax_cpa_check(md)
+        # The specific "Earnings check:" missing finding MUST NOT fire.
+        assert not any(
+            "Earnings check" in issue.text and "no 'Earnings check:'" in issue.text
+            for issue in result.issues
+        )
+
+
+    def test_fail_pullback_csp_badge_only_blocks_briefing(self):
+        """Documents the OLD broken output — the badge alone (no prefix) fails
+        the gate. Locks the failure mode so it can't accidentally reappear."""
+        md = """## Today's Action List
+
+11. **PULLBACK CSP** META — sell $485P exp Fri Jul 31 for $6.82 premium
+   - **Wash-sale check:** ✅ clear
+   - ⚠️ ⚠️ Earnings 33d away, -2d before expiration
+   - **Account:** Taxable
+"""
+        result = tax_cpa_check(md)
+        assert any(
+            "PULLBACK CSP" in issue.text and "Earnings check" in issue.text
+            for issue in result.issues
+        )
+
+
     def test_fail_roll_missing_earnings_check(self):
         """Should fail when ROLL lacks earnings check."""
         md = """EXECUTE ROLL AAPL from Jun to Jul

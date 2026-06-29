@@ -223,6 +223,10 @@ def main():
                     "recommendation": str(rec).upper(),
                     "rating_tier": r.get("rating_tier"),
                     "raw_recommendation": r.get("raw_recommendation"),
+                    # CLAUDE.md hard rule #26 — Parkev's conviction modulates
+                    # both badge promotion and sizing guidance downstream.
+                    "conviction": r.get("conviction"),
+                    "conviction_score": r.get("conviction_score"),
                     "aging": bool(r.get("aging")),
                     "age_days": r.get("age_days"),
                     "date_updated": r.get("date_updated"),

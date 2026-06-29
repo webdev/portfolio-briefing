@@ -27,6 +27,27 @@ except ImportError:  # pragma: no cover - path fallback for standalone runs
     from analysis import rsi_discipline
 
 
+def _safe_price(v) -> float:
+    """Coerce a price to a safe float; NaN / None / non-finite / negative → 0.
+
+    Strategy-upgrade math (`target_strike = round(price * 1.06 / 5) * 5`,
+    `premium_per_share = price * 0.015`, etc.) crashes with
+    `ValueError: cannot convert float NaN to integer` on NaN inputs.
+    yfinance/E*TRADE quote failures can leave equity positions with
+    price=None or NaN. Coercing to 0 here lets the existing `price <= 0`
+    guards (already present at every site) skip those positions cleanly
+    — no control-flow changes needed. (Symptom 2026-06-18: crash at
+    strategy_upgrades.py:672 in sub-lot completion path.)
+    """
+    if v is None:
+        return 0.0
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) and f > 0 else 0.0
+
+
 @dataclass
 class StrategyUpgrade:
     """A single upgrade recommendation."""
@@ -348,7 +369,7 @@ def compute_strategy_upgrades(
             continue
 
         qty = equity_pos.get("qty", 0)
-        price = equity_pos.get("price", 0)
+        price = _safe_price(equity_pos.get("price"))
         if qty <= 0 or price <= 0:
             continue
 
@@ -454,7 +475,7 @@ def compute_strategy_upgrades(
             continue
 
         qty = equity_pos.get("qty", 0)
-        price = equity_pos.get("price", 0)
+        price = _safe_price(equity_pos.get("price"))
         cost_basis = equity_pos.get("costBasis", 0)
 
         if qty <= 0 or price <= 0 or cost_basis <= 0:
@@ -578,7 +599,7 @@ def compute_strategy_upgrades(
             continue
 
         qty = equity_pos.get("qty", 0)
-        price = equity_pos.get("price", 0)
+        price = _safe_price(equity_pos.get("price"))
         if qty < 100 or price <= 0:
             continue
 
@@ -772,7 +793,7 @@ def compute_strategy_upgrades(
             continue
 
         qty = equity_pos.get("qty", 0)
-        price = equity_pos.get("price", 0)
+        price = _safe_price(equity_pos.get("price"))
 
         if qty <= 0 or qty >= 100 or price <= 0:
             continue

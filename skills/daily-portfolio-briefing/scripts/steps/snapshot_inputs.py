@@ -53,7 +53,15 @@ def _fetch_price_history(ticker: str, days: int = 252) -> "yf.Ticker | None":
 
 
 def _live_quote(ticker: str) -> dict:
-    """Fetch live quote + day change + 5d change. Returns {} on failure."""
+    """Fetch live quote + day change + 5d change. Returns {} on failure.
+
+    NaN-safe: on US market holidays (Juneteenth, MLK Day, etc.) or pre-open
+    sessions, yfinance's ``history(period="10d")`` can include today as a
+    partial bar with NaN Close. Dropping NaN rows first ensures ``last``
+    is always the most recent REAL close, not a partial/holiday bar.
+    (Symptom 2026-06-19 Juneteenth: every quote came back ``last=nan``,
+    poisoning the entire snapshot's prices.)
+    """
     yf_ticker = ticker.replace("^", "^") if ticker.startswith("^") else ticker
     t = _fetch_price_history(yf_ticker, days=10)
     if t is None:
@@ -62,14 +70,24 @@ def _live_quote(ticker: str) -> dict:
         hist = t.history(period="10d")
         if hist.empty:
             return {}
-        last = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last
+        # Drop rows where Close is NaN — handles holiday/pre-open partial bars.
+        closes = hist["Close"].dropna()
+        if closes.empty:
+            print(f"    [warn] quote for {ticker}: history has no usable closes",
+                  file=sys.stderr)
+            return {}
+        last = float(closes.iloc[-1])
+        prev = float(closes.iloc[-2]) if len(closes) > 1 else last
         day_change_pct = (last - prev) / prev if prev else 0.0
-        if len(hist) >= 6:
-            five_d_ago = float(hist["Close"].iloc[-6])
+        if len(closes) >= 6:
+            five_d_ago = float(closes.iloc[-6])
             five_d_change_pct = (last - five_d_ago) / five_d_ago if five_d_ago else 0.0
         else:
             five_d_change_pct = day_change_pct
+        # Final NaN guard — if any of the computed values somehow non-finite,
+        # bail out cleanly so downstream callers don't see NaN.
+        if not (math.isfinite(last) and math.isfinite(day_change_pct)):
+            return {}
         return {
             "last": round(last, 2),
             "previousClose": round(prev, 2),
@@ -596,13 +614,38 @@ def snapshot_inputs(
                 new_pos["dayChangePct"] = quotes[sym].get("dayChangePct", 0)
         refreshed_positions.append(new_pos)
 
-    # Recompute account value from refreshed prices
-    long_market_value = sum(
-        pos.get("qty", 0) * pos.get("price", 0)
-        for pos in refreshed_positions
-        if pos.get("assetType") == "EQUITY" and pos.get("qty", 0) > 0
-    )
-    cash = base_balance.get("cash", 0)
+    # Recompute account value from refreshed prices.
+    # NaN-safe: yfinance/E*TRADE quote fetches can return None or NaN
+    # (e.g., 2026-06-18 had SPY/SMH/SOXX/VOO 404s). A single NaN in the
+    # sum propagates to NLV=$nan, which then crashes capacity_gates with
+    # `decimal.InvalidOperation` on `nlv_d > 0`. Skip non-finite prices
+    # with a warning so the NLV computes from the resolvable positions —
+    # callers downstream still see a real number to gate on.
+    def _safe(v):
+        try:
+            f = float(v) if v is not None else 0.0
+            return f if math.isfinite(f) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    skipped: list[str] = []
+    long_market_value = 0.0
+    for pos in refreshed_positions:
+        if pos.get("assetType") != "EQUITY":
+            continue
+        qty = _safe(pos.get("qty"))
+        if qty <= 0:
+            continue
+        price = _safe(pos.get("price"))
+        if price <= 0:
+            skipped.append(pos.get("symbol", "?"))
+            continue
+        long_market_value += qty * price
+    if skipped:
+        print(f"    [warn] NLV excludes {len(skipped)} position(s) with no usable price: {', '.join(skipped)}",
+              file=sys.stderr)
+
+    cash = _safe(base_balance.get("cash", 0))
     balance = {
         **base_balance,
         "longMarketValue": round(long_market_value, 2),

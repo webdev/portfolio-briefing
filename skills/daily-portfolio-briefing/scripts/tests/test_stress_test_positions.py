@@ -248,3 +248,57 @@ def test_stress_details_format():
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+# ─── NaN-safety regression tests (2026-06-18: yfinance 404s on SPY/SMH/SOXX
+# leaked NaN into snapshot.NLV, then into compute_analytics → stress_coverage,
+# crashing the pipeline at `underlying_price <= 0` with InvalidOperation) ───
+
+def test_stress_coverage_handles_nan_nlv_and_cash():
+    """A NaN NLV or cash from upstream must not crash compute_stress_coverage."""
+    positions = [{
+        "position_type": "short_put", "symbol": "AMD", "strike": 100.0,
+        "quantity": 1, "underlying_price": 95.0,
+    }]
+    sc = compute_stress_coverage(positions, cash=float("nan"), nlv=float("nan"))
+    assert sc is not None
+    # NaN inputs collapse to 0 → coverage is 0 (no cash against $10,000 obligation)
+    assert sc.coverage_ratio == 0.0
+    assert float(sc.total_put_obligations) == 10_000.0
+
+
+def test_stress_coverage_handles_nan_underlying_price():
+    """A short put whose underlying_price is NaN/None must not crash the
+    correlation calc — it falls through the `<= 0` guard, using strike
+    as the effective underlying (worst-case assumption)."""
+    positions = [{
+        "position_type": "short_put", "symbol": "AMD", "strike": 100.0,
+        "quantity": 1, "underlying_price": float("nan"),  # the killer
+    }]
+    sc = compute_stress_coverage(positions, cash=Decimal(50_000), nlv=Decimal(100_000))
+    assert sc is not None
+    # With NaN underlying treated as 0, effective_underlying = strike, so the
+    # put assigns in every drop scenario.
+    assert 0.10 in sc.drops and 0.20 in sc.drops and 0.30 in sc.drops
+
+
+def test_stress_coverage_handles_nan_qty():
+    """Position qty NaN/None must not crash — _safe_int coerces to 0."""
+    positions = [{
+        "position_type": "short_put", "symbol": "AMD", "strike": 100.0,
+        "quantity": None, "underlying_price": 95.0,
+    }]
+    sc = compute_stress_coverage(positions, cash=Decimal(50_000), nlv=Decimal(100_000))
+    assert sc is not None
+    assert float(sc.total_put_obligations) == 0.0  # qty=0 → no obligation
+
+
+def test_safe_dec_helper_directly():
+    """_safe_dec coerces None, NaN, strings, ints, and floats cleanly."""
+    from analysis.stress_coverage import _safe_dec
+    assert _safe_dec(None) == Decimal(0)
+    assert _safe_dec(float("nan")) == Decimal(0)
+    assert _safe_dec(float("inf")) == Decimal(0)
+    assert _safe_dec(123) == Decimal(123)
+    assert _safe_dec("45.67") == Decimal("45.67")
+    assert _safe_dec("garbage") == Decimal(0)

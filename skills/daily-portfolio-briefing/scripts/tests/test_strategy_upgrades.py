@@ -468,3 +468,38 @@ def test_sublot_completion_meta(mock_snapshot_data, mock_config):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ─── NaN-safety: yfinance/E*TRADE quote failures can leave equity positions
+# with price=None or NaN. The strategy_upgrades math (`round(price * 1.06 / 5)
+# * 5`, etc.) crashes with `ValueError: cannot convert float NaN to integer`.
+# _safe_price coerces to 0 so the existing `price <= 0` skip-guards catch it.
+# (Symptom 2026-06-18: pipeline crash at strategy_upgrades.py:672.)
+
+def test_safe_price_coerces_nan_and_none_and_nonfinite():
+    from steps.strategy_upgrades import _safe_price
+    assert _safe_price(None) == 0.0
+    assert _safe_price(float("nan")) == 0.0
+    assert _safe_price(float("inf")) == 0.0
+    assert _safe_price(float("-inf")) == 0.0
+    assert _safe_price(-5.0) == 0.0
+    assert _safe_price(0) == 0.0
+    assert _safe_price("garbage") == 0.0
+
+
+def test_safe_price_passes_real_values_through():
+    from steps.strategy_upgrades import _safe_price
+    assert _safe_price(123.45) == 123.45
+    assert _safe_price("456.78") == 456.78
+    assert _safe_price(1) == 1.0
+
+
+def test_safe_price_blocks_the_original_round_crash():
+    """The exact failure mode: round(NaN * 1.06 / 5) * 5 raises ValueError.
+    With _safe_price, the price collapses to 0 and the upstream guard skips."""
+    from steps.strategy_upgrades import _safe_price
+    price = _safe_price(float("nan"))
+    assert price == 0.0
+    # The skip-guard `if price <= 0: continue` evaluates True now — confirming
+    # the position is bypassed rather than reaching the round() call.
+    assert price <= 0

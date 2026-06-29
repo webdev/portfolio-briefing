@@ -428,3 +428,189 @@ def test_render_passes_sr_by_sym_to_cards():
     # Trigger should mention $180 (the support), not "8-12% pullback".
     assert "$180" in md
     assert "8-12%" not in md
+
+
+def test_independent_setup_gets_no_rec_label():
+    """CLAUDE.md hard rule #25: a 'CSP ENTRY (independent setup)' verdict
+    classifies as ENTRY NOW but uses a distinct label that warns the
+    user no third-party rec exists — they validate independently."""
+    r = _r(
+        ticker="AAOI", spot=174.0, rsi_14=50, iv_rank=76, drawdown_pct=22,
+        sma_200=75.0,
+        verdict="CSP ENTRY (independent setup)",
+        csp_entry={"strike": 160, "mid": 3.2, "bid": 3.0, "ask": 3.4,
+                   "expiration": "2026-07-24", "dte": 38},
+    )
+    status, label, read, trigger = classify(r)
+    assert status == "enter"
+    assert "⚠ no third-party rec" in label
+    assert "ENTRY NOW" in label
+    assert "$160P" in trigger  # full live ticket carried through
+
+
+def test_buy_rec_csp_still_uses_standard_label_no_regression():
+    """A normal CSP ENTRY (fat premium, BUY rec) stays on the standard
+    label — the new 'independent' branch only fires when the verdict
+    explicitly says 'INDEPENDENT'."""
+    r = _r(
+        ticker="MU", spot=1000.0, rsi_14=40, iv_rank=99, drawdown_pct=15,
+        sma_200=800.0,
+        verdict="CSP ENTRY (fat premium)",
+        csp_entry={"strike": 900, "mid": 5.0, "bid": 4.9, "ask": 5.1,
+                   "expiration": "2026-07-24", "dte": 38},
+    )
+    _, label, _, _ = classify(r)
+    assert "⚠" not in label
+    assert label.startswith("🟢 ENTRY NOW — CSP") or label.startswith("🌟 STRONG BUY")
+
+
+# ─── Gate-closed DEFERRED behavior (hard rule #24) ────────────────────────
+
+class _GateState:
+    """Minimal stub matching analysis.capacity_gates.GateState interface."""
+    def __init__(self, open: bool, reasons=(), banner=""):
+        self.open = open
+        self.reasons = list(reasons)
+        self.banner = banner
+
+
+def test_gate_closed_keeps_entry_classification_with_deferred_tag():
+    """Hard rule #24: when capacity gates are closed, ENTRY NOW classifications
+    must NOT be demoted to WAIT. They keep the enter status, keep the live
+    ticket, and gain a · ⏸ DEFERRED tag plus a capacity-gated note in the
+    trigger so the user can stage rotation."""
+    payload = {
+        "themes": {"semis": {"name": "Semis"}},
+        "results_by_theme": {
+            "semis": [_r(
+                ticker="AAOI", spot=170.0, rsi_14=48, iv_rank=77,
+                drawdown_pct=24, sma_200=76.0,
+                verdict="CSP ENTRY (independent setup)",
+                csp_entry={"strike": 155, "mid": 3.5, "bid": 3.3, "ask": 3.7,
+                           "expiration": "2026-07-24", "dte": 38},
+            )],
+        },
+    }
+    gate = _GateState(open=False, reasons=["coverage 0.10x < 0.50x"],
+                      banner="**CAPACITY: gates closed**")
+    md = render_when_to_enter_report(payload, generated_at="T", gate_state=gate)
+    assert "⏸ DEFERRED" in md                  # tag rendered
+    assert "$155P" in md                        # live ticket preserved
+    assert "Capacity-gated" in md               # reason note in trigger
+    assert "🟢 1 ENTRY NOW" in md              # count remains in ENTRY bucket
+    assert "(of which ⏸ 1 DEFERRED" in md      # surfaced in summary
+    # The legacy "WAIT — entry gates closed" label MUST NOT appear — that
+    # was the bug (entries demoted out of view).
+    assert "WAIT — entry gates closed" not in md
+
+
+def test_gate_open_renders_standard_entry_no_deferred_tag():
+    """When gates are open, an ENTRY NOW renders with no DEFERRED tag and the
+    summary doesn't show the 'of which DEFERRED' breakout."""
+    payload = {
+        "themes": {"semis": {"name": "Semis"}},
+        "results_by_theme": {
+            "semis": [_r(
+                ticker="AAOI", spot=170.0, rsi_14=48, iv_rank=77,
+                drawdown_pct=24, sma_200=76.0,
+                verdict="CSP ENTRY (independent setup)",
+                csp_entry={"strike": 155, "mid": 3.5, "bid": 3.3, "ask": 3.7,
+                           "expiration": "2026-07-24", "dte": 38},
+            )],
+        },
+    }
+    gate = _GateState(open=True, reasons=[], banner="**CAPACITY: gates open**")
+    md = render_when_to_enter_report(payload, generated_at="T", gate_state=gate)
+    assert "⏸ DEFERRED" not in md
+    assert "of which" not in md
+    assert "Capacity-gated" not in md
+    assert "🟢 1 ENTRY NOW" in md
+
+
+def test_gate_closed_does_not_promote_non_entries():
+    """A WATCH or AVOID name is NOT touched by the gate logic — only ENTRY
+    classifications get the DEFERRED treatment."""
+    payload = {
+        "themes": {"semis": {"name": "Semis"}},
+        "results_by_theme": {
+            "semis": [
+                # RSI in band but NO csp_entry and verdict is plain WATCH
+                _r(ticker="WAIT_ME", rsi_14=50, iv_rank=40,
+                   verdict="WATCH", csp_entry=None),
+                # Overheated → wait overbought
+                _r(ticker="HOT", rsi_14=78, iv_rank=80, fivedayret_pct=15,
+                   verdict="AVOID — overheated"),
+            ],
+        },
+    }
+    gate = _GateState(open=False, reasons=["closed"], banner="**X**")
+    md = render_when_to_enter_report(payload, generated_at="T", gate_state=gate)
+    assert "WAIT_ME" in md and "HOT" in md
+    # Neither should carry the DEFERRED tag — gate only affects enter status.
+    deferred_lines = [l for l in md.splitlines() if "DEFERRED" in l and ("WAIT_ME" in l or "HOT" in l)]
+    assert deferred_lines == []
+
+
+# ─── Conviction Level (CLAUDE.md hard rule #26) ───────────────────────────
+# Parkev's conviction column carries High/Medium/Low. The classifier uses it
+# to modulate BOTH the label (🏆 TOP CONVICTION / 🔥 high / 🟡 trial) AND the
+# sizing guidance. None conviction falls back to the legacy tier-only labels.
+
+def test_tier4_high_conviction_promotes_to_top_conviction():
+    r = _r(ticker="ADBE", rsi_14=45, drawdown_pct=12, verdict="BUY (pullback)",
+           rating_tier=4, raw_recommendation="Top 12 Stock", conviction="High")
+    status, label, read, trigger = classify(r)
+    assert status == "enter"
+    assert "🏆 TOP CONVICTION" in label
+    assert "1/2 of target weight" in trigger
+    assert "HIGH conviction" in read
+
+
+def test_tier4_low_conviction_downgraded_to_strong_buy_sizing():
+    """Tier-4 + Low → label drops the 🏆/🌟 promotion entirely (acts like tier-3)."""
+    r = _r(ticker="X", rsi_14=45, drawdown_pct=12, verdict="BUY (pullback)",
+           rating_tier=4, raw_recommendation="Top 15 Stock", conviction="Low")
+    status, label, read, trigger = classify(r)
+    assert status == "enter"
+    # Low conviction strips the top-tier promotion
+    assert "🏆" not in label and "🌟" not in label
+    assert "BUT LOW conviction" in read
+
+
+def test_tier3_high_conviction_adds_flame_chip():
+    r = _r(ticker="GOOG", rsi_14=45, drawdown_pct=12, verdict="BUY (pullback)",
+           rating_tier=3, raw_recommendation="Buy", conviction="High")
+    status, label, read, trigger = classify(r)
+    assert "🔥 high conviction" in label
+    assert "selective" in read.lower() or "selective" in trigger.lower()
+
+
+def test_tier3_low_conviction_demotes_to_trial():
+    r = _r(ticker="X", rsi_14=45, drawdown_pct=12, verdict="BUY (pullback)",
+           rating_tier=3, raw_recommendation="Buy", conviction="Low")
+    status, label, read, trigger = classify(r)
+    assert "🟡 TRIAL" in label
+    assert "1/6 of target weight" in trigger
+    assert "trial only" in trigger
+
+
+def test_conviction_none_falls_back_to_legacy_behavior():
+    """Missing conviction → behave EXACTLY as before (no chip, legacy sizing)."""
+    r = _r(ticker="X", rsi_14=45, drawdown_pct=12, verdict="BUY (pullback)",
+           rating_tier=3, raw_recommendation="Buy", conviction=None)
+    status, label, read, trigger = classify(r)
+    assert label == "🟢 ENTRY NOW — BUY"     # no chip
+    assert "1/3 of target weight" in trigger  # legacy sizing
+    assert "🔥" not in label and "🟡" not in label
+
+
+def test_csp_path_high_conviction_promotes():
+    """CSP-side mirror of the BUY-side promotion: tier 4 + High → 🏆."""
+    r = _r(ticker="V", rsi_14=45, iv_rank=80, drawdown_pct=12,
+           verdict="CSP ENTRY (fat premium)",
+           rating_tier=4, raw_recommendation="Top 12 Stock", conviction="High",
+           csp_entry={"strike": 280, "mid": 5.0, "bid": 4.9, "ask": 5.1,
+                      "expiration": "2026-07-24", "dte": 38})
+    status, label, read, trigger = classify(r)
+    assert "🏆 TOP CONVICTION" in label
+    assert "$280P" in trigger

@@ -22,17 +22,20 @@ source:
 
 column_mapping:
   # Column letter (A, B, C, etc.) for each field.
-  # The sheet's columns A-G are:
-  # A = Company Name, B = Rating, C = Date Updated,
-  # D = 2026 Price Target, E = 2026 As-of Date,
-  # F = 2027 Price Target, G = 2027 As-of Date
+  # 2026-06-24: Parkev added a "Conviction Level" column at C, shifting
+  # every subsequent column right by one. The sheet's current layout:
+  #   A = Name              B = Rating            C = Conviction Level (NEW)
+  #   D = Date Updated      E = 2026 Price Target F = 2026 As-of Date
+  #   G = 2027 Price Target I = 2028 Price Target K = 2029 Price Target
+  #   M = 2030 Price Target
+  # The conviction_level values are 'High' / 'Medium' / 'Low'.
   name: A
   recommendation: B
-  date_updated: C
-  price_target_2026: D
-  price_target_2026_asof: E
-  price_target_2027: F
-  price_target_2027_asof: G
+  conviction_level: C
+  date_updated: D
+  price_target_2026: E
+  price_target_2026_asof: F
+  price_target_2027: G
 
 ticker_resolution:
   # Manual ticker overrides for company names that don't map cleanly to tickers.
@@ -76,10 +79,14 @@ normalization:
   rating_tiers:
     "Top Stock to Buy": 5
     "Top 15 Stock": 4
+    "Top 25 Stock": 4
+    "Top 12 Stock": 4
     "Buy": 3
     "Borderline Buy": 2
     "Hold/ Market Perform": 1
+    "Borderline Sell": 0
     "Sell": 0
+    "Top Stock to Sell": 0
 
   # Mapping from numeric tier to canonical recommendation enum.
   # These enums are used downstream by daily-portfolio-briefing.
@@ -106,7 +113,13 @@ normalization:
 
 freshness:
   # Archive (skip) recommendations older than this many days.
-  max_age_days: 30
+  # CLAUDE.md hard rule #27: we surface EVERY ticker on EVERY actionable
+  # line, including stale ones — the user gets a ⏰ clock icon on the chip
+  # so they can judge freshness themselves. Dropping silently at 30d was
+  # losing 82% of Parkev's coverage (Jun 2026: 247 sheet entries, only 45
+  # passed the cap; ARM at 45d was a known false negative). Set to 365 so
+  # we keep coverage breadth and let the staleness icon do the warning.
+  max_age_days: 365
 
   # Tag recommendations as "aging" if older than this many days.
   # The briefing may surface aging recommendations with a caution note.

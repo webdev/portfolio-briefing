@@ -312,3 +312,132 @@ class TestIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ─── Conviction Level + column shift (CLAUDE.md hard rule #26) ─────────────
+# The 2026-06-24 sheet update inserted a "Conviction Level" column at C,
+# shifting every existing column right by one. The fetcher must:
+#   (1) read conviction from C as High/Medium/Low/None
+#   (2) read date_updated from D (was C before)
+#   (3) read price targets from E/G (were D/F)
+# Output adds `conviction` (label) and `conviction_score` (3/2/1) fields.
+
+import csv
+import io
+from datetime import date
+from shopping_list import _parse_csv_rows, _parse_conviction
+
+
+def _new_layout_config(temp_dir):
+    """Config matching the 2026-06-24 sheet layout."""
+    return {
+        "source": {"url": "x", "sheet_id": "x", "data_starts_at_row": 2},
+        "column_mapping": {
+            "name": "A",
+            "recommendation": "B",
+            "conviction_level": "C",      # NEW
+            "date_updated": "D",
+            "price_target_2026": "E",
+            "price_target_2026_asof": "F",
+            "price_target_2027": "G",
+        },
+        "ticker_resolution": {
+            "manual_overrides": {
+                "Adobe": "ADBE", "Visa": "V", "3M": "MMM",
+                "Alphabet": "GOOG", "Affirm": "AFRM",
+            },
+            "cache_path": str(temp_dir / "tm.json"),
+            "use_yfinance_fallback": False,
+        },
+        "normalization": {
+            "rating_tiers": {
+                "Top Stock to Buy": 5, "Top 12 Stock": 4, "Top 15 Stock": 4,
+                "Buy": 3, "Borderline Buy": 2, "Hold/ Market Perform": 1, "Sell": 0,
+            },
+            "tier_to_recommendation": {5: "STRONG_BUY", 4: "BUY", 3: "BUY",
+                                        2: "WEAK_BUY", 1: "HOLD", 0: "SELL"},
+            "data_hygiene": {"strip_whitespace_all_fields": True,
+                             "drop_ref_errors": True,
+                             "accepted_date_formats": ["%m/%d/%y", "%m/%d/%Y"]},
+        },
+        "freshness": {"warn_age_days": 14, "max_age_days": 999},
+    }
+
+
+def test_parse_conviction_canonical_values():
+    assert _parse_conviction("High") == ("High", 3)
+    assert _parse_conviction("Medium") == ("Medium", 2)
+    assert _parse_conviction("Low") == ("Low", 1)
+    assert _parse_conviction("high") == ("High", 3)         # case-insensitive
+    assert _parse_conviction("  Medium  ") == ("Medium", 2)  # trims whitespace
+    assert _parse_conviction("Med") == ("Medium", 2)         # alias
+
+
+def test_parse_conviction_unknown_returns_none():
+    """Never invent a conviction — empty/unknown → (None, None)."""
+    assert _parse_conviction("") == (None, None)
+    assert _parse_conviction(None) == (None, None)
+    assert _parse_conviction("Very High") == (None, None)
+    assert _parse_conviction("garbage") == (None, None)
+
+
+def test_new_layout_parses_conviction_into_output(temp_dir):
+    cfg = _new_layout_config(temp_dir)
+    # Row format matches 2026-06-24 sheet: A=Name B=Rating C=Conv D=Date E=PT2026
+    rows = [
+        ["Visa", "Top 12 Stock", "High", "6/1/26", "", "", ""],
+        ["3M", "Buy", "Low", "4/13/26", "", "", ""],
+        ["Adobe", "Top 12 Stock", "High", "6/15/26", "320-350", "3/16/26", ""],
+        ["Affirm", "Buy", "Medium", "5/13/26", "", "", ""],
+    ]
+    entries, _ = _parse_csv_rows(rows, cfg, today=date(2026, 6, 24))
+
+    visa = next(e for e in entries if e["ticker"] == "V")
+    assert visa["conviction"] == "High"
+    assert visa["conviction_score"] == 3
+    assert visa["rating_tier"] == 4
+    assert visa["date_updated"] == "2026-06-01"             # column D, not C
+
+    mmm = next(e for e in entries if e["ticker"] == "MMM")
+    assert mmm["conviction"] == "Low"
+    assert mmm["conviction_score"] == 1
+    assert mmm["rating_tier"] == 3                          # Buy
+
+    adbe = next(e for e in entries if e["ticker"] == "ADBE")
+    assert adbe["conviction"] == "High"
+    assert adbe["price_target_2026"] == (320.0, 350.0)      # column E, not D
+    assert adbe["date_updated"] == "2026-06-15"
+
+    afrm = next(e for e in entries if e["ticker"] == "AFRM")
+    assert afrm["conviction"] == "Medium"
+    assert afrm["conviction_score"] == 2
+
+
+def test_new_layout_no_conviction_column_value_returns_none(temp_dir):
+    cfg = _new_layout_config(temp_dir)
+    rows = [
+        ["Visa", "Buy", "", "6/1/26", "", "", ""],          # empty conviction
+        ["3M", "Buy", "Maybe?", "6/1/26", "", "", ""],      # unknown value
+    ]
+    entries, _ = _parse_csv_rows(rows, cfg, today=date(2026, 6, 24))
+    for e in entries:
+        assert e["conviction"] is None
+        assert e["conviction_score"] is None
+
+
+def test_column_shift_protects_date_parsing(temp_dir):
+    """The 2026-06-24 bug: if the old config was left in place after the
+    sheet's column-shift, date_updated would read 'High'/'Medium'/'Low' from
+    column C and silently fail to parse, leaving every rec with age_days=0.
+    With the new config pointing to D, dates parse correctly."""
+    cfg = _new_layout_config(temp_dir)
+    rows = [
+        ["Visa", "Buy", "High", "6/1/26", "", "", ""],
+        ["Adobe", "Buy", "Low", "5/1/26", "", "", ""],
+    ]
+    entries, _ = _parse_csv_rows(rows, cfg, today=date(2026, 6, 24))
+    # Real ages (not zeros from parse failure)
+    visa = next(e for e in entries if e["ticker"] == "V")
+    adbe = next(e for e in entries if e["ticker"] == "ADBE")
+    assert visa["age_days"] == 23
+    assert adbe["age_days"] == 54

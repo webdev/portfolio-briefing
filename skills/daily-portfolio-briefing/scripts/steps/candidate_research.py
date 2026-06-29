@@ -123,6 +123,30 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     elif rv and rv.badge:
         badge = f" {rv.badge}"
 
+    # CLAUDE.md hard rule #25: when the scout produces an "independent
+    # setup" verdict (RSI + IV qualify but no third-party BUY), surface
+    # the entry but flag it so the user knows to apply their own
+    # catalyst check rather than relying on Parkev's sheet.
+    is_independent = "INDEPENDENT" in (r.get("verdict") or "").upper()
+    if is_independent:
+        badge = f"{badge} ⚠ no third-party rec — verify independently".strip()
+        badge = f" {badge}" if not badge.startswith(" ") else badge
+
+    # CLAUDE.md hard rule #26: conviction badge (only on candidates with a
+    # third-party rec — INDEPENDENT setups already carry their own warning).
+    tier = r.get("rating_tier") or 0
+    conviction = r.get("conviction")  # "High" / "Medium" / "Low" / None
+    if conviction and not is_independent and status == "candidate":
+        if tier >= 4 and conviction == "High":
+            badge = f"{badge} 🏆 TOP CONVICTION".strip()
+        elif tier >= 4 and conviction == "Low":
+            badge = f"{badge} ⚠ low-conviction (tier-4 BUT analyst soft)".strip()
+        elif tier == 3 and conviction == "High":
+            badge = f"{badge} 🔥 high conviction".strip()
+        elif tier == 3 and conviction == "Low":
+            badge = f"{badge} 🟡 low conviction — trial size".strip()
+        badge = f" {badge}" if not badge.startswith(" ") else badge
+
     out = [f"**{_STATUS_LABEL[status]} · `{tk}` · {spot_s}**{badge}"]
 
     metrics = []
@@ -146,15 +170,18 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     # Concrete entry (or held-by-RSI note) FIRST, right under the RSI metrics
     # line — keeps the actionable ticket adjacent to its RSI read (also so the
     # RSI-coverage audit always finds an RSI within its window).
+    #
+    # IMPORTANT (2026-06-15 user pushback): when capacity gates are CLOSED
+    # the system used to REPLACE the entry ticket with "— blocked: ...". The
+    # user pointed out that hiding the opportunity is the wrong move — they
+    # still want to SEE what the strike + premium would be so they can plan
+    # for when capacity reopens. We now render the FULL entry ticket with a
+    # ⏸ DEFERRED tag instead. The capacity reason itself appears once at the
+    # top of the Today's Candidates section (see render_candidate_briefing).
+    capacity_blocked = gate_state is not None and not gate_state.open
     if status == "candidate":
         q = r.get("csp_entry")
-        if gate_state is not None and not gate_state.open:
-            # Capacity gates CLOSED — no concrete entry ticket anywhere
-            # (06-wheel-parameters.md §7A). Name stays analyzable; the
-            # actionable line is replaced with the failing gate.
-            first = gate_state.reasons[0] if gate_state.reasons else "capacity"
-            out.append(f"  - — blocked: {first}")
-        elif rsi_val is None:
+        if rsi_val is None:
             # A concrete ticket may never render without an RSI value
             # (12-entry-pipeline-spec §5 — fail closed, live-data rule #1).
             out.append("  - — no ticket: RSI unavailable (fail closed)")
@@ -165,14 +192,16 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
             except (ValueError, KeyError, TypeError):
                 pass
             ovr_s = f" · {ovr}" if is_override else ""
+            tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (CSP):** "
             out.append(
-                f"  - **Entry (CSP):** SELL 1× {tk} ${q.get('strike', 0):g}P exp **{exp}** "
+                f"  - {tag}SELL 1× {tk} ${q.get('strike', 0):g}P exp **{exp}** "
                 f"({q.get('dte', '?')} DTE) · mid ${q.get('mid', 0):.2f} "
                 f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}"
             )
         elif (r.get("verdict") or "").upper().startswith("BUY"):
             rsi_read = ovr if is_override else "RSI favourable"
-            out.append(f"  - **Entry (equity):** BUY `{tk}` on this pullback — {rsi_read}; size per your plan.")
+            tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (equity):** "
+            out.append(f"  - {tag}BUY `{tk}` on this pullback — {rsi_read}; size per your plan.")
         else:
             out.append("  - _Entry: setup qualifies, but no live chain ticket available — verify before placing._")
     elif status == "held_rsi" and rv:
@@ -484,7 +513,10 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                               as_section: bool = False,
                               existing_short_puts: dict | None = None,
                               existing_long_puts: dict | None = None,
-                              gate_state=None) -> str:
+                              gate_state=None,
+                              snapshot_data: dict | None = None,
+                              analytics: dict | None = None,
+                              recommendations_list: list | None = None) -> str:
     """Focused, action-first briefing built FROM the candidates: only the names
     whose setup qualifies AND passes the RSI gate (full entry cards), with the
     RSI-blocked names listed below as 'on deck'. Condensed market context up top.
@@ -585,6 +617,25 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     if cands:
         lines.append(f"{_h_sub} 🎯 Today's Candidates ({len(cands)})")
         lines.append("")
+        # CAPACITY status banner — when entry gates are closed, surface the
+        # reason ONCE at the top of the section so the per-candidate cards
+        # don't have to repeat it. User explicit rule (2026-06-15): never
+        # hide good opportunities — show the full entry ticket even when
+        # the system can't act on it today, so the user can plan.
+        if gate_state is not None and not gate_state.open:
+            first_reason = gate_state.reasons[0] if gate_state.reasons else "capacity gates closed"
+            lines.append(f"> 🔒 **CAPACITY: New CSP entries blocked — {first_reason}**")
+            lines.append(f"> These candidates are still SHOWN below (with full strikes + premiums) "
+                         f"as DEFERRED. Free up cash via the action list closes; once stress "
+                         f"coverage clears 0.50× the gate reopens and these become actionable.")
+            lines.append("")
+        # Lazy-load the pre-trade validator so older callers (tests) that
+        # don't pass snapshot_data still work — validator findings are
+        # additive context, never required for the candidate to render.
+        try:
+            from analysis import pre_trade_validator as _ptv
+        except ImportError:
+            _ptv = None
         for tname, r in sorted(cands, key=lambda x: (x[0], x[1].get("ticker", ""))):
             card = _format_card(r, fv_by_ticker, etf_set, rsi_th, gate_state=gate_state)
             card[0] = f"{card[0]}  · _{tname}_"
@@ -598,6 +649,42 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                     f"  - ⚠ **You already hold {ov['count']}× {tk} PUT** at {strikes_s} — "
                     f"this would stack single-name assignment risk; size accordingly or skip."
                 )
+            # Pre-trade validation: run the proposed CSP through the discipline
+            # rules and surface any BLOCKs/WARNs inline. Only fires when we
+            # have both a concrete chain quote AND the snapshot to validate
+            # against — silent otherwise (no false positives from missing data).
+            if _ptv is not None and snapshot_data and q.get("strike") and q.get("expiration"):
+                try:
+                    ctx = _ptv.build_context_from_snapshot(
+                        snapshot_data,
+                        ticker=tk,
+                        strike=float(q["strike"]),
+                        expiration=q["expiration"],
+                        option_type="PUT",
+                        action="SELL_OPEN",
+                        quantity=1,
+                        limit_price=q.get("mid"),
+                        analytics=analytics,
+                        recommendations_list=recommendations_list,
+                    )
+                    findings = _ptv.validate_proposed_trade(ctx, config)
+                    # Filter out rules ALREADY communicated elsewhere in the
+                    # card to avoid duplicate noise. The capacity banner at
+                    # the top of the section already states ENTRY_GATES_CLOSED;
+                    # the position-aware overlap note above covers existing-
+                    # short-put stacking; the RSI gate is on the metrics line;
+                    # the earnings warning is on the Earnings line.
+                    SILENT = {"ENTRY_GATES_CLOSED"}  # rendered in capacity banner
+                    if ov:
+                        SILENT.add("ROLL_UP_RISK_INCREASE")
+                    visible = [f for f in findings if f.rule_id not in SILENT]
+                    if visible:
+                        for f in visible:
+                            emoji = "🚫" if f.severity == "BLOCK" else "⚠️"
+                            card.append(f"  - {emoji} **{f.severity}** ({f.rule_id}) — {f.reason}")
+                except Exception:
+                    # Validator is enrichment, never load-bearing — silent fail.
+                    pass
             lines.extend(card)
             lines.append("")
     else:

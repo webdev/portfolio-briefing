@@ -9,6 +9,40 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 
+def _safe_dec(v, default=Decimal(0)) -> Decimal:
+    """Coerce a value to a finite Decimal, fail-closed to ``default``.
+
+    yfinance / E*TRADE quote fetches can return None or NaN. A raw
+    ``Decimal(str(float('nan')))`` produces a NaN Decimal, which then
+    raises ``decimal.InvalidOperation`` on the FIRST comparison
+    (``Decimal('NaN') <= 0``). This helper coerces those to a safe
+    default so the pipeline degrades gracefully instead of crashing
+    the whole briefing on one bad symbol.
+    """
+    if v is None:
+        return default
+    try:
+        d = Decimal(str(v))
+    except (ValueError, TypeError, ArithmeticError):
+        return default
+    if not d.is_finite():
+        return default
+    return d
+
+
+def _safe_int(v, default=0) -> int:
+    """Coerce a value to int, NaN-safe and None-safe."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+    except (ValueError, TypeError):
+        return default
+    if f != f or f in (float("inf"), float("-inf")):  # NaN/Inf check
+        return default
+    return int(f)
+
+
 _HIGH_CORR = {  # 0.95 — tech/semi
     "AAPL", "MSFT", "GOOGL", "GOOG", "META", "AMZN", "ADBE", "CRM", "NOW", "ORCL",
     "NVDA", "AMD", "AVGO", "QCOM", "MU", "TSM", "INTC", "MRVL",
@@ -96,10 +130,17 @@ def compute_stress_coverage(
     ]
     long_stocks = [p for p in positions if p.get("position_type") == "long_stock"]
 
+    # NaN-safe: yfinance/E*TRADE quote fetches can return None or NaN.
+    # _safe_dec / _safe_int collapse those to safe defaults instead of
+    # propagating a NaN Decimal that crashes the first comparison
+    # downstream. See module docstring.
+    cash = _safe_dec(cash, default=Decimal(0))
+    nlv = _safe_dec(nlv, default=Decimal(0))
+
     total_obligation = Decimal(0)
     for p in short_puts:
-        strike = Decimal(str(p.get("strike", 0)))
-        qty = abs(p.get("qty", p.get("quantity", 0)))  # Handle both "qty" and "quantity" keys
+        strike = _safe_dec(p.get("strike"))
+        qty = abs(_safe_int(p.get("qty", p.get("quantity", 0))))
         total_obligation += strike * Decimal(qty) * Decimal(100)
 
     coverage_ratio = float(cash / total_obligation) if total_obligation > 0 else float("inf")
@@ -110,8 +151,8 @@ def compute_stress_coverage(
         assigned_syms: list[str] = []
 
         for p in short_puts:
-            underlying_price = Decimal(str(p.get("underlying_price", 0)))
-            strike = Decimal(str(p.get("strike", 0)))
+            underlying_price = _safe_dec(p.get("underlying_price"))
+            strike = _safe_dec(p.get("strike"))
             symbol = p.get("symbol", "?")
 
             if underlying_price <= 0:
@@ -121,15 +162,15 @@ def compute_stress_coverage(
                 effective_underlying = underlying_price * Decimal(str(1.0 - drop_pct * corr))
 
             if effective_underlying <= strike:
-                qty = abs(p.get("qty", p.get("quantity", 0)))  # Handle both "qty" and "quantity" keys
+                qty = abs(_safe_int(p.get("qty", p.get("quantity", 0))))
                 assigned_cost += strike * Decimal(qty) * Decimal(100)
                 assigned_syms.append(f"{symbol} {qty}x")
 
         # Stock losses
         stock_loss = Decimal(0)
         for p in long_stocks:
-            underlying_price = Decimal(str(p.get("underlying_price", 0)))
-            qty = p.get("qty", p.get("quantity", 0))  # Handle both "qty" and "quantity" keys
+            underlying_price = _safe_dec(p.get("underlying_price"))
+            qty = _safe_int(p.get("qty", p.get("quantity", 0)))
             symbol = p.get("symbol", "?")
             corr = correlation_factor(symbol)
             stock_loss += underlying_price * Decimal(qty) * Decimal(str(drop_pct * corr))
@@ -169,10 +210,10 @@ def _rank_closes(short_puts: list[dict]) -> list[CloseRecommendation]:
             continue
 
         symbol = p.get("symbol", "?")
-        strike = Decimal(str(p.get("strike", 0)))
-        qty = abs(p.get("qty", p.get("quantity", 0)))  # Handle both "qty" and "quantity" keys
-        current_price = Decimal(str(p.get("current_price", 0)))
-        entry_price = Decimal(str(p.get("entry_price", p.get("premiumReceived", 0))))  # Try premiumReceived too
+        strike = _safe_dec(p.get("strike"))
+        qty = abs(_safe_int(p.get("qty", p.get("quantity", 0))))
+        current_price = _safe_dec(p.get("current_price"))
+        entry_price = _safe_dec(p.get("entry_price", p.get("premiumReceived", 0)))
         expiration = p.get("expiration")
 
         contracts = Decimal(qty)

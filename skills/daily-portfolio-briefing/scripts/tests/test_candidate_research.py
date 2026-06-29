@@ -92,6 +92,35 @@ def test_watch_and_avoid_have_cards_no_entry():
     assert "🔴 AVOID" in smci and "Entry" not in smci
 
 
+def test_independent_setup_renders_with_warning_badge():
+    """CLAUDE.md hard rule #25: a 'CSP ENTRY (independent setup)' verdict
+    surfaces as a CANDIDATE with full live ticket, but carries a
+    distinctive '⚠ no third-party rec — verify independently' badge so
+    the user knows to validate the catalyst against their other sources."""
+    payload = {
+        "themes": {"power": {"name": "Power", "group": "AI Buildout",
+                              "anchors": ["AAOI"], "etfs": []}},
+        "results_by_theme": {
+            "power": [
+                {"ticker": "AAOI", "spot": 174.0, "rsi_14": 50, "iv_rank": 76,
+                 "sma_200": 75.0, "drawdown_pct": 22, "fivedayret_pct": 7.0,
+                 "verdict": "CSP ENTRY (independent setup)",
+                 "rationale": ["RSI 50 in pullback band + IV rank 76 elevated"
+                               " (no third-party rec — verify catalyst independently)"],
+                 "csp_entry": {"strike": 160, "mid": 3.2, "bid": 3.0, "ask": 3.4,
+                               "expiration": "2026-07-24", "dte": 38}},
+            ]
+        },
+    }
+    md = cr.render_candidate_report(payload, fv_by_ticker={}, config={},
+                                    generated_at="T")
+    aaoi = [b for b in md.split("\n\n") if "`AAOI`" in b][0]
+    assert "🎯 CANDIDATE" in aaoi
+    assert "⚠ no third-party rec" in aaoi  # the distinctive badge
+    assert "$160P" in aaoi                    # full live ticket still shown
+    assert "Live E*TRADE chain" in aaoi
+
+
 def test_etf_anchor_marked_basket():
     md = cr.render_candidate_report(_payload(), fv_by_ticker={}, config={}, generated_at="T")
     igv = [b for b in md.split("\n\n") if "`IGV`" in b][0]
@@ -232,3 +261,62 @@ def test_single_stock_tickers_excludes_etfs():
     tks = cr.single_stock_tickers(_payload(), config={})
     assert "AMD" in tks and "NVDA" in tks
     assert "IGV" not in tks   # ETF excluded from FV fetch set
+
+
+# ─── Conviction Level badges (CLAUDE.md hard rule #26) ──────────────────────
+
+def _conv_payload(rating_tier, conviction):
+    return {
+        "themes": {"core": {"name": "Core", "group": "AI Buildout",
+                             "anchors": ["X"], "etfs": []}},
+        "results_by_theme": {
+            "core": [{
+                "ticker": "X", "spot": 100.0, "rsi_14": 45, "iv_rank": 60,
+                "sma_200": 95, "drawdown_pct": 15, "fivedayret_pct": -1.0,
+                "verdict": "CSP ENTRY (fat premium)", "rationale": ["fat premium"],
+                "rating_tier": rating_tier,
+                "conviction": conviction,
+                "csp_entry": {"strike": 90, "mid": 1.5, "bid": 1.4, "ask": 1.6,
+                              "expiration": "2026-07-24", "dte": 38},
+            }]
+        },
+    }
+
+
+def test_candidate_badge_tier4_high_conviction_shows_trophy():
+    md = cr.render_candidate_report(_conv_payload(4, "High"), fv_by_ticker={},
+                                    config={}, generated_at="T")
+    card = [b for b in md.split("\n\n") if "`X`" in b][0]
+    assert "🏆 TOP CONVICTION" in card
+
+
+def test_candidate_badge_tier4_low_conviction_shows_warning():
+    md = cr.render_candidate_report(_conv_payload(4, "Low"), fv_by_ticker={},
+                                    config={}, generated_at="T")
+    card = [b for b in md.split("\n\n") if "`X`" in b][0]
+    assert "low-conviction" in card
+    assert "🏆" not in card  # no top promotion when conviction is low
+
+
+def test_candidate_badge_tier3_high_conviction_shows_flame():
+    md = cr.render_candidate_report(_conv_payload(3, "High"), fv_by_ticker={},
+                                    config={}, generated_at="T")
+    card = [b for b in md.split("\n\n") if "`X`" in b][0]
+    assert "🔥 high conviction" in card
+
+
+def test_candidate_badge_tier3_low_conviction_shows_trial():
+    md = cr.render_candidate_report(_conv_payload(3, "Low"), fv_by_ticker={},
+                                    config={}, generated_at="T")
+    card = [b for b in md.split("\n\n") if "`X`" in b][0]
+    assert "low conviction" in card.lower()
+    assert "trial size" in card.lower()
+
+
+def test_candidate_no_conviction_renders_unchanged():
+    """Conviction=None → no chip added (legacy behavior preserved)."""
+    md = cr.render_candidate_report(_conv_payload(3, None), fv_by_ticker={},
+                                    config={}, generated_at="T")
+    card = [b for b in md.split("\n\n") if "`X`" in b][0]
+    assert "🏆" not in card and "🔥" not in card
+    assert "trial" not in card.lower()

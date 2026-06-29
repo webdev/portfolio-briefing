@@ -311,11 +311,17 @@ class ScoutResult:
     earnings_date: str | None = None
     days_to_earnings: int | None = None
     third_party_rec: str | None = None
-    # Parkev rating tier (5=Top Stock to Buy, 4=Top 15/25 Stock, 3=Buy,
+    # Parkev rating tier (5=Top Stock to Buy, 4=Top 12/15/25 Stock, 3=Buy,
     # 2=Borderline Buy, 1=Hold, 0=Sell). Tier ≥4 = high-conviction signal that
     # When-To-Enter surfaces with a 🌟 STRONG BUY badge distinct from a plain
     # tier-3 BUY. None when the ticker isn't in Parkev's sheet.
     rating_tier: int | None = None
+    # Parkev conviction level (CLAUDE.md hard rule #26) — qualitative
+    # confidence in the rating. "High" / "Medium" / "Low" / None. Modulates
+    # both the badge (🔥 high conviction on tier-3 BUYs) and sizing guidance.
+    # A `Buy + Low` is a soft buy; a `Buy + High` is selective conviction.
+    conviction: str | None = None
+    conviction_score: int | None = None  # 3 / 2 / 1 / None
     aging: bool = False           # rec is >14 days old per Parkev's date_updated
     verdict: str = "WATCH"
     rationale: list = field(default_factory=list)
@@ -381,7 +387,26 @@ def _verdict(
         reasons.append(f"third-party {rec_u}, technicals neutral")
         return "WATCH", reasons, False
 
-    # No BUY rec — just monitor
+    # ── INDEPENDENT CSP setup (CLAUDE.md hard rule #25) ─────────────────
+    # No third-party BUY but the technicals say "tradeable pullback":
+    # RSI in 35-55 band, elevated IV rank. The user has other places to
+    # validate the catalyst — surface the entry instead of hiding it
+    # behind a missing Parkev rec. The AVOID branch above already vetoed
+    # broken-thesis drawdowns (>30%) and SELL/UNDERPERFORM recs, so any
+    # name reaching here is technically clean.
+    #
+    # Distinct verdict label "CSP ENTRY (independent setup)" so the
+    # renderer can attach a ⚠ "no third-party rec — verify independently"
+    # badge and the user is reminded to apply their own catalyst check.
+    if (rsi is not None and 35 <= rsi <= 55
+            and iv is not None and iv >= cfg["iv_rank_elevated"]):
+        reasons.append(
+            f"RSI {rsi:.0f} in pullback band + IV rank {iv:.0f} elevated "
+            f"(no third-party rec — verify catalyst independently)"
+        )
+        return "CSP ENTRY (independent setup)", reasons, True
+
+    # No BUY rec and technicals don't qualify — just monitor
     reasons.append("no third-party catalyst")
     return "WATCH", reasons, False
 
@@ -426,10 +451,17 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
         res.third_party_rec = _raw.get("recommendation")
         rt = _raw.get("rating_tier")
         res.rating_tier = int(rt) if rt is not None else None
+        # Conviction (hard rule #26) — None when missing; never fabricated.
+        conv = _raw.get("conviction")
+        res.conviction = conv if conv in ("High", "Medium", "Low") else None
+        cs = _raw.get("conviction_score")
+        res.conviction_score = int(cs) if cs is not None else None
         res.aging = bool(_raw.get("aging"))
     else:
         res.third_party_rec = _raw  # legacy: string or None
         res.rating_tier = None
+        res.conviction = None
+        res.conviction_score = None
         res.aging = False
     held_w = held_weights.get(ticker.upper(), 0.0)
 
@@ -527,6 +559,10 @@ def _load_recs_and_weights() -> tuple[dict, dict, dict]:
                         "recommendation": str(rec).upper(),
                         "rating_tier": r.get("rating_tier"),
                         "raw_recommendation": r.get("raw_recommendation"),
+                        # CLAUDE.md hard rule #26 — propagate conviction so
+                        # the standalone scout path matches the briefing path.
+                        "conviction": r.get("conviction"),
+                        "conviction_score": r.get("conviction_score"),
                         "aging": bool(r.get("aging")),
                         "age_days": r.get("age_days"),
                         "date_updated": r.get("date_updated"),

@@ -275,8 +275,36 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
         tier = r.get("rating_tier")
         is_top_tier = (tier or 0) >= 4
         raw_rec = r.get("raw_recommendation") or ""
-        tier_note = (f" Parkev tier-{tier} ({raw_rec}) — high-conviction catalyst."
-                     if is_top_tier else "")
+        # CLAUDE.md hard rule #26: Parkev's conviction is a separate
+        # dimension from the rating tier. Combinations to surface:
+        #   tier ≥4 + High → 🏆 TOP CONVICTION (sized largest)
+        #   tier ≥4 + Med  → 🌟 STRONG BUY (standard tier-4 sizing)
+        #   tier ≥4 + Low  → tier-3 sizing (downgraded — analyst isn't sure)
+        #   tier 3  + High → 🔥 high-conviction tag on the BUY badge
+        #   tier 3  + Low  → 🟡 TRIAL SIZE warning (analyst soft on it)
+        conviction = r.get("conviction")  # "High" / "Medium" / "Low" / None
+        is_high_conv = conviction == "High"
+        is_low_conv = conviction == "Low"
+        # Effective tier: a Low-conviction tier-4 acts like a tier-3 for sizing.
+        eff_top_tier = is_top_tier and not is_low_conv
+        conv_chip = ""
+        if conviction:
+            conv_chip = f" · conv: **{conviction}**"
+        tier_note = ""
+        if is_top_tier and is_high_conv:
+            tier_note = f" Parkev tier-{tier} ({raw_rec}) + HIGH conviction — top-of-class catalyst."
+        elif is_top_tier and conviction == "Medium":
+            tier_note = f" Parkev tier-{tier} ({raw_rec}), medium conviction."
+        elif is_top_tier and is_low_conv:
+            tier_note = f" Parkev tier-{tier} ({raw_rec}) BUT LOW conviction — analyst isn't pounding the table; treat like a standard Buy."
+        elif is_top_tier:
+            # Legacy fallback when conviction isn't on the rec (the OLD
+            # tier-only behavior — preserved so existing tests still pass).
+            tier_note = f" Parkev tier-{tier} ({raw_rec}) — high-conviction catalyst."
+        elif (tier or 0) == 3 and is_high_conv:
+            tier_note = f" Parkev BUY + HIGH conviction — selective."
+        elif (tier or 0) == 3 and is_low_conv:
+            tier_note = f" Parkev BUY but LOW conviction — analyst likes it without confidence; trial size only."
         # S/R confluence — when spot sits at a strong support, surface that
         # as confirmation. This is the "suspenders" on top of the RSI gate;
         # never overrides, only confirms.
@@ -305,29 +333,61 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
                 ) if _sr else None
                 if anchor is not None:
                     strike_note = f" Strike sits {_at_level_label(anchor)} — assignment puts you at a real support."
-            label = "🌟 STRONG BUY — ENTRY NOW (CSP)" if is_top_tier else "🟢 ENTRY NOW — CSP"
+            # CLAUDE.md hard rule #25: an "independent setup" verdict means
+            # technicals qualify but there's no third-party BUY — surface
+            # the entry but flag it so the user knows to validate the
+            # catalyst against other sources before placing.
+            is_independent = "INDEPENDENT" in verdict.upper()
+            if is_independent:
+                label = "🟢 ENTRY NOW — CSP ⚠ no third-party rec"
+            elif eff_top_tier and is_high_conv:
+                label = "🏆 TOP CONVICTION — ENTRY NOW (CSP)"
+            elif eff_top_tier:
+                label = "🌟 STRONG BUY — ENTRY NOW (CSP)"
+            elif (tier or 0) == 3 and is_high_conv:
+                label = "🟢 ENTRY NOW — CSP · 🔥 high conviction"
+            elif (tier or 0) == 3 and is_low_conv:
+                label = "🟡 TRIAL — CSP (low-conviction BUY)"
+            else:
+                label = "🟢 ENTRY NOW — CSP"
             return ("enter", label,
                     f"{rsi_read}, IV rank {iv:.0f}, drawdown {dd:.0f}%, {tp}. "
-                    f"Favorable spot to get paid to maybe buy lower.{tier_note}{confluence_note}",
+                    f"Favorable spot to get paid to maybe buy lower.{tier_note}{confluence_note}{conv_chip}",
                     f"SELL 1× ${strike:g}P exp **{exp_p}** ({csp.get('dte')} DTE) · "
                     f"mid ${csp.get('mid', 0):.2f} (bid ${csp.get('bid', 0):.2f} / "
                     f"ask ${csp.get('ask', 0):.2f}). Collateral ~${float(strike) * 100:,.0f}.{strike_note}{earn_note}")
         if verdict.startswith("BUY"):
-            label = "🌟 STRONG BUY — ENTRY NOW" if is_top_tier else "🟢 ENTRY NOW — BUY"
+            # CLAUDE.md hard rule #26: conviction modulates ONLY when present.
+            # When conviction is None (missing/unknown), fall back to the
+            # legacy tier-only sizing so the old contract is unchanged:
+            #   tier ≥4 → 🌟 STRONG BUY, 1/2 of target weight
+            #   tier 3  → 🟢 ENTRY NOW — BUY, 1/3 of target weight
+            if eff_top_tier and is_high_conv:
+                label = "🏆 TOP CONVICTION — ENTRY NOW"
+                size_guidance = "1/2 of target weight is reasonable"
+            elif eff_top_tier:
+                label = "🌟 STRONG BUY — ENTRY NOW"
+                size_guidance = "1/2 of target weight is reasonable"
+            elif (tier or 0) == 3 and is_high_conv:
+                label = "🟢 ENTRY NOW — BUY · 🔥 high conviction"
+                size_guidance = "1/3 of target weight (selective BUY)"
+            elif (tier or 0) == 3 and is_low_conv:
+                label = "🟡 TRIAL — BUY (low conviction)"
+                size_guidance = "1/6 of target weight — trial only; let conviction firm up before scaling"
+            else:
+                label = "🟢 ENTRY NOW — BUY"
+                size_guidance = "1/3 of target weight"
             scale_target = (
                 f"toward ${nearest_sup.price:g} support" if nearest_sup
                 else "toward RSI 35-40"
             )
             trigger = (
-                f"ENTER: sized for high-conviction (1/2 of target weight is reasonable). "
-                f"Scale on further weakness {scale_target}. Average down on confirmed support."
-                if is_top_tier else
-                f"ENTER: small starter (1/3 of target weight). Scale on further weakness "
+                f"ENTER: small starter ({size_guidance}). Scale on further weakness "
                 f"{scale_target}. Average down on confirmed support."
             )
             return ("enter", label,
                     f"{rsi_read}, drawdown {dd:.0f}%, {tp}, "
-                    f"third-party BUY-rated.{tier_note}{confluence_note}",
+                    f"third-party BUY-rated.{tier_note}{confluence_note}{conv_chip}",
                     trigger)
         # WATCH/neutral — refine the monitor trigger with explicit support price
         # so the user knows EXACTLY what to watch for, not just a band.
@@ -379,9 +439,11 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
     Backwards-compatible: omit it for the legacy phrasing.
 
     ``gate_state`` (optional ``analysis.capacity_gates.GateState``): the
-    capacity banner is the report's first line, and when gates are CLOSED
-    every ENTRY NOW status is downgraded to "WAIT — entry gates closed"
-    (no entry ticket rendered). ``gate_state=None`` is the legacy behavior.
+    capacity banner is the report's first line. When gates are CLOSED, ENTRY
+    NOW classifications are KEPT (with the live ticket) and tagged ``·
+    ⏸ DEFERRED`` — hard rule #24 (never hide opportunities; surface them
+    as deferred so the user can stage rotation). ``gate_state=None`` is
+    the legacy behavior.
 
     Consistency contract (12-entry-pipeline-spec §7): the candidates report
     (rendered first in the daily run) persists its verdict classes to
@@ -407,13 +469,22 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
             cand_verdicts = {}
 
     def _classify(r, sr=None):
-        """classify(), downgrading ENTRY NOW when capacity gates are closed
-        or when the candidates report disagrees (consistency contract §7)."""
+        """classify(), tagging ENTRY NOW as DEFERRED when capacity gates are
+        closed (hard rule #24 — never HIDE an opportunity; surface it as
+        DEFERRED so the user can see the live ticket and plan rotation), and
+        downgrading ENTRY NOW when the candidates report disagrees
+        (consistency contract §7)."""
         status, label, read, trigger = classify(r, sr=sr)
         if gates_closed and status == "enter":
-            return ("wait", "🟡 WAIT — entry gates closed", read,
-                    f"WAIT — entry gates closed ({_gate_reason}). Setup qualifies; "
-                    "re-check when the capacity gates reopen.")
+            # Keep the entry classification + full live ticket. Append a
+            # ⏸ DEFERRED tag to the label and a one-line capacity note to
+            # the trigger so the user knows WHY it's gated without losing
+            # the strike / premium / S/R data the trigger already carries.
+            # Capacity banner at the top of the report (line ~476) explains
+            # the gate once — no need to repeat the full reason per card.
+            return ("enter", f"{label} · ⏸ DEFERRED", read,
+                    f"{trigger}\n  ⏸ **Capacity-gated** ({_gate_reason}) — "
+                    "verify and stage as a rotation; once gates clear this is actionable as-is.")
         if status == "enter" and cand_verdicts:
             cv = cand_verdicts.get((r.get("ticker") or "").upper())
             if cv and cv != "CANDIDATE":
@@ -457,10 +528,13 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
 
     total = len(seen)
     counts = {"enter": 0, "wait": 0, "avoid": 0, "watch": 0}
+    deferred = 0  # subset of enter — gated by capacity (hard rule #24)
     for tk, (_, r) in seen.items():
         sr = sr_by_sym.get(tk.upper())
-        s, *_ = _classify(r, sr=sr)
+        s, label, *_ = _classify(r, sr=sr)
         counts[s] = counts.get(s, 0) + 1
+        if s == "enter" and "DEFERRED" in label:
+            deferred += 1
 
     lines: list[str] = []
     if gate_state is not None:
@@ -477,8 +551,9 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         "from the live scout cache._"
     )
     lines.append("")
+    deferred_note = f" (of which ⏸ {deferred} DEFERRED — capacity-gated)" if deferred else ""
     lines.append(
-        f"**Summary:** 🟢 {counts['enter']} ENTRY NOW · "
+        f"**Summary:** 🟢 {counts['enter']} ENTRY NOW{deferred_note} · "
         f"🟡 {counts['wait']} WAIT · "
         f"🟡 {counts['watch']} WATCH/NEUTRAL · "
         f"🔴 {counts['avoid']} AVOID"

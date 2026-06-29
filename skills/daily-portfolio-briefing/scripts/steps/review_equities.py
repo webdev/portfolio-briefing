@@ -53,10 +53,11 @@ def review_equities(
         rationale = "Thesis intact, technical sound."
         rec_note = None
         if rec_match:
-            raw = rec_match.get("raw_recommendation", "")
-            tier = rec_match.get("rating_tier", 0)
-            age = rec_match.get("age_days", 0)
-            rec_note = f"Third-party: {raw} (tier {tier}, {age}d old)"
+            # CLAUDE.md hard rule #27: use the unified Parkev chip on every
+            # ticker-specific line so the user sees rating + conviction + age
+            # at a glance, in a consistent format.
+            from analysis.parkev_chip import format_parkev_chip
+            rec_note = format_parkev_chip(rec_match)
             rationale = f"{rationale} {rec_note}"
 
         review = {

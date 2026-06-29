@@ -121,10 +121,14 @@ def compute_analytics(
     balance = snapshot_data.get("balance", {})
     quotes = snapshot_data.get("quotes", {})
 
-    nlv = Decimal(str(balance.get("accountValue", 0)))
-    cash = Decimal(str(balance.get("cash", 0)))
+    # NaN-safe: a yfinance/E*TRADE flake can leave any of these as None
+    # or NaN. Use the centralized helper so one bad quote can't crash
+    # the entire briefing render (2026-06-18 SPY/SMH/SOXX 404 pattern).
+    from analysis.stress_coverage import _safe_dec
+    nlv = _safe_dec(balance.get("accountValue"))
+    cash = _safe_dec(balance.get("cash"))
     spy_quote = quotes.get("SPY", {})
-    spy_price = Decimal(str(spy_quote.get("last", 0)))
+    spy_price = _safe_dec(spy_quote.get("last"))
 
     # Enrich positions with derived fields
     enriched = _enrich_positions(positions)

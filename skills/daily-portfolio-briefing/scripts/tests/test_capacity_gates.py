@@ -245,15 +245,28 @@ def _scout_payload():
     }
 
 
-def test_when_to_enter_banner_and_downgrade_when_closed():
+def test_when_to_enter_banner_and_deferred_tag_when_closed():
+    """Hard rule #24 (and bug #8 fix): when gates are CLOSED the When-To-Enter
+    report keeps ENTRY NOW classifications with their live tickets, tagged
+    `· ⏸ DEFERRED`, instead of demoting to "WAIT — entry gates closed".
+    User explicit rule: "I always want to know of great opportunities."
+    """
     from steps.when_to_enter import render_when_to_enter_report
 
     gs = _closed_gate_state()
     md = render_when_to_enter_report(_scout_payload(), generated_at="X", gate_state=gs)
-    assert md.splitlines()[0] == gs.banner          # banner is the first line
-    assert "🟢 0 ENTRY NOW" in md                   # entry downgraded in summary
-    assert "WAIT — entry gates closed" in md
-    assert "SELL 1×" not in md                      # no entry ticket rendered
+    assert md.splitlines()[0] == gs.banner          # banner still the first line
+    # ENTRY classification KEPT (not demoted to 0).
+    assert "🟢 0 ENTRY NOW" not in md
+    # DEFERRED tag attached to the entry label and surfaced in summary.
+    assert "⏸ DEFERRED" in md
+    assert "of which" in md and "DEFERRED" in md
+    # Live ticket preserved (the whole point of rule #24).
+    assert "SELL 1×" in md
+    # Capacity-gated note appears in the trigger.
+    assert "Capacity-gated" in md
+    # The legacy demotion label MUST NOT appear (it was the bug).
+    assert "WAIT — entry gates closed" not in md
 
 
 def test_when_to_enter_unchanged_without_gate_state():
@@ -265,15 +278,21 @@ def test_when_to_enter_unchanged_without_gate_state():
     assert "entry gates closed" not in md
 
 
-def test_candidate_report_banner_and_ticket_suppression_when_closed():
+def test_candidate_report_banner_and_deferred_tag_when_closed():
+    """Hard rule #24: candidates report keeps the full live ticket but tags
+    it as `⏸ Deferred (capacity gated)` instead of suppressing it with a
+    "— blocked: ..." message. Banner explains the gate once at the top."""
     from steps.candidate_research import render_candidate_report
 
     gs = _closed_gate_state()
     md = render_candidate_report(_scout_payload(), fv_by_ticker={}, config={},
                                  generated_at="T", gate_state=gs)
-    assert md.splitlines()[0] == gs.banner          # banner is the first line
-    assert "Entry (CSP):" not in md                 # ticket suppressed
-    assert "— blocked: coverage 0.04x < 0.50x" in md
+    assert md.splitlines()[0] == gs.banner               # banner first line
+    # Live ticket PRESERVED (rule #24); just tagged DEFERRED.
+    assert "Deferred (capacity gated)" in md
+    assert "SELL 1×" in md
+    # Legacy "— blocked: ..." text must not appear (deprecated by rule #24).
+    assert "— blocked: " not in md
 
 
 def test_candidate_report_caps_headline_candidates_at_3():
@@ -333,3 +352,35 @@ def test_candidate_report_unchanged_without_gate_state():
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+# ─── NaN-safety guards (2026-06-18: snapshot NLV came back NaN from yfinance
+# 404s on SPY/SMH/SOXX/VOO; capacity_gates.evaluate_gates crashed with
+# decimal.InvalidOperation on `nlv_d > 0`) ──────────────────────────────────
+
+def test_evaluate_gates_handles_nan_nlv_without_crashing():
+    """A NaN NLV from upstream must NOT crash the pipeline. The gate should
+    treat NaN as zero, evaluate cleanly (likely as CLOSED), and return a
+    well-formed GateState so callers can render the briefing."""
+    from analysis.capacity_gates import evaluate_gates
+    gs = evaluate_gates([], cash=float("nan"), nlv=float("nan"), config=None)
+    assert gs is not None
+    assert isinstance(gs.banner, str) and gs.banner  # banner renders
+    # cash/nlv collapsed to 0 → gates evaluate as zero coverage / zero cash
+    assert gs.open is False
+
+
+def test_evaluate_gates_handles_nan_cash_with_real_nlv():
+    """Partial NaN: real NLV but NaN cash. Should not crash."""
+    from analysis.capacity_gates import evaluate_gates
+    gs = evaluate_gates([], cash=float("nan"), nlv=1_000_000.0, config=None)
+    assert gs is not None
+    assert "cash 0.0%" in gs.banner   # NaN cash → 0% cash
+
+
+def test_evaluate_gates_normal_path_unchanged():
+    """Regression check: clean inputs still produce the legacy output."""
+    from analysis.capacity_gates import evaluate_gates
+    gs = evaluate_gates([], cash=200_000.0, nlv=1_000_000.0, config=None)
+    assert gs is not None
+    assert "cash 20.0%" in gs.banner

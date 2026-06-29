@@ -621,6 +621,69 @@ def generate_long_term_opportunities_step(
         add_demoted.append(op)
     op_dicts = add_demoted
 
+    # Pre-trade validator pass — for every surviving LONG_DATED_CSP, run the
+    # discipline checkpoint (earnings window, bucket concentration, etc.)
+    # and attach findings to the op so the renderer can surface BLOCKs/WARNs.
+    # This catches LT_CSP recs that the per-stage gates upstream don't fully
+    # cover (e.g., earnings 9 days out on a 75-DTE contract — the cluster
+    # check + existing-put guard don't see it).
+    try:
+        from analysis import pre_trade_validator as _ptv
+        for op in op_dicts:
+            if (op.get("kind") or "").upper() != "LONG_DATED_CSP" or op.get("skip_reason"):
+                continue
+            ticker = (op.get("ticker") or "").upper()
+            # Parse strike + expiration from the concrete_trade text (e.g.
+            # "SELL 1× AMD $460P exp Fri Aug 21 '26" → strike=460, exp later
+            # filled in via _enrich_long_dated_dates). Best-effort.
+            ct = op.get("concrete_trade") or ""
+            sm = re.search(r"\$(\d+(?:\.\d+)?)P\b", ct)
+            if not sm:
+                continue
+            try:
+                strike = float(sm.group(1))
+            except ValueError:
+                continue
+            # Use the expiration the enrichment pass picked, fall back to
+            # an offset from today if none yet assigned.
+            from datetime import date as _date, timedelta as _td
+            exp_iso = op.get("expiration") or op.get("expiration_iso")
+            if exp_iso:
+                try:
+                    y, m, d = str(exp_iso).split("-")
+                    exp_d = _date(int(y), int(m), int(d))
+                except (ValueError, AttributeError):
+                    exp_d = _date.today() + _td(days=75)
+            else:
+                exp_d = _date.today() + _td(days=75)
+            try:
+                ctx = _ptv.build_context_from_snapshot(
+                    snapshot_data,
+                    ticker=ticker, strike=strike, expiration=exp_d,
+                    option_type="PUT", action="SELL_OPEN", quantity=1,
+                    recommendations_list=recommendations_list,
+                )
+                findings = _ptv.validate_proposed_trade(ctx, config)
+                if findings:
+                    op["validator_findings"] = [
+                        {"severity": f.severity, "reason": f.reason,
+                         "rule_id": f.rule_id, "detail": f.detail}
+                        for f in findings
+                    ]
+                    # If any BLOCK fires, demote the rec — it's not safely actionable.
+                    if _ptv.has_blockers(findings):
+                        block_reasons = "; ".join(
+                            f.rule_id for f in findings if f.severity == _ptv.SEV_BLOCK
+                        )
+                        op["skip_reason"] = f"pre-trade validator BLOCK: {block_reasons}"
+                        op["kind_when_skipped"] = "LONG_DATED_CSP"
+                        op["kind"] = "SKIPPED_LT_CSP"
+            except Exception:
+                # Validator is enrichment — silent on errors.
+                pass
+    except ImportError:
+        pass
+
     # RSI discipline — a LONG_DATED_CSP is a put-sale, so an overbought tape
     # (RSI > 70) hard-blocks the new open, consistent with the rest of the
     # briefing. Then annotate EVERY surviving opportunity with its RSI so the

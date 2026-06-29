@@ -161,6 +161,24 @@ def aggregate_briefing(
         equity_reviews, options_reviews, regime_data,
         put_buckets=analytics.get("put_buckets") or [],
     ))
+
+    # Open-orders audit — every pending GTC order on E*TRADE gets run through
+    # the pre-trade validator so stale or rule-violating orders surface BEFORE
+    # they fill. Motivating case: MU $960P Aug 21 SELL_OPEN @ $154 GTC that
+    # would have triggered 3 discipline rules.
+    try:
+        from analysis import open_orders_audit as _ooa
+        audits = _ooa.audit_open_orders(
+            snapshot_data, config=config,
+            analytics=analytics,
+            recommendations_list=snapshot_data.get("recommendations_list"),
+        )
+        if audits:
+            lines.extend(_ooa.render_audit_panel(audits))
+    except Exception as _ooe:
+        import sys as _sys
+        print(f"[aggregate] open orders audit failed: {_ooe}", file=_sys.stderr)
+
     lines.extend(action_list_lines)
     
     # MODIFIED: Use render_watch_with_commentary instead of plain render_watch
@@ -209,6 +227,12 @@ def aggregate_briefing(
                 existing_short_puts=_esp_cb,
                 existing_long_puts=_elp_cb,
                 gate_state=gate_state,
+                # NEW: thread snapshot + analytics so each candidate gets a
+                # pre-trade validation pass (earnings window, bucket impact,
+                # roll-from-safer, etc.) inline below its entry ticket.
+                snapshot_data=snapshot_data,
+                analytics=analytics,
+                recommendations_list=snapshot_data.get("recommendations_list"),
             )
             lines.extend(_cand_section.splitlines())
         except Exception as _cbe:
@@ -473,6 +497,24 @@ def aggregate_briefing(
     except Exception as _e:
         import sys as _sys
         print(f"[aggregate] intrinsic-value annotation failed: {_e}", file=_sys.stderr)
+
+    # ── Parkev chip annotation (CLAUDE.md hard rule #27) ──────────────────
+    # Append 🅿️ {RATING} · {CONV} · {AGE} to every ticker-specific header
+    # in the rendered briefing. Single-pass post-process — never
+    # double-annotates lines that already carry the 🅿️ marker (e.g., Watch
+    # panel rows populated by review_equities). Fails closed on missing
+    # data (renders `🅿️ no rec` rather than fabricating).
+    try:
+        from analysis.parkev_chip import annotate_parkev_chips
+        recs = (snapshot_data.get("recommendations_list") or [])
+        recs_map = {(r.get("ticker") or "").upper(): r
+                    for r in recs if r.get("ticker")}
+        md_text = "\n".join(lines)
+        md_text = annotate_parkev_chips(md_text, recs_map)
+        lines = md_text.split("\n")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] parkev-chip annotation failed: {_e}", file=_sys.stderr)
 
     # Challenge / Counterpoint layer — the briefing's built-in devil's advocate.
     # Stress-tests every Action List item from multiple perspectives (consistency

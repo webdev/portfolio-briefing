@@ -1040,8 +1040,11 @@ def render_action_list(
                 new_exp_raw, (snapshot_data or {}).get("earnings_calendar", {}) or {},
                 today_iso_r,
             )
+            # Earnings check line — ALWAYS prefixed "Earnings check:" so the
+            # tax_cpa quality_gate persona's grep finds it (block/warn cases
+            # used to render only the badge, which failed the gate).
             if earn_check_r.get("level") in ("warn", "block"):
-                items.append(f"   - {format_earnings_badge(earn_check_r)}")
+                items.append(f"   - **Earnings check:** {format_earnings_badge(earn_check_r)}")
             else:
                 # Affirmative earnings clearance on the roll's new expiration
                 d2e_r = earn_check_r.get("days_to_earnings")
@@ -1811,8 +1814,11 @@ def render_action_list(
             items.append(f"   - **🔴 Skip — {format_earnings_badge(earn_check)}**")
             n += 1
             continue
+        # Earnings check line — ALWAYS prefixed "Earnings check:" so the
+        # tax_cpa quality_gate persona's grep finds it (warn case used to
+        # render only the badge, which failed the gate).
         if earn_check.get("level") == "warn":
-            items.append(f"   - {format_earnings_badge(earn_check)}")
+            items.append(f"   - **Earnings check:** {format_earnings_badge(earn_check)}")
         else:
             # Affirmative earnings clearance
             d2e = earn_check.get("days_to_earnings")
@@ -2010,8 +2016,11 @@ def render_action_list(
                 items.append(f"   - {format_validation_line(csp_val)}")
             # Affirmative wash-sale + earnings clearance
             items.append(f"   - **Wash-sale check:** ✅ {ticker} clear (no recent loss closures within 30d).")
+            # Earnings check line — ALWAYS prefixed "Earnings check:" so the
+            # tax_cpa quality_gate persona's grep finds it (warn case was
+            # rendering only the badge, blocking the briefing on 2026-06-26).
             if ec.get("level") == "warn":
-                items.append(f"   - {format_earnings_badge(ec)}")
+                items.append(f"   - **Earnings check:** {format_earnings_badge(ec)}")
             else:
                 d2e_p = ec.get("days_to_earnings")
                 if d2e_p is None:
