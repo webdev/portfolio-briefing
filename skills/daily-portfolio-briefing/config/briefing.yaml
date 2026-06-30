@@ -179,6 +179,89 @@ intrinsic_value:
   ttl_hours: 24                 # cache fair values for a day (FMP free-tier friendly)
   etf_tickers: []               # extra ETFs to treat as baskets (merged with defaults)
 
+# Position tier framework (CLAUDE.md hard rule #29) — controls how
+# aggressively the system writes covered calls and manages concentration
+# on each name.
+#
+#   Tier A — LT Core compounders: NO CC recommendations ever; cap raised
+#            to ~22% (concentration in conviction IS the strategy).
+#   Tier B — Income holdings: conservative CC only (deep OTM, low delta,
+#            50% coverage cap, ≤ 30 DTE); cap ~12%.
+#   Tier C — Active wheel (default): current discipline (RSI ≥ 60,
+#            ~0.25 delta, ~6% OTM, 100% coverage, ≤ 45 DTE); cap ~8-10%.
+#
+# Tickers not listed below default to Tier C — so an empty / missing
+# `position_tiers` block reproduces the legacy pre-framework behavior.
+position_tiers:
+  tier_a_core:
+    - NVDA
+    - GOOG
+    - MSFT
+    - META
+    - PLTR
+    - AMZN
+    - VOO          # user is consolidating SPY → VOO; leave both for now
+    - SPY
+
+  tier_b_income:
+    - MU
+    - SMH
+
+  # tier_c_active is implicit (default) — list it explicitly only if you
+  # want to pin a ticker against accidental promotion to A/B via reorg.
+
+# Per-tier covered-call discipline. Keys per tier:
+#   enabled                       — false = NO CC recs of any kind
+#   rsi_floor                     — only write when RSI ≥ this number
+#   min_otm_pct                   — strike must sit at least this far OTM
+#   max_delta                     — selected strike's delta ≤ this number
+#   coverage_cap_pct              — max % of held shares to back with CC
+#                                   contracts (e.g. 50 = at most 50% of the
+#                                   round-lot count). 0 = no contracts at
+#                                   all. 100 = current behavior (cover all).
+#   max_dte                       — reject expirations beyond this DTE
+#   roll_up_trigger               — spot/strike ratio that flags a roll-up
+#   tax_aware_assignment_block    — when True, block roll-ups that would
+#                                   reset the holding period inside the
+#                                   60-day window before LTCG threshold
+covered_call_tiers:
+  tier_a:
+    enabled: false
+    rsi_floor: 999
+    min_otm_pct: 999
+    max_delta: 0.0
+    coverage_cap_pct: 0
+    max_dte: 0
+    roll_up_trigger: 0.92
+    tax_aware_assignment_block: true
+  tier_b:
+    enabled: true
+    rsi_floor: 70
+    min_otm_pct: 10.0
+    max_delta: 0.15
+    coverage_cap_pct: 50
+    max_dte: 30
+    roll_up_trigger: 0.93
+    tax_aware_assignment_block: true
+  tier_c:
+    enabled: true
+    rsi_floor: 60
+    min_otm_pct: 4.0
+    max_delta: 0.30
+    coverage_cap_pct: 100
+    max_dte: 45
+    roll_up_trigger: 0.97
+    tax_aware_assignment_block: false
+
+# Per-tier concentration caps (% of NLV). Concentration drift only alerts
+# when the position exceeds the tier-specific cap, so a tier-A name at
+# 18% NLV is "within bounds" rather than a warning.
+concentration_caps:
+  tier_a_max_pct: 22.0
+  tier_b_max_pct: 12.0
+  tier_c_max_pct: 8.0
+  default_max_pct: 10.0
+
 # Output
 output:
   output_dir: "reports/daily"

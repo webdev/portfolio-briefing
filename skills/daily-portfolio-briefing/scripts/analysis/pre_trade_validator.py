@@ -91,6 +91,11 @@ class PreTradeContext:
     # Tier from third-party (Parkev) — for promotion/demotion context
     rating_tier: Optional[int] = None
 
+    # Position tier ('A' | 'B' | 'C') from CLAUDE.md hard rule #29 —
+    # gates covered-call discipline (max_delta / min_otm_pct / coverage cap).
+    # None means "tier framework not consulted" — Rule 13 stays silent.
+    position_tier: Optional[str] = None
+
 
 def _opt_qty(ctx: PreTradeContext) -> int:
     return abs(int(ctx.quantity or 1))
@@ -413,6 +418,112 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
                 ),
                 rule_id="STALE_LIMIT_PRICE",
             ))
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Rule 13: Covered-call tier discipline (CLAUDE.md hard rule #29)
+    # ─────────────────────────────────────────────────────────────────────
+    # Tier A holdings should never get a CC recommendation (no caps on
+    # long-term core compounders). Tier B uses a tighter envelope than the
+    # global covered_call settings: ≤ 0.15 delta, ≥ 10% OTM, ≤ 50% coverage
+    # of held shares. Tier C uses the legacy discipline (no change).
+    #
+    # We re-look-up the tier here from `cfg` so callers that didn't bother
+    # to set `ctx.position_tier` still get checked — the validator is the
+    # single discipline gate.
+    if (ctx.action == "SELL_OPEN" and ctx.option_type == "CALL"
+            and (ctx.position_tier or cfg.get("position_tiers"))):
+        # Resolve the tier dict from the briefing config (cfg) — falls back
+        # to the canonical defaults in position_tiers._FALLBACK_CC_TIER_PARAMS.
+        try:
+            from analysis import position_tiers as _pt  # local import to
+            # avoid circular deps at module load
+        except ImportError:
+            _pt = None  # type: ignore
+        if _pt is not None:
+            tier = (ctx.position_tier or _pt.tier_for(ctx.ticker, cfg))
+            cc_set = _pt.cc_settings_for_tier(tier, cfg)
+            max_delta = float(cc_set.get("max_delta", 0.30) or 0.30)
+            min_otm_pct = float(cc_set.get("min_otm_pct", 4.0) or 4.0)
+            cov_cap_pct = int(cc_set.get("coverage_cap_pct", 100) or 0)
+
+            if not bool(cc_set.get("enabled", True)):
+                findings.append(TradeValidation(
+                    severity=SEV_BLOCK,
+                    reason=(
+                        f"Tier {tier} holding — no covered calls "
+                        f"(LT core compounder; uncapped is the policy)"
+                    ),
+                    detail=(
+                        f"{ctx.ticker} is classified Tier {tier} in CLAUDE.md hard rule "
+                        f"#29. The system never recommends CCs on Tier A — capping a "
+                        f"conviction compounder defeats the long-term thesis. If you want "
+                        f"to write a CC here anyway, do it manually and explicitly."
+                    ),
+                    rule_id="COVERED_CALL_TIER_VIOLATION",
+                ))
+            else:
+                # Tier-enabled: check the proposed contract against the
+                # tier's max_delta / min_otm_pct.
+                violations = []
+                if (ctx.spot and ctx.spot > 0 and ctx.strike > 0):
+                    otm_pct_actual = (ctx.strike - ctx.spot) / ctx.spot * 100.0
+                    if otm_pct_actual < min_otm_pct:
+                        violations.append(
+                            f"strike {otm_pct_actual:.1f}% OTM < Tier {tier} "
+                            f"floor ({min_otm_pct:.0f}% OTM)"
+                        )
+                # Delta proximity check via ctx.current_mid_hint? We don't
+                # carry the contract's delta; the proposed-trade builder
+                # passes spot/strike/expiration. Tier delta cap is enforced
+                # by strategy_upgrades selecting a tier-compliant strike in
+                # the first place. Here we surface an extra check ONLY when
+                # the caller provided sr_payload with a strike-anchored
+                # `proposed_delta` (rare). Keep the check structural so
+                # future callers passing the chain quote get it for free.
+                proposed_delta = None
+                if isinstance(ctx.sr_payload, dict):
+                    pd = ctx.sr_payload.get("proposed_delta")
+                    if pd is not None:
+                        try:
+                            proposed_delta = abs(float(pd))
+                        except (TypeError, ValueError):
+                            proposed_delta = None
+                if proposed_delta is not None and proposed_delta > max_delta + 1e-6:
+                    violations.append(
+                        f"delta {proposed_delta:.2f} > Tier {tier} cap "
+                        f"({max_delta:.2f})"
+                    )
+                # Coverage-cap: if the caller passed a proposed quantity AND
+                # held shares, fail when contracts × 100 exceeds the tier's
+                # coverage allowance.
+                if cov_cap_pct < 100 and ctx.held_shares > 0:
+                    allowed_contracts = max(
+                        1,
+                        int(((ctx.held_shares // 100) * cov_cap_pct) // 100),
+                    )
+                    if _opt_qty(ctx) > allowed_contracts:
+                        violations.append(
+                            f"{_opt_qty(ctx)} contracts > Tier {tier} "
+                            f"coverage cap ({cov_cap_pct}% of "
+                            f"{ctx.held_shares // 100} round lots = "
+                            f"{allowed_contracts} contracts)"
+                        )
+                if violations:
+                    findings.append(TradeValidation(
+                        severity=SEV_BLOCK,
+                        reason=(
+                            f"Covered call exceeds Tier {tier} discipline: "
+                            + "; ".join(violations)
+                        ),
+                        detail=(
+                            f"{ctx.ticker} is classified Tier {tier} in CLAUDE.md hard rule "
+                            f"#29. Tier {tier} requires conservative CC writes "
+                            f"(≤ {max_delta:.2f} delta, ≥ {min_otm_pct:.0f}% OTM, "
+                            f"{cov_cap_pct}% coverage cap). The proposed contract violates: "
+                            + "; ".join(violations) + "."
+                        ),
+                        rule_id="COVERED_CALL_TIER_VIOLATION",
+                    ))
 
     # Sort: BLOCK first, then WARN, then OK
     findings.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, 9))

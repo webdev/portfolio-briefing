@@ -160,6 +160,7 @@ def aggregate_briefing(
     lines.extend(render_risk_alerts(
         equity_reviews, options_reviews, regime_data,
         put_buckets=analytics.get("put_buckets") or [],
+        config=config,
     ))
 
     # Open-orders audit — every pending GTC order on E*TRADE gets run through
@@ -515,6 +516,22 @@ def aggregate_briefing(
     except Exception as _e:
         import sys as _sys
         print(f"[aggregate] parkev-chip annotation failed: {_e}", file=_sys.stderr)
+
+    # ── Tier badge annotation (CLAUDE.md hard rule #29) ───────────────────
+    # Append ` · 🟢 Tier A` / ` · 🟡 Tier B` / ` · 🔵 Tier C` to every line
+    # that already carries a Parkev chip. Single-pass post-process — never
+    # double-annotates a line that already has a tier badge. Fails closed
+    # when position_tiers config is missing: every ticker → Tier C (the
+    # legacy default) so the briefing keeps rendering and the framework
+    # stays a no-op until config opts in.
+    try:
+        from analysis.position_tiers import annotate_tier_badges
+        md_text = "\n".join(lines)
+        md_text = annotate_tier_badges(md_text, config)
+        lines = md_text.split("\n")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] tier-badge annotation failed: {_e}", file=_sys.stderr)
 
     # Challenge / Counterpoint layer — the briefing's built-in devil's advocate.
     # Stress-tests every Action List item from multiple perspectives (consistency

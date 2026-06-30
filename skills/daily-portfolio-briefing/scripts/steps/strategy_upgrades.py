@@ -22,9 +22,11 @@ from dataclasses import dataclass, asdict
 
 try:
     from analysis import rsi_discipline
+    from analysis import position_tiers
 except ImportError:  # pragma: no cover - path fallback for standalone runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from analysis import rsi_discipline
+    from analysis import position_tiers
 
 
 def _safe_price(v) -> float:
@@ -589,6 +591,17 @@ def compute_strategy_upgrades(
     # propose writing a CC. Without this, holdings transition from "sub-lot
     # completion in progress" → 100+ shares → silently drop out of the panel.
     # The user has unused income capacity in those shares; surface it.
+    #
+    # CLAUDE.md hard rule #29 — Position Tier Framework:
+    #   Tier A (LT Core compounders, e.g. NVDA/GOOG/MSFT/META/PLTR/AMZN/SPY):
+    #     NO CC recommendations EVER. Instead emit a `tier_a_no_cc` upgrade
+    #     into a transparency section so the user can see the holding was
+    #     considered + deliberately left uncapped.
+    #   Tier B (income, e.g. MU/SMH):
+    #     Conservative CC only — RSI ≥ 70, ≤ 0.15 delta, ≥ 10% OTM,
+    #     ≤ 50% coverage cap of held shares, ≤ 30 DTE.
+    #   Tier C (active wheel — default):
+    #     Current discipline (no behavior change).
 
     for equity_pos in positions:
         if equity_pos.get("assetType") != "EQUITY":
@@ -614,6 +627,30 @@ def compute_strategy_upgrades(
         if _find_short_call(positions, symbol):
             continue
 
+        # ─── Tier framework: classify the holding and load CC discipline ───
+        tier = position_tiers.tier_for(symbol, params)
+        cc_settings = position_tiers.cc_settings_for_tier(tier, params)
+
+        # Tier A holdings get NO CC recommendation. Emit a transparency
+        # record into a separate section so the user can see the position
+        # was considered and deliberately left uncapped — never an actionable
+        # SELL_OPEN ticket.
+        if not position_tiers.is_cc_enabled_for_tier(tier, params):
+            upgrades.append({
+                "type": "tier_a_no_cc",
+                "underlying": symbol,
+                "tier": tier,
+                "shares_held": int(qty),
+                "current_price": round(price, 2),
+                "current_weight_pct": round(qty * price / nlv * 100, 1) if nlv else 0,
+                "rationale": (
+                    f"{symbol} is classified Tier A (LT core compounder) — "
+                    f"no covered-call recommendations. Holding {int(qty)} shares "
+                    f"uncapped to preserve full upside on a long-term position."
+                ),
+            })
+            continue
+
         # Per-account share check. A CC must be written against a 100-share
         # round lot held WITHIN A SINGLE ACCOUNT (the broker can't combine
         # lots across accounts for short-call coverage). The aggregate qty
@@ -635,20 +672,57 @@ def compute_strategy_upgrades(
             # → CC isn't writeable. Skip silently.
             continue
 
-        # Number of contracts we COULD write — capped by the largest single-
-        # account lot, NOT the aggregate. Avoids proposing a 2-contract CC
-        # when the largest single-account lot only holds 105 shares.
-        contracts_writable = int(max_qty_in_one_account // 100)
+        # Number of contracts the round-lot count COULD support.
+        contracts_in_account = int(max_qty_in_one_account // 100)
+        if contracts_in_account < 1:
+            continue
+
+        # Tier-aware coverage cap. Tier B writes against at most 50% of the
+        # held round lots by default; Tier C writes against 100% (legacy).
+        # `coverage_cap_pct` is a percent (0..100). Compute the cap floor of
+        # the round-lot count, but always allow at least one contract when
+        # the cap is non-zero — otherwise a 1-lot Tier-B holding could never
+        # write a CC under the 50% rule, which isn't the intent.
+        coverage_cap_pct = int(cc_settings.get("coverage_cap_pct", 100) or 0)
+        if coverage_cap_pct <= 0:
+            # Safety: should have been caught by `is_cc_enabled_for_tier` —
+            # but if a user sets coverage_cap_pct=0 with enabled=true, treat
+            # as "no contracts allowed" and skip silently.
+            continue
+        max_contracts_for_tier = max(
+            1,
+            int((contracts_in_account * coverage_cap_pct) // 100),
+        )
+        contracts_writable = min(contracts_in_account, max_contracts_for_tier)
         if contracts_writable < 1:
             continue
 
-        # Target window + covered-call strike-selection config (delta-band).
-        target_dte = 35
-        target_exp_date = date.today() + timedelta(days=target_dte)
+        # Tier-aware DTE / strike-selection knobs. Tier B uses a tight
+        # 30-DTE / 10% OTM / 0.15 delta envelope; Tier C inherits the
+        # legacy 35-DTE / 6% OTM / 0.25 delta settings from briefing.yaml's
+        # `covered_call` block.
         cc_cfg = (params.get("covered_call") or {})
-        cc_target_delta = float(cc_cfg.get("target_delta", 0.25))
+        tier_max_dte = int(cc_settings.get("max_dte", 45) or 45)
+        target_dte = min(35, tier_max_dte)
+        if target_dte < 1:
+            target_dte = tier_max_dte
+        target_exp_date = date.today() + timedelta(days=target_dte)
+        # Tier max_delta overrides the global covered_call.target_delta
+        # so a Tier B write picks a 0.15-delta strike, not a 0.25.
+        tier_max_delta = float(cc_settings.get("max_delta", 0.30) or 0.30)
+        cc_target_delta = min(
+            float(cc_cfg.get("target_delta", 0.25)),
+            tier_max_delta,
+        )
         cc_delta_tol = float(cc_cfg.get("delta_tolerance", 0.12))
-        cc_fallback_otm = float(cc_cfg.get("fallback_otm_pct", 6.0))
+        # Tier min_otm_pct gates the fallback %OTM picker AND post-validates
+        # the delta pick. For Tier B this raises the fallback floor from 6%
+        # to 10%, keeping the strike comfortably above spot.
+        tier_min_otm_pct = float(cc_settings.get("min_otm_pct", 4.0) or 4.0)
+        cc_fallback_otm = max(
+            float(cc_cfg.get("fallback_otm_pct", 6.0)),
+            tier_min_otm_pct,
+        )
 
         # S/R-aware strike anchoring (hard rule #20): when the snapshot has a
         # resistance cluster, the chain fetcher will prefer snapping the CC
@@ -736,6 +810,33 @@ def compute_strategy_upgrades(
             and rv.decision == "keep" and rv.badge
         )
 
+        # ─── Tier-aware discipline checks ─────────────────────────────────
+        # Tier B raises the RSI floor to 70 (vs the global RSI gate's 60)
+        # and demands ≥10% OTM strike + ≤0.15 delta. Build a tier_violations
+        # list so the renderer can show WHY a tier-B holding got demoted to
+        # the wait-list rather than the actionable READY TO WRITE column.
+        tier_violations = []
+        tier_rsi_floor = int(cc_settings.get("rsi_floor", 0) or 0)
+        if tier_rsi_floor and rsi_val is not None and rsi_val < tier_rsi_floor:
+            tier_violations.append(
+                f"RSI {rsi_val:.0f} < Tier {tier} floor ({tier_rsi_floor})"
+            )
+        if otm_pct_actual is not None and otm_pct_actual < tier_min_otm_pct:
+            tier_violations.append(
+                f"strike {otm_pct_actual:.1f}% OTM < Tier {tier} floor "
+                f"({tier_min_otm_pct:.0f}% OTM)"
+            )
+        if (cc_delta is not None
+                and abs(float(cc_delta)) > tier_max_delta + 1e-6):
+            tier_violations.append(
+                f"delta {abs(float(cc_delta)):.2f} > Tier {tier} cap "
+                f"({tier_max_delta:.2f})"
+            )
+        if actual_dte > tier_max_dte:
+            tier_violations.append(
+                f"DTE {actual_dte} > Tier {tier} cap ({tier_max_dte}d)"
+            )
+
         # When the chain fetcher snapped to an S/R cluster, surface it so the
         # rendered card can say "δ 0.24 · at $230 resistance (Mar high + 50-SMA,
         # 3 touches)". Always carries the *measured* delta — never a fabrication.
@@ -744,6 +845,14 @@ def compute_strategy_upgrades(
         upgrade = {
             "type": "write_covered_call",
             "underlying": symbol,
+            "tier": tier,                       # 'A' (won't reach here), 'B', or 'C'
+            "tier_violations": tier_violations, # list of tier-discipline misses
+            "tier_max_delta": tier_max_delta,
+            "tier_min_otm_pct": tier_min_otm_pct,
+            "tier_rsi_floor": tier_rsi_floor,
+            "tier_max_dte": tier_max_dte,
+            "tier_coverage_cap_pct": coverage_cap_pct,
+            "contracts_in_account": contracts_in_account,
             "rsi_14": rsi_val,
             "rsi_tag": rv.tag,
             "rsi_note": rv.reason,
@@ -815,6 +924,12 @@ def compute_strategy_upgrades(
         _buy_rsi = rsi_discipline.rsi_for(symbol, technicals)
         rv = rsi_discipline.hook("buy", _buy_rsi, rsi_th)
 
+        # Tag the sub-lot with its tier so the renderer can suppress the
+        # "enable covered calls after completion" income projection on Tier A
+        # holdings (where CCs are forbidden by policy, CLAUDE.md hard rule #29).
+        _sublot_tier = position_tiers.tier_for(symbol, params)
+        _cc_enabled_after_lot = position_tiers.is_cc_enabled_for_tier(_sublot_tier, params)
+
         upgrade = {
             "type": "sublot_completion",
             "underlying": symbol,
@@ -829,7 +944,13 @@ def compute_strategy_upgrades(
             "rsi_decision": rv.decision,
             "rsi_badge": rv.badge,
             "rsi_blocked": bool(rsi_gate_on and rv.removed),
-            "rationale": f"Complete 100-share lot @ ${price:.2f} -> enable covered calls",
+            "position_tier": _sublot_tier,
+            "cc_enabled_after_completion": _cc_enabled_after_lot,
+            "rationale": (
+                f"Complete 100-share lot @ ${price:.2f} -> enable covered calls"
+                if _cc_enabled_after_lot
+                else f"Complete 100-share lot @ ${price:.2f} (Tier {_sublot_tier} core — no CC)"
+            ),
         }
         upgrades.append(upgrade)
 

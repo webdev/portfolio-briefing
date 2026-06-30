@@ -37,6 +37,7 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     collars = [u for u in upgrades if u.get("type") == "collar"]
     new_ccs = [u for u in upgrades if u.get("type") == "write_covered_call"]
     sublots = [u for u in upgrades if u.get("type") == "sublot_completion"]
+    tier_a_skips = [u for u in upgrades if u.get("type") == "tier_a_no_cc"]
 
     # === NEW COVERED CALLS ===
     # A mid-range-RSI write (caution zone) is not a hard block, but writing it
@@ -134,6 +135,33 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         lines.append("")
         for cc in cc_wait:
             _render_cc(cc, "⏸ WAIT FOR STRENGTH")
+
+    # === TIER A CORE HOLDINGS (NO CC by policy) ===
+    # CLAUDE.md hard rule #29: Tier A holdings (LT core compounders — NVDA,
+    # GOOG, MSFT, META, PLTR, AMZN, SPY/VOO by default) get NO covered-call
+    # recommendations ever. The framework deliberately surfaces them in a
+    # transparency section so the user can see the position was considered
+    # and intentionally left uncapped — not silently dropped.
+    if tier_a_skips:
+        lines.append(f"### 🟢 Tier A core holdings — no CC (long-term compounders) ({len(tier_a_skips)})")
+        lines.append(
+            "_Tier A holdings are intentionally left uncapped — capping a "
+            "conviction compounder at the wheel-discipline strike defeats the "
+            "long-term thesis (CLAUDE.md hard rule #29). Listed here so each "
+            "position is visibly tracked, not silently dropped._"
+        )
+        lines.append("")
+        for sk in tier_a_skips:
+            sym = sk.get("underlying")
+            shares = int(sk.get("shares_held") or 0)
+            price = sk.get("current_price") or 0
+            weight = sk.get("current_weight_pct") or 0
+            tier = sk.get("tier", "A")
+            lines.append(
+                f"- **{sym}** — {shares} shares @ ${float(price):.2f} "
+                f"({weight:.1f}% NLV) · 🟢 Tier {tier} — no CC, long-term core"
+            )
+        lines.append("")
 
     # === COVERED STRANGLES ===
     if strangles:
@@ -256,15 +284,28 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             lines.append(f"  - Current: {held} shares @ ${price:.2f} = ${held * price:,.0f} ({held / 100 * 100:.0f}% of lot)")
             lines.append(f"  - Buy {to_buy} more = ${cost:,.0f} → {held + to_buy}-share lot ({post_weight:.1f}% NLV post-buy)")
 
-            # Add income projection for completed lot covered calls
-            completed_lot_value = (held + to_buy) * price
-            # Estimate covered call premium at 0.30 delta, 30 DTE (typically 2-4% of stock price)
-            estimated_call_premium_pct = 0.025  # Conservative 2.5% estimate
-            estimated_monthly_income = completed_lot_value * estimated_call_premium_pct
-            estimated_annualized = estimated_monthly_income * 12
+            # Income projection only when the completed lot would actually be
+            # eligible for covered-call writing. Tier A holdings (LT core
+            # compounders) are explicitly excluded from CC recommendations
+            # (CLAUDE.md hard rule #29) — surfacing an "enable 1× covered call
+            # writing" line for VOO/NVDA/etc would contradict that policy and
+            # mislead the user.
+            cc_after = sub.get("cc_enabled_after_completion", True)
+            tier_after = sub.get("position_tier")
+            if cc_after:
+                completed_lot_value = (held + to_buy) * price
+                # Estimate covered call premium at 0.30 delta, 30 DTE (typically 2-4% of stock price)
+                estimated_call_premium_pct = 0.025  # Conservative 2.5% estimate
+                estimated_monthly_income = completed_lot_value * estimated_call_premium_pct
+                estimated_annualized = estimated_monthly_income * 12
 
-            lines.append(f"  - After completion → enable 1× covered call writing")
-            lines.append(f"  - Est. income: ~${estimated_monthly_income:,.0f}/mo (0.30Δ 30DTE) = **${estimated_annualized:,.0f}/yr** (~{estimated_annualized/completed_lot_value*100:.1f}% annualized)")
+                lines.append(f"  - After completion → enable 1× covered call writing")
+                lines.append(f"  - Est. income: ~${estimated_monthly_income:,.0f}/mo (0.30Δ 30DTE) = **${estimated_annualized:,.0f}/yr** (~{estimated_annualized/completed_lot_value*100:.1f}% annualized)")
+            else:
+                lines.append(
+                    f"  - Tier {tier_after} core holding — completion adds shares for "
+                    f"long-term compounding (no CC by policy)"
+                )
 
             lines.append("")
 

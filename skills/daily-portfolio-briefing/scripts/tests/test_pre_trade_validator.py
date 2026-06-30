@@ -506,3 +506,147 @@ def test_custom_stale_threshold():
     # Strict 5% — warn fires
     findings_strict = ptv.validate_proposed_trade(ctx, config={"limit_sanity_pct": 0.05})
     assert "STALE_LIMIT_PRICE" in [f.rule_id for f in findings_strict]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule 13 — Covered-call tier discipline (CLAUDE.md hard rule #29)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TIER_CFG = {
+    "position_tiers": {
+        "tier_a_core": ["NVDA", "GOOG", "MSFT", "META", "PLTR", "AMZN", "SPY", "VOO"],
+        "tier_b_income": ["MU", "SMH"],
+    },
+    "covered_call_tiers": {
+        "tier_a": {"enabled": False, "max_delta": 0.0, "min_otm_pct": 999,
+                   "coverage_cap_pct": 0, "max_dte": 0, "rsi_floor": 999,
+                   "roll_up_trigger": 0.92, "tax_aware_assignment_block": True},
+        "tier_b": {"enabled": True, "max_delta": 0.15, "min_otm_pct": 10.0,
+                   "coverage_cap_pct": 50, "max_dte": 30, "rsi_floor": 70,
+                   "roll_up_trigger": 0.93, "tax_aware_assignment_block": True},
+        "tier_c": {"enabled": True, "max_delta": 0.30, "min_otm_pct": 4.0,
+                   "coverage_cap_pct": 100, "max_dte": 45, "rsi_floor": 60,
+                   "roll_up_trigger": 0.97, "tax_aware_assignment_block": False},
+    },
+}
+
+
+def _cc(**kw):
+    """Default healthy CC context — tests override the parts they care about."""
+    today = date(2026, 6, 15)
+    defaults = dict(
+        ticker="VRT",
+        strike=140.0,
+        expiration=today + timedelta(days=35),
+        option_type="CALL",
+        action="SELL_OPEN",
+        quantity=1,
+        spot=130.0,                # ~7.7% OTM at strike 140
+        rsi=65,                    # passes the global ≥60 CC RSI gate
+        held_shares=300,
+        existing_short_calls=[],
+        nlv=1_000_000.0,
+        cash=80_000.0,
+        sr_payload=None,
+        position_tier=None,
+    )
+    defaults.update(kw)
+    return ptv.PreTradeContext(**defaults)
+
+
+def test_tier_a_cc_blocked():
+    """A CC on NVDA (Tier A) — system policy is NEVER write CCs on core
+    compounders. Rule 13 BLOCKs the trade regardless of how clean it looks."""
+    ctx = _cc(ticker="NVDA", strike=1100.0, spot=1000.0, held_shares=700)
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [(f.severity, f.rule_id) for f in findings]
+    assert (ptv.SEV_BLOCK, "COVERED_CALL_TIER_VIOLATION") in rules
+    block = [f for f in findings if f.rule_id == "COVERED_CALL_TIER_VIOLATION"][0]
+    assert "Tier A" in block.reason
+
+
+def test_tier_b_cc_at_high_delta_blocked():
+    """A CC on MU (Tier B) at 0.25 delta — exceeds the tier-B cap of 0.15
+    → BLOCK. Strategy_upgrades selects a tier-compliant strike upstream,
+    but if anything bypasses that (manual entry / pending order audit),
+    the validator catches it here."""
+    ctx = _cc(
+        ticker="MU", strike=135.0, spot=120.0,  # ~12.5% OTM — passes OTM floor
+        held_shares=700, quantity=1,
+        sr_payload={"proposed_delta": 0.25},    # caller's chain quote delta
+    )
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [(f.severity, f.rule_id) for f in findings]
+    assert (ptv.SEV_BLOCK, "COVERED_CALL_TIER_VIOLATION") in rules
+    block = [f for f in findings if f.rule_id == "COVERED_CALL_TIER_VIOLATION"][0]
+    assert "delta 0.25" in block.reason
+
+
+def test_tier_b_cc_strike_too_close_blocked():
+    """A CC on MU (Tier B) at 5% OTM — violates the 10% floor → BLOCK."""
+    ctx = _cc(
+        ticker="MU", strike=126.0, spot=120.0,  # 5% OTM — fails the 10% floor
+        held_shares=700, quantity=1,
+    )
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [(f.severity, f.rule_id) for f in findings]
+    assert (ptv.SEV_BLOCK, "COVERED_CALL_TIER_VIOLATION") in rules
+
+
+def test_tier_b_cc_too_many_contracts_blocked():
+    """Tier B 50% coverage of 7 round lots = 3 contracts. Proposing 5
+    contracts exceeds the cap → BLOCK."""
+    ctx = _cc(
+        ticker="MU", strike=135.0, spot=120.0,
+        held_shares=700, quantity=5,           # 7 lots * 50% = 3 contracts max
+    )
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [(f.severity, f.rule_id) for f in findings]
+    assert (ptv.SEV_BLOCK, "COVERED_CALL_TIER_VIOLATION") in rules
+    block = [f for f in findings if f.rule_id == "COVERED_CALL_TIER_VIOLATION"][0]
+    assert "coverage cap" in block.reason
+
+
+def test_tier_c_cc_at_25_delta_passes():
+    """A CC on VRT (Tier C — default) at 0.25 delta — under the 0.30 cap →
+    Rule 13 does NOT fire."""
+    ctx = _cc(
+        ticker="VRT", strike=140.0, spot=130.0,  # ~7.7% OTM, above 4% floor
+        held_shares=300, quantity=1,
+        sr_payload={"proposed_delta": 0.25},
+    )
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [f.rule_id for f in findings]
+    assert "COVERED_CALL_TIER_VIOLATION" not in rules
+
+
+def test_tier_rule_silent_without_config():
+    """No `position_tiers` config AND no `ctx.position_tier` → Rule 13 stays
+    silent. Backward compatible — pre-framework callers see no behavior change."""
+    ctx = _cc(ticker="NVDA", strike=1100.0, spot=1000.0, held_shares=700)
+    findings = ptv.validate_proposed_trade(ctx)  # no config
+    rules = [f.rule_id for f in findings]
+    assert "COVERED_CALL_TIER_VIOLATION" not in rules
+
+
+def test_tier_rule_uses_ctx_position_tier_when_provided():
+    """ctx.position_tier='A' triggers Rule 13 even without `position_tiers`
+    in config — supports callers that already classify the ticker themselves."""
+    ctx = _cc(
+        ticker="ANYNAME", strike=1100.0, spot=1000.0, held_shares=700,
+        position_tier="A",
+    )
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [(f.severity, f.rule_id) for f in findings]
+    assert (ptv.SEV_BLOCK, "COVERED_CALL_TIER_VIOLATION") in rules
+
+
+def test_tier_a_block_is_separate_from_naked_call_block():
+    """A Tier-A CC with sufficient coverage still BLOCKs on Rule 13 — the
+    tier discipline fires independently of naked-call exposure (Rule 11)."""
+    ctx = _cc(ticker="NVDA", strike=1100.0, spot=1000.0, held_shares=700,
+              quantity=1, existing_short_calls=[])
+    findings = ptv.validate_proposed_trade(ctx, config=_TIER_CFG)
+    rules = [f.rule_id for f in findings]
+    assert "COVERED_CALL_TIER_VIOLATION" in rules
+    assert "NAKED_CALL_EXPOSURE" not in rules  # coverage is fine, just policy

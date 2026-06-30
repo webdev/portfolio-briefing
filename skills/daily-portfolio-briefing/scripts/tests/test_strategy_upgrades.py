@@ -503,3 +503,461 @@ def test_safe_price_blocks_the_original_round_crash():
     # The skip-guard `if price <= 0: continue` evaluates True now — confirming
     # the position is bypassed rather than reaching the round() call.
     assert price <= 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLAUDE.md hard rule #29 — Position Tier Framework
+# Tier A (NVDA, GOOG, MSFT, META, PLTR, AMZN, SPY/VOO): NO CC recs.
+# Tier B (MU, SMH): conservative CC only.
+# Tier C (default): current discipline (no behavior change).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_TIER_CONFIG = {
+    "max_position_pct": 0.10,
+    "max_sector_pct": 0.35,
+    "position_tiers": {
+        "tier_a_core": ["NVDA", "GOOG", "MSFT", "META", "PLTR", "AMZN", "SPY", "VOO"],
+        "tier_b_income": ["MU", "SMH"],
+    },
+    "covered_call_tiers": {
+        "tier_a": {"enabled": False, "rsi_floor": 999, "min_otm_pct": 999,
+                   "max_delta": 0.0, "coverage_cap_pct": 0, "max_dte": 0,
+                   "roll_up_trigger": 0.92, "tax_aware_assignment_block": True},
+        "tier_b": {"enabled": True, "rsi_floor": 70, "min_otm_pct": 10.0,
+                   "max_delta": 0.15, "coverage_cap_pct": 50, "max_dte": 30,
+                   "roll_up_trigger": 0.93, "tax_aware_assignment_block": True},
+        "tier_c": {"enabled": True, "rsi_floor": 60, "min_otm_pct": 4.0,
+                   "max_delta": 0.30, "coverage_cap_pct": 100, "max_dte": 45,
+                   "roll_up_trigger": 0.97, "tax_aware_assignment_block": False},
+    },
+}
+
+
+def _tier_snapshot():
+    """Minimal snapshot with three CC-eligible holdings — one per tier."""
+    return {
+        "positions": [
+            # NVDA (Tier A) — 700 shares: should yield NO CC rec.
+            {"symbol": "NVDA", "assetType": "EQUITY", "qty": 700,
+             "price": 1000.00, "costBasis": 400.00},
+            # MU (Tier B) — 700 shares: should yield a CC rec capped at 50%
+            # coverage (max 3 contracts) with the tier-B envelope.
+            {"symbol": "MU", "assetType": "EQUITY", "qty": 700,
+             "price": 120.00, "costBasis": 100.00},
+            # VRT (Tier C / default) — 300 shares: standard CC rec.
+            {"symbol": "VRT", "assetType": "EQUITY", "qty": 300,
+             "price": 130.00, "costBasis": 80.00},
+        ],
+        "balance": {"accountValue": 1_000_000, "cash": 50_000},
+        "chains": {},
+        "earnings_calendar": {},
+        "quotes": {
+            "NVDA": {"last": 1000.0},
+            "MU":   {"last": 120.0},
+            "VRT":  {"last": 130.0},
+        },
+        "technicals": {
+            # All three at RSI ~65 so the global rsi gate (≥60 to write CC)
+            # doesn't filter them out. Tier B's stricter 70 floor will.
+            "NVDA": {"rsi_14": 65},
+            "MU":   {"rsi_14": 65},
+            "VRT":  {"rsi_14": 65},
+        },
+    }
+
+
+def _mock_call_quote(*, strike, delta, mid=2.50, bid=2.40, ask=2.60,
+                     selected_by="delta", expiration="2026-08-15"):
+    return {
+        "strike": strike, "bid": bid, "mid": mid, "ask": ask,
+        "delta": delta, "iv": 0.45, "open_interest": 100,
+        "expiration": expiration, "source": "etrade_live",
+        "selected_by": selected_by, "sr_anchor": None,
+    }
+
+
+def test_tier_a_nvda_gets_no_cc_recommendation(monkeypatch):
+    """NVDA (Tier A) MUST NOT produce a write_covered_call upgrade.
+    Instead, it should appear as a tier_a_no_cc transparency record."""
+    # Even if the chain fetcher would return a healthy quote, NVDA should
+    # be diverted to the tier_a_no_cc record before the chain is consulted.
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=1100, delta=0.20),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    snap = _tier_snapshot()
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=_TIER_CONFIG,
+    )
+
+    nvda_writes = [
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "NVDA"
+    ]
+    assert nvda_writes == [], (
+        "Tier A NVDA should have NO write_covered_call upgrade; got: "
+        + str(nvda_writes)
+    )
+
+    nvda_a_records = [
+        u for u in upgrades
+        if u.get("type") == "tier_a_no_cc" and u.get("underlying") == "NVDA"
+    ]
+    assert len(nvda_a_records) == 1, (
+        "Expected a single tier_a_no_cc record for NVDA; got: " + str(nvda_a_records)
+    )
+    rec = nvda_a_records[0]
+    assert rec["tier"] == "A"
+    assert rec["shares_held"] == 700
+    assert "Tier A" in rec["rationale"]
+
+
+def test_tier_b_mu_gets_conservative_cc_with_50pct_coverage_cap(monkeypatch):
+    """MU (Tier B) at RSI 70+ should get a CC rec, but:
+       - max 3 contracts (50% of 7 round lots = 3)
+       - strike ≥ 10% OTM (tier-B floor)
+       - delta ≤ 0.15
+       - ≤ 30 DTE
+    """
+    snap = _tier_snapshot()
+    # Bump MU's RSI to 75 so the tier-B floor (70) is satisfied — otherwise
+    # the rec gets flagged with a tier_violations entry and we want to test
+    # the happy path coverage-cap math.
+    snap["technicals"]["MU"]["rsi_14"] = 75
+
+    # Mock the fetcher to return a strike ~13% OTM at 0.13 delta — a
+    # tier-B-compliant pick. The strategy_upgrades CC logic passes
+    # target_delta=min(0.25, 0.15) = 0.15 to the fetcher; we honor that
+    # by returning a 0.13-delta strike at $136 (13.3% OTM from $120).
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(
+            strike=136.0, delta=0.13, mid=1.10, bid=1.05, ask=1.15,
+            expiration="2026-07-25",  # ~25 DTE from 2026-06-30
+        ),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=_TIER_CONFIG,
+    )
+    mu_writes = [
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "MU"
+    ]
+    assert len(mu_writes) == 1, (
+        "Expected exactly one MU CC rec; got: " + str(mu_writes)
+    )
+    rec = mu_writes[0]
+    assert rec["tier"] == "B"
+    # 700 shares = 7 round lots; tier-B 50% coverage cap = max 3 contracts
+    assert rec["contracts_writable"] == 3, (
+        f"Tier-B 50% coverage of 7 lots = 3 contracts; got {rec['contracts_writable']}"
+    )
+    # No tier violations on the happy path
+    assert rec.get("tier_violations") == [], (
+        f"Expected zero tier violations on healthy MU rec; got: {rec.get('tier_violations')}"
+    )
+    # Tier-B knobs threaded through to the rec
+    assert rec["tier_max_delta"] == 0.15
+    assert rec["tier_min_otm_pct"] == 10.0
+    assert rec["tier_coverage_cap_pct"] == 50
+
+
+def test_tier_b_mu_records_tier_violation_when_strike_too_close(monkeypatch):
+    """If the chain returns a strike only 5% OTM (violating Tier B's 10%
+    floor), the rec is still emitted but carries a tier_violations entry
+    so the renderer can show the user WHY the trade is off-policy."""
+    snap = _tier_snapshot()
+    snap["technicals"]["MU"]["rsi_14"] = 75
+    # 5% OTM from $120 = $126, way under the tier-B 10% floor
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=126.0, delta=0.20, expiration="2026-07-25"),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=_TIER_CONFIG,
+    )
+    mu = next(
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "MU"
+    )
+    assert mu["tier"] == "B"
+    violations = mu.get("tier_violations") or []
+    # We expect BOTH the OTM% violation AND the delta violation to fire
+    assert any("OTM" in v for v in violations), f"Missing OTM violation: {violations}"
+    assert any("delta" in v for v in violations), f"Missing delta violation: {violations}"
+
+
+def test_tier_c_vrt_keeps_current_discipline_no_regression(monkeypatch):
+    """VRT (Tier C — default for unconfigured tickers) MUST behave exactly
+    like the pre-framework code: standard 0.25 delta / 6% OTM / 100% coverage."""
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(
+            strike=140.0, delta=0.24, mid=2.50, expiration="2026-08-05",
+        ),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    snap = _tier_snapshot()
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=_TIER_CONFIG,
+    )
+    vrt = next(
+        (u for u in upgrades
+         if u.get("type") == "write_covered_call" and u.get("underlying") == "VRT"),
+        None,
+    )
+    assert vrt is not None, "Tier C VRT should produce a CC recommendation"
+    assert vrt["tier"] == "C"
+    # 300 shares = 3 round lots; tier-C 100% coverage = 3 contracts
+    assert vrt["contracts_writable"] == 3
+    assert vrt["tier_max_delta"] == 0.30
+    assert vrt["tier_min_otm_pct"] == 4.0
+    assert vrt["tier_coverage_cap_pct"] == 100
+    # No tier violations — delta 0.24 < 0.30, ~7.7% OTM > 4% floor
+    assert vrt.get("tier_violations") == []
+
+
+def test_backward_compat_no_tier_config_preserves_legacy_behavior(monkeypatch):
+    """If `position_tiers` is missing entirely, every ticker → Tier C → the
+    pre-framework CC code path. NVDA, GOOG etc. all get CC recs as before."""
+    legacy_cfg = {"max_position_pct": 0.10}  # NO position_tiers block
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=1100, delta=0.20),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    snap = _tier_snapshot()
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=legacy_cfg,
+    )
+    nvda_writes = [
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "NVDA"
+    ]
+    assert len(nvda_writes) == 1, (
+        "With NO position_tiers config, NVDA must get a CC rec (legacy behavior); "
+        f"got: {nvda_writes}"
+    )
+    # And NO tier_a_no_cc record
+    a_records = [u for u in upgrades if u.get("type") == "tier_a_no_cc"]
+    assert a_records == [], (
+        f"With NO position_tiers config, no tier_a_no_cc records should appear; got: {a_records}"
+    )
+
+
+# ─── Renderer tests — make sure `tier_a_no_cc` upgrades actually reach the
+# ─── Strategy Upgrades panel (the original integration bug — records were
+# ─── generated upstream but the panel had no partition for them, so they
+# ─── were silently dropped).
+
+
+def test_render_tier_a_no_cc_section_appears_with_tier_a_records():
+    """A `tier_a_no_cc` upgrade dict must render a dedicated section in
+    the Strategy Upgrades panel — not be silently dropped (the bug found
+    during the tier-framework integration loop, 2026-06-30)."""
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    upgrades = [
+        {
+            "type": "tier_a_no_cc",
+            "underlying": "NVDA",
+            "tier": "A",
+            "shares_held": 701,
+            "current_price": 198.87,
+            "current_weight_pct": 13.8,
+            "rationale": "Tier A core compounder — no CC recommendations.",
+        },
+        {
+            "type": "tier_a_no_cc",
+            "underlying": "META",
+            "tier": "A",
+            "shares_held": 110,
+            "current_price": 560.65,
+            "current_weight_pct": 6.1,
+            "rationale": "Tier A core compounder — no CC recommendations.",
+        },
+    ]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    # The dedicated section header must appear
+    assert "Tier A core holdings — no CC" in md, (
+        f"Expected 'Tier A core holdings — no CC' section in rendered output; got:\n{md}"
+    )
+    # Both tickers must appear in the section
+    assert "**NVDA**" in md
+    assert "**META**" in md
+    # The note explaining the policy must appear
+    assert "uncapped" in md.lower() or "long-term" in md.lower()
+
+
+def test_render_sublot_completion_for_tier_a_does_not_promise_cc_income():
+    """When a sub-lot completion is for a Tier A holding (e.g. VOO),
+    the renderer must NOT include the 'enable 1× covered call writing'
+    line — that would contradict the no-CC-on-tier-A policy. Instead
+    it should render a tier-aware note."""
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    upgrades = [
+        {
+            "type": "sublot_completion",
+            "underlying": "VOO",
+            "shares_held": 50,
+            "shares_to_buy": 50,
+            "current_price": 687.0,
+            "cost": 34350.0,
+            "post_buy_weight_pct": 6.8,
+            "rsi_14": 56,
+            "rsi_tag": "RSI 56 🟢 pullback",
+            "rsi_note": "favourable spot to add",
+            "rsi_decision": "promote",
+            "rsi_badge": "✅ RSI favourable",
+            "rsi_blocked": False,
+            "position_tier": "A",
+            "cc_enabled_after_completion": False,
+            "rationale": "Complete 100-share lot (Tier A core — no CC)",
+        },
+    ]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    # No "enable 1× covered call writing" promise
+    assert "enable 1× covered call writing" not in md, (
+        f"Tier A sublot completion must NOT promise CC writing; got:\n{md}"
+    )
+    # No spurious annualized income estimate
+    assert "annualized" not in md.lower(), (
+        f"Tier A sublot completion must NOT include income projection; got:\n{md}"
+    )
+    # Must include a tier-aware note
+    assert "Tier A core" in md or "no CC by policy" in md, (
+        f"Expected tier-aware note for VOO Tier A sublot; got:\n{md}"
+    )
+
+
+def test_render_sublot_completion_for_tier_c_still_promises_cc_income():
+    """Backward compat — Tier C sublots (legacy default) keep the
+    'enable 1× covered call writing' projection."""
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    upgrades = [
+        {
+            "type": "sublot_completion",
+            "underlying": "ZS",
+            "shares_held": 50,
+            "shares_to_buy": 50,
+            "current_price": 150.0,
+            "cost": 7500.0,
+            "post_buy_weight_pct": 1.5,
+            "rsi_14": 50,
+            "rsi_tag": "RSI 50",
+            "rsi_note": "neutral",
+            "rsi_decision": "keep",
+            "rsi_badge": "",
+            "rsi_blocked": False,
+            "position_tier": "C",
+            "cc_enabled_after_completion": True,
+            "rationale": "Complete 100-share lot",
+        },
+    ]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    assert "enable 1× covered call writing" in md
+    assert "annualized" in md.lower()
+
+
+def test_render_sublot_completion_missing_tier_flags_defaults_to_legacy():
+    """When `cc_enabled_after_completion` is absent (older upgrades dict),
+    the renderer falls back to the legacy behavior (always show CC
+    projection) — no regression for callers that haven't been updated."""
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    upgrades = [
+        {
+            "type": "sublot_completion",
+            "underlying": "ANY",
+            "shares_held": 50,
+            "shares_to_buy": 50,
+            "current_price": 100.0,
+            "cost": 5000.0,
+            "post_buy_weight_pct": 0.5,
+            "rationale": "legacy upgrade dict, no tier flags",
+        },
+    ]
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    # Defaults to True → CC projection shown
+    assert "enable 1× covered call writing" in md
+
+
+# ─── Panel test — render_risk_alerts must use tier caps when config is set ──
+
+
+def test_render_risk_alerts_uses_tier_cap_for_tier_a_concentration():
+    """A Tier A holding at 14% NLV (cap 22%) must NOT trigger a 'over 10%
+    NLV cap' warning — it must render as a tier-aware informational note.
+    This was the GOOG/NVDA 'concentration cap' bug found in the integration
+    loop (2026-06-30)."""
+    from render.panels import render_risk_alerts
+    equity_reviews = [
+        {"ticker": "NVDA", "weight": 0.138},  # 13.8% — well below tier-A cap 22%
+        {"ticker": "GOOG", "weight": 0.153},  # 15.3% — same
+        {"ticker": "VRT", "weight": 0.046},   # 4.6% — within tier-C cap 8%
+    ]
+    config = {
+        "position_tiers": {
+            "tier_a_core": ["NVDA", "GOOG"],
+        },
+    }
+    out = render_risk_alerts(
+        equity_reviews=equity_reviews,
+        options_reviews=[],
+        regime_data={"regime": "RISK_ON"},
+        config=config,
+    )
+    md = "\n".join(out)
+    # Neither NVDA nor GOOG should fire a warning
+    assert "NVDA concentration 13.8% — over 10% NLV cap" not in md
+    assert "GOOG concentration 15.3% — over 10% NLV cap" not in md
+    # Both should appear as tier-aware notes ("within Tier A bounds" or similar)
+    assert "NVDA" in md and "Tier A" in md
+    assert "GOOG" in md and "Tier A" in md
+
+
+def test_render_risk_alerts_no_tier_config_falls_back_to_legacy_10pct_cap():
+    """Backward compat — no `position_tiers` config → the legacy 10% NLV cap
+    warning fires on any holding over 10%, just like before the framework."""
+    from render.panels import render_risk_alerts
+    equity_reviews = [
+        {"ticker": "NVDA", "weight": 0.138},
+        {"ticker": "GOOG", "weight": 0.153},
+    ]
+    out = render_risk_alerts(
+        equity_reviews=equity_reviews,
+        options_reviews=[],
+        regime_data={"regime": "RISK_ON"},
+        # No config / no tier block → legacy
+    )
+    md = "\n".join(out)
+    assert "NVDA concentration 13.8% — over 10% NLV cap" in md
+    assert "GOOG concentration 15.3% — over 10% NLV cap" in md
+
+
+def test_render_risk_alerts_tier_b_breach_fires_warning():
+    """A Tier B name at 14% (cap 12%) must fire a BREACH warning, not the
+    'within bounds' note. The tier framework doesn't silence breaches —
+    it raises the threshold for Tier A, lowers it for Tier B/C."""
+    from render.panels import render_risk_alerts
+    equity_reviews = [
+        {"ticker": "MU", "weight": 0.14},  # 14% — over tier-B cap 12%
+    ]
+    config = {
+        "position_tiers": {
+            "tier_a_core": ["NVDA"],
+            "tier_b_income": ["MU"],
+        },
+    }
+    out = render_risk_alerts(
+        equity_reviews=equity_reviews,
+        options_reviews=[],
+        regime_data={"regime": "RISK_ON"},
+        config=config,
+    )
+    md = "\n".join(out)
+    assert "MU" in md
+    assert "BREACH" in md
+    assert "Tier B" in md

@@ -147,8 +147,11 @@ def compute_analytics(
     # Compute stress coverage (only for short puts)
     stress_coverage = compute_stress_coverage(enriched, cash, nlv)
 
-    # Compute concentration drift (only for long stocks)
-    concentration = detect_concentration_drift(enriched, float(nlv))
+    # Compute concentration drift (only for long stocks). Pass `config` so
+    # the tier framework (CLAUDE.md hard rule #29) applies: Tier A holdings
+    # tolerate ~22% NLV before warning, Tier B ~12%, Tier C ~8% (or the
+    # legacy 10% when no position_tiers config is present).
+    concentration = detect_concentration_drift(enriched, float(nlv), config=config)
 
     # Compute expiration ladder (for options)
     expirations = analyze_expiration_ladder(enriched, float(nlv))

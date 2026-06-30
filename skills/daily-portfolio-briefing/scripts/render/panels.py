@@ -336,13 +336,66 @@ def render_health(equity_reviews: list, nlv: float, options_positions: list = No
         net_delta = equity_delta + opt_delta
 
         lines.append("")
-        lines.append("**Net Greeks** (delta in equivalent shares)")
-        lines.append(f"- Delta: {net_delta:+,.0f} shares (equity {equity_delta:+,.0f} + options {opt_delta:+,.0f})")
-        lines.append(f"- Theta: ${opt_theta:+,.0f} / day (positive = income to seller)")
-        lines.append(f"- Vega: ${opt_vega:+,.0f} per 1% IV move (negative = short vol)")
-        lines.append(f"- Gamma: {opt_gamma:+,.2f}")
+        lines.append("**Net Greeks** — your portfolio's directional + time + volatility exposure")
+        lines.append("")
+        # ── DELTA ─────────────────────────────────────────────────────
+        # Directional exposure expressed in equivalent shares of underlying.
+        # Equity delta = qty (a share is always 1.0 delta). Option delta is
+        # signed by qty (long call positive, short put positive, etc.).
+        lines.append(f"- **Δ Delta: {net_delta:+,.0f} shares** *(equity {equity_delta:+,.0f} + options {opt_delta:+,.0f})*")
+        delta_sense = ("long-biased — your book gains when the market rises"
+                       if net_delta > 0
+                       else "short-biased — your book gains when the market falls"
+                       if net_delta < 0 else "delta-neutral")
+        # Approximate $ exposure assuming SPY-like price scale on the equiv share count
+        lines.append(f"   - **What it means:** for every $1 move in the average underlying, "
+                     f"your book moves ~${abs(net_delta):+,.0f}. You are {delta_sense}.")
+        lines.append("   - **Rule of thumb:** delta close to 0 = market-neutral. Big positive delta = "
+                     "you're essentially long N shares of the market.")
+
+        # ── THETA ─────────────────────────────────────────────────────
+        # Daily time decay. Positive = income (short premium), negative = cost
+        # (long premium). For a wheel book this is the income engine.
+        theta_sense = ("collecting" if opt_theta > 0 else "paying" if opt_theta < 0 else "neutral on")
+        theta_annual = opt_theta * 252  # 252 trading days/year
+        lines.append(f"- **Θ Theta: ${opt_theta:+,.0f} / day** *(annualized ≈ ${theta_annual:+,.0f})*")
+        lines.append(f"   - **What it means:** options lose value as time passes — theta is the daily rate. "
+                     f"You're **{theta_sense}** ${abs(opt_theta):,.0f}/day from time decay.")
+        lines.append("   - **Rule of thumb:** positive theta = wheel income working. Negative theta = you "
+                     "PAID for time (LEAPs, protective puts) — that's the cost of the insurance.")
+
+        # ── VEGA ──────────────────────────────────────────────────────
+        # Sensitivity to a 1% change in implied volatility.
+        # Negative vega = short vol (you GAIN when IV drops, LOSE when IV spikes).
+        vega_sense = ("short vol — you GAIN when IV drops, LOSE when IV spikes (e.g., VIX shock)"
+                      if opt_vega < 0
+                      else "long vol — you GAIN when IV spikes, LOSE when IV crushes"
+                      if opt_vega > 0 else "vega-neutral")
+        lines.append(f"- **ν Vega: ${opt_vega:+,.0f} per 1% IV move**")
+        lines.append(f"   - **What it means:** for every 1 point IV change across your options, your book "
+                     f"moves ${opt_vega:+,.0f}. You are **{vega_sense}**.")
+        lines.append("   - **Rule of thumb:** short-put / short-call wheel books are naturally **short vega** "
+                     "— a VIX spike from 18 → 28 (a +10 IV move) would cost you "
+                     f"~${abs(opt_vega) * 10:,.0f}. Hedge with long puts when vega is large and negative.")
+
+        # ── GAMMA ─────────────────────────────────────────────────────
+        # Rate of change of delta. Negative gamma = adverse moves compound
+        # (short premium pain accelerates as the underlying moves against you).
+        gamma_sense = ("short gamma — adverse moves COMPOUND against you "
+                       "(short-put/call pain accelerates as spot moves against your strike)"
+                       if opt_gamma < 0
+                       else "long gamma — favorable moves COMPOUND in your favor "
+                       "(rare in wheel books)"
+                       if opt_gamma > 0 else "gamma-neutral")
+        lines.append(f"- **Γ Gamma: {opt_gamma:+,.2f}**")
+        lines.append(f"   - **What it means:** the rate at which delta itself changes per $1 move in "
+                     f"underlying. You are **{gamma_sense}**.")
+        lines.append("   - **Rule of thumb:** short-gamma is the wheel-seller's hidden enemy — a -5% "
+                     "market day doesn't just cost you 5×delta, it costs more because delta accelerates. "
+                     "Watch this number near earnings or when puts are at-the-money.")
         if unknown_greeks:
-            lines.append(f"- ({unknown_greeks} contracts missing Greeks data)")
+            lines.append("")
+            lines.append(f"_({unknown_greeks} contract(s) missing Greeks data — values above exclude them)_")
 
     lines.append("")
     return lines
@@ -351,6 +404,7 @@ def render_health(equity_reviews: list, nlv: float, options_positions: list = No
 def render_risk_alerts(
     equity_reviews: list, options_reviews: list, regime_data: dict,
     put_buckets: list | None = None,
+    config: dict | None = None,
 ) -> list:
     """Real risk alerts — surface anything material from the reviews.
 
@@ -358,7 +412,12 @@ def render_risk_alerts(
     analyze_put_buckets — critical-severity buckets get a dedicated Risk Alert
     so users see them at the top of the briefing, distinct from the static
     stress-coverage ratio (which assumes ALL puts assign at once and overstates
-    real risk on a well-laddered book)."""
+    real risk on a well-laddered book).
+
+    ``config`` carries the briefing.yaml dict — when it includes a
+    ``position_tiers`` block, per-name concentration alerts switch to
+    tier-aware caps (Tier A names tolerate up to ~22% NLV before warning,
+    Tier B ~12%, Tier C ~8%). CLAUDE.md hard rule #29."""
     lines = ["## Risk Alerts", ""]
     alerts = []
 
@@ -388,13 +447,55 @@ def render_risk_alerts(
             f"({bucket.pct_of_nlv*100:.1f}% NLV, {verdict}). Names: {top_names}{more}"
         )
 
-    # Concentration warnings
+    # Concentration warnings — tier-aware when `config.position_tiers` is set.
+    # Tier A holdings (LT core compounders) get a higher cap (~22% NLV) than
+    # the legacy 10% rule — capping a conviction compounder at 10% defeats
+    # the long-term thesis (CLAUDE.md hard rule #29). When the holding is
+    # within bounds for its tier, we emit a `within_bounds` informational note
+    # rather than a warning so the user sees the position was checked.
+    _pt = None
+    _has_tier_cfg = False
+    if config and isinstance(config, dict) and config.get("position_tiers"):
+        try:
+            from analysis import position_tiers as _pt  # type: ignore
+            _has_tier_cfg = True
+        except ImportError:
+            _pt = None
+            _has_tier_cfg = False
+
     for rev in equity_reviews:
         weight = rev.get("weight", 0)
+        ticker = rev.get("ticker", "?")
+        if _has_tier_cfg and _pt is not None:
+            tier = _pt.tier_for(ticker, config)
+            cap_pct = _pt.concentration_cap_for_tier(tier, config)  # e.g. 22.0
+            cap_ratio = (cap_pct or 10.0) / 100.0
+            warn_ratio = cap_ratio * 0.80
+            within_ratio = cap_ratio * 0.50
+            if weight > cap_ratio:
+                alerts.append(
+                    f"⚠️ {ticker} concentration {weight*100:.1f}% — BREACH of "
+                    f"Tier {tier} cap ({cap_pct:.0f}% NLV)"
+                )
+            elif weight > warn_ratio:
+                alerts.append(
+                    f"📊 {ticker} concentration {weight*100:.1f}% — approaching "
+                    f"Tier {tier} cap ({cap_pct:.0f}% NLV)"
+                )
+            elif weight > within_ratio:
+                # Surface as info, not warning — Tier A's whole point is to
+                # ALLOW concentration. Inline note so the user sees we tracked
+                # it without false-alarming the Red Flags.
+                alerts.append(
+                    f"📊 {ticker} concentration {weight*100:.1f}% — within Tier "
+                    f"{tier} bounds (cap {cap_pct:.0f}% NLV, tracked)"
+                )
+            continue
+        # Legacy path — no tier config.
         if weight > 0.10:
-            alerts.append(f"⚠️ {rev.get('ticker')} concentration {weight*100:.1f}% — over 10% NLV cap")
+            alerts.append(f"⚠️ {ticker} concentration {weight*100:.1f}% — over 10% NLV cap")
         elif weight > 0.08:
-            alerts.append(f"📊 {rev.get('ticker')} concentration {weight*100:.1f}% — approaching 10% cap")
+            alerts.append(f"📊 {ticker} concentration {weight*100:.1f}% — approaching 10% cap")
 
     # Options: surface urgent earnings+loss flags AND actionable recommendations
     actionable_decisions = {"CLOSE", "CLOSE_FOR_PROFIT", "ROLL_OUT", "ROLL_OUT_AND_DOWN", "ROLL_OUT_AND_UP", "TAKE_ASSIGNMENT", "LET_EXPIRE"}
