@@ -1,0 +1,93 @@
+{# ─── tech_legend() — collapsible "How to read these signals" panel ───
+   Task #13. Shows the plain-English meaning of every indicator on the
+   tech cards (RSI, BB position, MACD, 50/200-SMA, Golden/Death cross,
+   S/R clusters, ATR, 52-week range, ATH drawdown). Content mirrors the
+   legend section of the standalone technical_analysis_infographic.html.
+
+   Collapsed by default so it never eats screen real estate — one click
+   to expand. Available on any page that renders tech cards. #}
+{% macro tech_legend() %}
+<sl-details class="tc-legend-details" summary="📖 How to read the technical signals">
+    <div class="tc-legend-grid">
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">📊</span>
+            <div>
+                <strong>RSI (Relative Strength Index)</strong>
+                <div class="tc-legend-desc">Momentum meter, 0–100 scale. Above 70 = overbought (pullback risk). Below 30 = oversold (bounce setup). 40–60 = neutral. Uses Wilder's 14-day smoothing.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">🎯</span>
+            <div>
+                <strong>BB (Bollinger Bands)</strong>
+                <div class="tc-legend-desc">Volatility bands around a 20-day average. Position 0% = at lower band (support). 50% = middle. 100% = at upper band (resistance). Above 100% = extended, pullback watch. Below 0% = extreme oversold, bounce watch.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">⚡</span>
+            <div>
+                <strong>MACD (Moving Average Convergence-Divergence)</strong>
+                <div class="tc-legend-desc">Trend confirmation. Positive + rising (↗ +) = bullish momentum. Negative + falling (↘ −) = bearish momentum. Turning up from below zero = potential reversal.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">📈</span>
+            <div>
+                <strong>50 / 200-SMA</strong>
+                <div class="tc-legend-desc">Trend direction. Above both = uptrend. Below both = downtrend. <strong>Golden cross</strong> (50 above 200) = bullish long-term. <strong>Death cross</strong> (50 below 200) = bearish long-term. Slope shown as %/month.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">🟢</span>
+            <div>
+                <strong>Support / Resistance clusters</strong>
+                <div class="tc-legend-desc">Prices where the stock has reversed multiple times. Green lines = support (buyers step in). Red lines = resistance (sellers step in). "Touches" counts how many times the level was tested — more touches = stronger.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">📉</span>
+            <div>
+                <strong>ATR (Average True Range)</strong>
+                <div class="tc-legend-desc">Typical daily price move as % of spot. Higher = more volatile. Used for sizing stops (e.g., stop = 1.5 × ATR below entry).</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">📏</span>
+            <div>
+                <strong>52-week range position</strong>
+                <div class="tc-legend-desc">Where spot sits between yearly low (0%) and high (100%). 90%+ = near highs. 10%− = near lows. Useful mean-reversion context.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row">
+            <span class="tc-legend-icon">💥</span>
+            <div>
+                <strong>ATH drawdown</strong>
+                <div class="tc-legend-desc">How far off the all-time high (negative %). −30% or worse suggests a "broken" chart — the fundamental thesis needs a fresh check, not just chart-reading.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row tc-legend-verdict">
+            <span class="tc-legend-icon">🎬</span>
+            <div>
+                <strong>Short-term (1-4 weeks) verdict</strong>
+                <div class="tc-legend-desc">Fast read: <em>stretched</em> = pullback risk (RSI &gt; 70 or BB &gt; 90) · <em>oversold — bounce</em> = RSI &lt; 30 or BB &lt; 10 · <em>bullish/bearish momentum</em> = MACD-driven · <em>stabilizing</em> = downtrend fading · <em>neutral</em> = consolidating.</div>
+            </div>
+        </div>
+        <div class="tc-legend-row tc-legend-verdict">
+            <span class="tc-legend-icon">🧭</span>
+            <div>
+                <strong>Long-term (3-12 months) verdict</strong>
+                <div class="tc-legend-desc">Slower read: <em>secular uptrend</em> = above 200-SMA + Golden cross + rising 200 · <em>uptrend intact</em> = above 200-SMA + Golden cross · <em>broken chart</em> = drawdown &gt; 30% and below 200-SMA · <em>confirmed downtrend</em> = Death cross + falling 200 · <em>weakening</em>, <em>recovery attempt</em>, <em>sideways</em> = in-between states.</div>
+            </div>
+        </div>
+        <div class="tc-legend-footer">
+            <strong>How to combine signals:</strong> A single signal is noise. Three converging is a setup.
+            <ul class="tc-legend-examples">
+                <li><strong>Classic bounce:</strong> RSI oversold + BB below lower + spot at support</li>
+                <li><strong>Pullback risk:</strong> RSI overbought + BB above upper + spot at resistance</li>
+                <li><strong>Trend restart:</strong> MACD turning up from below zero + spot above 200-SMA</li>
+            </ul>
+            <p class="tc-legend-note">Not investment advice — technicals are one input. Combine with fundamentals, position sizing, and risk management before acting.</p>
+        </div>
+    </div>
+</sl-details>
+{% endmacro %}

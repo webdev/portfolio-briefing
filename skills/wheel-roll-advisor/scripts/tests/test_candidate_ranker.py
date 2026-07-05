@@ -176,3 +176,52 @@ def test_wheel_mode_prefers_rollup_between_comparable_credits():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ─── Reverse-tenor guard (task #13) ────────────────────────────────────────
+
+
+def test_ranker_rejects_shorter_dte_on_long_dated_position():
+    """ROLL_OUT that moves 500d → 90d (dte_ext=-410) is a downgrade,
+    not a roll-out. Reject when current position is already long-dated
+    (≥30d). Fixes task #13.
+
+    Test uses core mode (is_core=True) since wheel mode's
+    min_credit_threshold=1000 would filter B/C independently, masking
+    the reverse-tenor guard we're testing.
+    """
+    from candidate_ranker import rank_candidates
+    candidates = [
+        {
+            "id": "B", "instruction": {"sell_strike": 500},
+            "dteExtension": -410, "current_dte": 500,
+            "netDollars": 5000, "current_strike": 500,
+        },
+        {
+            "id": "C", "instruction": {"sell_strike": 500},
+            "dteExtension": 60, "current_dte": 500,
+            "netDollars": 2000, "current_strike": 500,
+        },
+    ]
+    best, ranked = rank_candidates(candidates, spot=490, is_core=True)
+    ranked_ids = [r.candidate_id for r in (ranked or [])]
+    assert "B" not in ranked_ids, (
+        f"reverse-tenor guard failed to filter B (ranked ids: {ranked_ids})"
+    )
+    assert "C" in ranked_ids, "legit roll-out C should still be present"
+
+
+def test_ranker_allows_shorter_dte_on_short_dated_position():
+    """When the current position is short-dated (<30d), a shorter-tenor
+    close-early roll is legit. Guard should NOT block it."""
+    from candidate_ranker import rank_candidates
+    candidates = [
+        {
+            "id": "B", "instruction": {"sell_strike": 500},
+            "dteExtension": -3, "current_dte": 14,   # 14d → 11d, legit
+            "netDollars": 2000, "current_strike": 500,
+        },
+    ]
+    best, ranked = rank_candidates(candidates, spot=490, is_core=True)
+    ranked_ids = [r.candidate_id for r in (ranked or [])]
+    assert "B" in ranked_ids, "guard shouldn't block short-dated close-early roll"

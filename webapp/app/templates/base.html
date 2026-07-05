@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" class="sl-theme-dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Portfolio Briefing{% endblock %}</title>
+
+    {# Restore the user's saved theme BEFORE any styles render (no FOUC).
+       Themes: dark (default Bloomberg slate), light, solarized-dark, solarized-light.
+       The class 'sl-theme-dark' / 'sl-theme-light' tells Shoelace which palette to use. #}
+    <script>
+      (function() {
+        var saved = localStorage.getItem('pb-theme') || 'dark';
+        var html = document.documentElement;
+        html.setAttribute('data-theme', saved);
+        html.classList.remove('sl-theme-dark', 'sl-theme-light');
+        // Solarized dark + dark → Shoelace dark base; light + solarized-light + infographic → light base
+        if (saved === 'light' || saved === 'solarized-light' || saved === 'infographic') {
+          html.classList.add('sl-theme-light');
+        } else {
+          html.classList.add('sl-theme-dark');
+        }
+      })();
+    </script>
+
+    {# Google Fonts — Inter for UI, JetBrains Mono for tickers/numbers. #}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+
+    {# Shoelace — load BOTH dark and light theme stylesheets so the body class
+       swap takes effect instantly when the user toggles themes. #}
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.18.0/cdn/themes/dark.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.18.0/cdn/themes/light.css">
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.18.0/cdn/shoelace-autoloader.js"></script>
+
+    <link rel="stylesheet" href="/static/app.css">
+
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" defer></script>
+    {# Chart bootstrapper — hydrates every <div class="chart-target" data-chart-url="..."> #}
+    <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+    <div class="topbar-inner">
+        <span class="topbar-brand"><a href="/" class="home-link">Portfolio Briefing</a></span>
+
+        <nav class="topbar-nav" aria-label="primary">
+            <a href="/">Today</a>
+            <a href="/briefing/latest" title="Structured briefing with tabs (skim-first)">Briefing</a>
+            <a href="/briefing/latest/md" title="Full briefing as a plain-text memo (read top-to-bottom)"><strong>📄 Document</strong></a>
+            <a href="/setups/latest" title="Consolidated Candidates + When-to-Enter">Setups</a>
+            <a href="/positions">Positions</a>
+            <a href="/diff/yesterday/latest">Diff</a>
+            <a href="/history">History</a>
+        </nav>
+
+        <div class="topbar-spacer"></div>
+
+        <ul class="topbar-pills">
+            {% if topbar %}
+                <li class="pill" title="Briefing date + SHA-256 fingerprint (first 8 hex). If you regenerate the briefing, this changes — visual confirmation the UI is on the fresh version.">
+                    <span class="muted">Date</span>
+                    <strong>{{ topbar.date }}</strong>
+                    {% if topbar.checksum %}
+                    <span class="pill-checksum">{{ topbar.checksum }}</span>
+                    {% endif %}
+                </li>
+                <li class="pill"><span class="muted">NLV</span>
+                    <strong class="num">${{ "{:,.0f}".format(topbar.nlv) if topbar.nlv else "n/a" }}</strong>
+                </li>
+                <li class="pill"><span class="muted">Cash</span>
+                    <strong class="num">{{ "{:.1f}%".format(topbar.cash_pct * 100) if topbar.cash_pct is not none else "n/a" }}</strong>
+                </li>
+                {% if topbar.coverage is not none %}
+                {# Cov pill is clickable: jumps to the briefing's Red Flags
+                   section so the user can see WHY coverage matters here.
+                   Tooltip explains the threshold inline. #}
+                <li class="pill {{ 'pill-red' if topbar.coverage < 0.5 else ('pill-yellow' if topbar.coverage < 0.7 else 'pill-green') }}"
+                    title="{% if topbar.coverage < 0.5 %}CRITICAL: stress coverage below 0.50× — new short puts blocked (hard rule #13). Click to see Red Flags.{% elif topbar.coverage < 0.7 %}REBUILDING: below 0.70× target — favor closes over opens. Click to see Red Flags.{% else %}OK: above 0.70× rebuild target. Click for full Red Flags panel.{% endif %}"
+                    style="cursor: pointer;"
+                    onclick="window.location='/briefing/latest#red-flags'">
+                    <span class="muted">Cov</span>
+                    <strong class="num">{{ "{:.2f}".format(topbar.coverage) }}×</strong>
+                </li>
+                {% endif %}
+                <li class="pill pill-regime regime-{{ topbar.regime|default('UNKNOWN') }}">
+                    {{ topbar.regime|default("—") }}
+                </li>
+            {% endif %}
+        </ul>
+
+        <div class="topbar-actions">
+            <form action="/search" method="get" class="topbar-search">
+                <sl-input
+                    name="q"
+                    type="search"
+                    size="small"
+                    placeholder="Search ticker, action..."
+                    clearable
+                    value="{{ q or '' }}">
+                </sl-input>
+            </form>
+            {# Density toggle: Simple hides low-signal chrome
+               (badges, watch cards, verbose diff details) for the
+               morning-briefing "read once, act, close" flow.
+               Expert shows everything. Persisted in localStorage. #}
+            <sl-button-group id="density-toggle" label="Density">
+                <sl-button size="small" variant="default" data-density="simple" onclick="setDensity('simple')" title="Hide low-signal chrome — decision-first">Simple</sl-button>
+                <sl-button size="small" variant="primary" data-density="expert" onclick="setDensity('expert')" title="Show everything — research mode">Expert</sl-button>
+            </sl-button-group>
+            <sl-button
+                id="refresh-btn"
+                variant="primary"
+                size="small"
+                outline
+                onclick="startRefresh()">
+                {% if running_job %}<sl-spinner slot="prefix"></sl-spinner>Refreshing{% else %}↻ Refresh{% endif %}
+            </sl-button>
+
+            {# Theme switcher — 4 themes (default dark, light, solarized dark/light)
+               persisted in localStorage; toggles data-theme on <html> + Shoelace theme class.
+               Trigger button shows BOTH the icon and the current theme's label so
+               a first-time user knows what 🌒 means. Active option's `checked`
+               attribute is set on init from localStorage. #}
+            <sl-dropdown placement="bottom-end" hoist>
+                <sl-button slot="trigger" caret size="small" variant="default" title="Switch theme">
+                    <span id="theme-current-icon" style="margin-right: .3em">🌙</span>
+                    <span id="theme-current-label" class="muted" style="font-size: 11px; text-transform: uppercase; letter-spacing: .04em;">Dark</span>
+                </sl-button>
+                <sl-menu id="theme-menu" data-current="dark">
+                    <sl-menu-item type="checkbox" value="dark" checked>🌙 Dark <span slot="suffix" class="muted">(default)</span></sl-menu-item>
+                    <sl-menu-item type="checkbox" value="light">☀️ Light</sl-menu-item>
+                    <sl-menu-item type="checkbox" value="infographic">📰 Infographic <span slot="suffix" class="muted">(warm)</span></sl-menu-item>
+                    <sl-menu-divider></sl-menu-divider>
+                    <sl-menu-item type="checkbox" value="solarized-dark">🌒 Solarized Dark</sl-menu-item>
+                    <sl-menu-item type="checkbox" value="solarized-light">🌞 Solarized Light</sl-menu-item>
+                </sl-menu>
+            </sl-dropdown>
+        </div>
+    </div>
+</header>
+
+<main class="container">
+    {% block content %}{% endblock %}
+</main>
+
+{# Refresh drawer — driven by Shoelace's sl-drawer. #}
+<sl-drawer id="refresh-drawer" label="Pipeline refresh" placement="end">
+    <div class="refresh-status" id="refresh-status-line">starting...</div>
+    <sl-progress-bar id="refresh-progress" indeterminate></sl-progress-bar>
+    <pre id="refresh-log" class="refresh-log"></pre>
+    <sl-button slot="footer" variant="default" onclick="closeRefreshDrawer()">Close</sl-button>
+</sl-drawer>
+
+{# Global ticker popover target — HTMX swaps the card body in. #}
+<div id="ticker-popover" class="ticker-popover" hidden></div>
+
+{% include "footer.html" %}
+
+<script>
+// ─── Refresh button + SSE drainer ───────────────────────────────────
+let _refreshJobId = null;
+let _refreshSource = null;
+
+function _getDrawer() {
+    return document.getElementById('refresh-drawer');
+}
+
+function startRefresh() {
+    const drawer = _getDrawer();
+    const logEl = document.getElementById('refresh-log');
+    const statusEl = document.getElementById('refresh-status-line');
+    const progress = document.getElementById('refresh-progress');
+    logEl.textContent = '';
+    statusEl.textContent = 'launching...';
+
+    // Pre-flight: check E*TRADE token status. If hard-expired, show the
+    // re-auth CTA in the drawer BEFORE spinning up the subprocess so the
+    // user isn't left staring at a "pipeline crashed" error.
+    fetch('/etrade/auth-status')
+        .then(r => r.json())
+        .then(auth => {
+            if (auth.status === 'hard_expired' || auth.status === 'missing') {
+                statusEl.innerHTML = '⚠ <strong>E*TRADE token expired</strong> — ' +
+                    'the pipeline will run but broker data will be stale. ' +
+                    '<br><span style="font-size:12px;">' + (auth.hint || '') + '</span>';
+            } else if (auth.status === 'idle_stale') {
+                statusEl.innerHTML = 'ℹ Token idle (' + auth.token_age_hours + 'h) — ' +
+                    'auto-renewal will fire during the run.';
+            }
+        })
+        .catch(() => {});
+    if (progress) progress.removeAttribute('value');  // back to indeterminate
+    // Shoelace drawer: show() is async; safe to fire-and-forget.
+    if (drawer && typeof drawer.show === 'function') {
+        drawer.show();
+    }
+
+    fetch('/refresh', { method: 'POST' })
+        .then(r => r.json().then(j => ({ status: r.status, body: j })))
+        .then(({ status, body }) => {
+            _refreshJobId = body.job_id;
+            if (status === 409) {
+                statusEl.textContent = 'a refresh is already running — tailing it';
+            } else {
+                statusEl.textContent = 'running...';
+            }
+            openEventStream(body.job_id);
+        })
+        .catch(err => {
+            statusEl.textContent = 'failed to start: ' + err;
+        });
+}
+
+function openEventStream(jobId) {
+    if (_refreshSource) _refreshSource.close();
+    _refreshSource = new EventSource('/events?job_id=' + encodeURIComponent(jobId));
+    const logEl = document.getElementById('refresh-log');
+    const statusEl = document.getElementById('refresh-status-line');
+    const progress = document.getElementById('refresh-progress');
+    _refreshSource.addEventListener('log', e => {
+        logEl.textContent += e.data + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+    });
+    _refreshSource.addEventListener('caught_up', e => {
+        statusEl.textContent = 'tailing (replayed ' + e.data + ' buffered lines)';
+    });
+    _refreshSource.addEventListener('ingest_complete', e => {
+        const payload = JSON.parse(e.data);
+        statusEl.textContent = 'finished — status: ' + payload.status + ' (rc=' + payload.return_code + ')';
+        if (progress) progress.setAttribute('value', '100');
+        _refreshSource.close();
+        _refreshSource = null;
+        if (payload.status === 'success') {
+            setTimeout(() => { window.location.reload(); }, 1500);
+        }
+    });
+    _refreshSource.addEventListener('error', e => {
+        statusEl.textContent = 'stream error — see log';
+    });
+}
+
+function closeRefreshDrawer() {
+    const drawer = _getDrawer();
+    if (drawer && typeof drawer.hide === 'function') {
+        drawer.hide();
+    }
+    if (_refreshSource) { _refreshSource.close(); _refreshSource = null; }
+}
+
+// ─── Ticker hover popover positioning ───────────────────────────────
+// HTMX swaps the card HTML in; we just need to show the container
+// near the cursor and hide it on mouseout.
+document.addEventListener('htmx:afterSwap', evt => {
+    if (evt.detail.target && evt.detail.target.id === 'ticker-popover') {
+        const pop = document.getElementById('ticker-popover');
+        pop.hidden = false;
+    }
+});
+document.addEventListener('mousemove', evt => {
+    const pop = document.getElementById('ticker-popover');
+    if (pop && !pop.hidden) {
+        const x = Math.min(evt.clientX + 12, window.innerWidth - 340);
+        const y = Math.min(evt.clientY + 12, window.innerHeight - 240);
+        pop.style.left = x + 'px';
+        pop.style.top = y + 'px';
+    }
+});
+
+// Auto-attach ticker hover popover to every /positions/<ticker> link
+// using event delegation — no need to mutate every template's <a> tag.
+let _hoverTimer = null;
+let _lastFetchedTicker = null;
+document.addEventListener('mouseover', evt => {
+    const a = evt.target && evt.target.closest && evt.target.closest('a[href^="/positions/"]');
+    if (!a) return;
+    if (a.classList.contains('no-popover')) return;
+    const href = a.getAttribute('href');
+    const m = href.match(/^\/positions\/([A-Za-z0-9_.]+)/);
+    if (!m) return;
+    const ticker = m[1].toUpperCase();
+    if (ticker === 'expiration-ladder') return;  // /positions only
+    if (_hoverTimer) clearTimeout(_hoverTimer);
+    _hoverTimer = setTimeout(() => {
+        if (_lastFetchedTicker === ticker) {
+            const pop = document.getElementById('ticker-popover');
+            if (pop && pop.innerHTML.trim()) pop.hidden = false;
+            return;
+        }
+        _lastFetchedTicker = ticker;
+        fetch('/fragment/ticker_card/' + encodeURIComponent(ticker))
+            .then(r => r.text())
+            .then(html => {
+                const pop = document.getElementById('ticker-popover');
+                pop.innerHTML = html;
+                pop.hidden = false;
+                // Execute any inline <script> in the swap (sparkline boot)
+                pop.querySelectorAll('script').forEach(s => {
+                    const ns = document.createElement('script');
+                    ns.textContent = s.textContent;
+                    document.body.appendChild(ns).remove();
+                });
+            })
+            .catch(() => {});
+    }, 250);
+});
+document.addEventListener('mouseout', evt => {
+    if (_hoverTimer) clearTimeout(_hoverTimer);
+    // Only hide when leaving an anchor — keep visible while mouse is over the popup
+    const to = evt.relatedTarget;
+    const pop = document.getElementById('ticker-popover');
+    if (!pop) return;
+    if (to && (pop.contains(to) || (to.closest && to.closest('a[href^="/positions/"]')))) return;
+    setTimeout(() => {
+        if (pop) pop.hidden = true;
+    }, 200);
+});
+
+// ─── Sortable tables ────────────────────────────────────────────────
+// Any <table class="sortable"> with <th data-sort="num|str|date"> can be
+// sorted by clicking the header. Cycle: none → asc → desc.
+document.addEventListener('click', evt => {
+    const th = evt.target && evt.target.closest && evt.target.closest('table.sortable th[data-sort]');
+    if (!th) return;
+    const table = th.closest('table');
+    if (!table) return;
+    const ths = Array.from(table.tHead ? table.tHead.rows[0].cells : []);
+    const colIdx = ths.indexOf(th);
+    if (colIdx < 0) return;
+    const dir = th.getAttribute('data-sort-dir') === 'asc' ? 'desc' : 'asc';
+    ths.forEach(t => t.removeAttribute('data-sort-dir'));
+    th.setAttribute('data-sort-dir', dir);
+    const kind = th.getAttribute('data-sort');
+    const rows = Array.from(table.tBodies[0].rows);
+    rows.sort((a, b) => {
+        const av = (a.cells[colIdx] && a.cells[colIdx].innerText || '').trim();
+        const bv = (b.cells[colIdx] && b.cells[colIdx].innerText || '').trim();
+        let cmp;
+        if (kind === 'num') {
+            const parse = s => {
+                const m = s.replace(/[,\$%×+]/g, '').match(/-?\d+(\.\d+)?/);
+                return m ? parseFloat(m[0]) : (s ? -Infinity : -Infinity);
+            };
+            cmp = parse(av) - parse(bv);
+        } else if (kind === 'date') {
+            cmp = (Date.parse(av) || 0) - (Date.parse(bv) || 0);
+        } else {
+            cmp = av.localeCompare(bv);
+        }
+        return dir === 'asc' ? cmp : -cmp;
+    });
+    const tbody = table.tBodies[0];
+    rows.forEach(r => tbody.appendChild(r));
+});
+
+// ─── Density toggle (Simple / Expert) ────────────────────────────────
+// Adds body class `density-simple` or `density-expert` that CSS rules
+// key off to hide low-signal chrome. Persists in localStorage. Tier 3 UX.
+function setDensity(mode) {
+    document.body.classList.remove('density-simple', 'density-expert');
+    document.body.classList.add('density-' + mode);
+    localStorage.setItem('pb-density', mode);
+    document.querySelectorAll('#density-toggle sl-button').forEach(btn => {
+        if (btn.dataset.density === mode) {
+            btn.setAttribute('variant', 'primary');
+        } else {
+            btn.setAttribute('variant', 'default');
+        }
+    });
+}
+(function initDensity() {
+    const saved = localStorage.getItem('pb-density') || 'expert';
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setDensity(saved));
+    } else {
+        setDensity(saved);
+    }
+})();
+
+// ─── Morning routine checklist (Home page only) ──────────────────────
+// Persisted in localStorage keyed by date, so it resets daily.
+// Dismissable — hidden for the rest of the day but reappears tomorrow.
+function _checklistKey() {
+    const el = document.getElementById('home-checklist');
+    return el ? 'pb-checklist-' + el.dataset.date : null;
+}
+function saveChecklist() {
+    const key = _checklistKey();
+    if (!key) return;
+    const state = {};
+    document.querySelectorAll('#home-checklist li[data-step]').forEach(li => {
+        const cb = li.querySelector('input[type=checkbox]');
+        if (cb) state[li.dataset.step] = cb.checked;
+    });
+    localStorage.setItem(key, JSON.stringify(state));
+}
+function dismissChecklist() {
+    const key = _checklistKey();
+    if (!key) return;
+    localStorage.setItem(key + '-dismissed', '1');
+    const el = document.getElementById('home-checklist');
+    if (el) el.style.display = 'none';
+}
+(function initChecklist() {
+    function apply() {
+        const el = document.getElementById('home-checklist');
+        if (!el) return;
+        const key = _checklistKey();
+        // Show unless dismissed
+        if (localStorage.getItem(key + '-dismissed') === '1') return;
+        el.style.display = '';
+        // Restore checked state
+        const state = JSON.parse(localStorage.getItem(key) || '{}');
+        document.querySelectorAll('#home-checklist li[data-step]').forEach(li => {
+            const cb = li.querySelector('input[type=checkbox]');
+            if (cb && state[li.dataset.step]) cb.checked = true;
+        });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', apply);
+    } else {
+        apply();
+    }
+})();
+
+// ─── Theme switcher ──────────────────────────────────────────────────
+// Persists choice in localStorage; toggles data-theme on <html> + Shoelace
+// class. Themes defined in app.css under html[data-theme="..."] selectors.
+(function() {
+  const THEME_META = {
+    'dark':             {icon: '🌙', label: 'Dark'},
+    'light':            {icon: '☀️', label: 'Light'},
+    'infographic':      {icon: '📰', label: 'Infographic'},
+    'solarized-dark':   {icon: '🌒', label: 'Solarized Dark'},
+    'solarized-light':  {icon: '🌞', label: 'Solarized Light'},
+  };
+  function applyTheme(name) {
+    const meta = THEME_META[name] || THEME_META['dark'];
+    const html = document.documentElement;
+    html.setAttribute('data-theme', name);
+    html.classList.remove('sl-theme-dark', 'sl-theme-light');
+    if (name === 'light' || name === 'solarized-light' || name === 'infographic') {
+      html.classList.add('sl-theme-light');
+    } else {
+      html.classList.add('sl-theme-dark');
+    }
+    localStorage.setItem('pb-theme', name);
+    const iconEl = document.getElementById('theme-current-icon');
+    const labelEl = document.getElementById('theme-current-label');
+    if (iconEl) iconEl.textContent = meta.icon;
+    if (labelEl) labelEl.textContent = meta.label;
+    // Mark the active menu item as checked. Shoelace's sl-menu-item supports
+    // `checked` as a reflected property on type="checkbox"; we toggle it so
+    // the dropdown shows a checkmark next to the current theme.
+    document.querySelectorAll('#theme-menu sl-menu-item').forEach(item => {
+      item.checked = (item.value === name);
+    });
+  }
+  function init() {
+    const current = localStorage.getItem('pb-theme') || 'dark';
+    applyTheme(current);
+    const menu = document.getElementById('theme-menu');
+    if (menu) {
+      menu.addEventListener('sl-select', (e) => {
+        const val = e.detail.item.value;
+        if (val) applyTheme(val);
+      });
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+
+</body>
+</html>

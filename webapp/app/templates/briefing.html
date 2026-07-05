@@ -1,0 +1,597 @@
+{% extends "base.html" %}
+{% from "_macros/tech_card.html" import tech_card %}
+{# Task #10 — unified ticker cards on every tab. Imported WITH CONTEXT so
+   the macro can reach resolve_ticker/option_pl_pct/extras_tone helpers,
+   parkev_chip/tier_badge renderers, briefing + counterpoint_keys. #}
+{% from "_macros/unified_card.html" import unified_card with context %}
+{# Task #13 — collapsible legend for BB/RSI/MACD/SR/verdicts, one click to
+   expand. Shown at the top of the page so users don't have to remember
+   what BB 85% or "Death cross" means. #}
+{% from "_macros/tech_legend.html" import tech_legend %}
+{% block title %}Briefing {{ briefing.date.isoformat() }}{% endblock %}
+
+{# Sort chip strip — client-side reorder of a .uc-grid. Default = server
+   order (pipeline priority). Numeric keys sort descending; ticker sorts
+   ascending; cards missing the key sort last. #}
+{% macro sort_strip(grid_id, keys) %}
+<div class="uc-sort" data-target="{{ grid_id }}">
+    <span class="uc-sort-label">Sort:</span>
+    <button type="button" class="uc-sort-chip uc-sort-active" onclick="ucSort('{{ grid_id }}', 'default', this)">Default</button>
+    {% for key, label in keys %}
+    <button type="button" class="uc-sort-chip" onclick="ucSort('{{ grid_id }}', '{{ key }}', this)">{{ label }}</button>
+    {% endfor %}
+</div>
+{% endmacro %}
+
+{% block content %}
+<hgroup>
+    <h1>Briefing &mdash; {{ briefing.date.isoformat() }}</h1>
+    <p class="muted">
+        Regime <strong>{{ briefing.regime or "—" }}</strong> ·
+        NLV <span class="num">${{ "{:,.0f}".format(briefing.nlv) if briefing.nlv else "—" }}</span> ·
+        Cash <span class="num">${{ "{:,.0f}".format(briefing.cash) if briefing.cash else "—" }}</span>
+        ({{ "{:.1f}%".format(briefing.cash_pct * 100) if briefing.cash_pct is not none else "—" }})
+    </p>
+</hgroup>
+
+{# Task #13 — technical-indicator legend, collapsible. #}
+{{ tech_legend() }}
+
+{# ─── Date navigator ─── #}
+<div style="display: flex; align-items: center; gap: 1rem; margin: 1rem 0 1.5rem; flex-wrap: wrap;">
+    {% set neighbors = neighbor_dates %}
+    <div style="display: flex; align-items: center; gap: .5rem;">
+        {% if neighbors.prev %}
+            <sl-button size="small" variant="default" href="/briefing/{{ neighbors.prev }}">← {{ neighbors.prev }}</sl-button>
+        {% else %}
+            <sl-button size="small" variant="default" disabled>← prev</sl-button>
+        {% endif %}
+        {% if neighbors.next %}
+            <sl-button size="small" variant="default" href="/briefing/{{ neighbors.next }}">{{ neighbors.next }} →</sl-button>
+        {% else %}
+            <sl-button size="small" variant="default" disabled>next →</sl-button>
+        {% endif %}
+    </div>
+    <label style="display: flex; align-items: center; gap: .5rem; font-size: 12px; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: .06em;">
+        Jump to date
+        <sl-input
+            type="date"
+            size="small"
+            value="{{ briefing.date.isoformat() }}"
+            id="briefing-date-picker"
+            onsl-change="if (this.value) window.location.href = '/briefing/' + this.value;"
+            style="width: 11rem;">
+        </sl-input>
+    </label>
+    <a href="/" class="muted" style="margin-left: auto;">← Dashboard</a>
+</div>
+
+<sl-tab-group>
+    {% if briefing.actions %}
+    <sl-tab slot="nav" panel="actions">Actions
+        <sl-badge variant="warning" pill style="margin-left: .4rem;">{{ briefing.actions|length }}</sl-badge>
+    </sl-tab>
+    {% endif %}
+    <sl-tab slot="nav" panel="equities">Equities
+        <sl-badge variant="neutral" pill style="margin-left: .4rem;">{{ briefing.equity_reviews|length }}</sl-badge>
+    </sl-tab>
+    <sl-tab slot="nav" panel="options">Options
+        <sl-badge variant="neutral" pill style="margin-left: .4rem;">{{ briefing.options_reviews|length }}</sl-badge>
+    </sl-tab>
+    {# Task #17 — Long-term and Strategy tabs retired. Long-term
+       opportunities already merge into Ideas (hard rule #32); strategy
+       upgrades redistribute: CC/collar proposals → Options tab, sub-lot
+       completions → Ideas. Nothing is dropped. #}
+    {% if merged_ideas %}
+    <sl-tab slot="nav" panel="ideas">💎 Ideas &amp; Candidates
+        <sl-badge variant="neutral" pill style="margin-left: .4rem;">{{ merged_ideas|length }}</sl-badge>
+    </sl-tab>
+    {% endif %}
+    {# Task #7 — infographic-style per-ticker technical read cards.
+       Gated on deep_count (not count): snapshots produced before the
+       deep-read pipeline landed have technicals.json without any `deep`
+       payload — an all-skeleton tab would be pure noise. #}
+    {% if tech_read and tech_read.deep_count %}
+    <sl-tab slot="nav" panel="technical">🎯 Technical Read
+        <sl-badge variant="neutral" pill style="margin-left: .4rem;">{{ tech_read.count }}</sl-badge>
+    </sl-tab>
+    {% endif %}
+    {% set _rot = briefing.rotation_opportunities or {} %}
+    {% set _rot_total = (_rot.get('stats', {}).get('equity_count', 0) + _rot.get('stats', {}).get('options_count', 0)) %}
+    {% if _rot_total > 0 %}
+    <sl-tab slot="nav" panel="rotations">🔁 Rotations
+        <sl-badge variant="warning" pill style="margin-left: .4rem;">{{ _rot_total }}</sl-badge>
+    </sl-tab>
+    {% endif %}
+    {# Task #16 — Benchmark & Attribution tab. Always shown: when the
+       briefing has no benchmark_report (older snapshot / feature off /
+       insufficient history) the panel renders an explanatory placeholder
+       instead of being hidden — missing data must never 500 or vanish. #}
+    <sl-tab slot="nav" panel="benchmark">📊 Benchmark</sl-tab>
+    {# Task #53 — Fable's second opinion tab. Only shown when the review
+       was actually generated for this date (v1 critic or v2 advisor —
+       webapp doesn't distinguish, they render into the same section). #}
+    {% if fable_review and fable_review.present %}
+    <sl-tab slot="nav" panel="fable">🔍 Fable</sl-tab>
+    {% endif %}
+    {# Consistency demoted from a tab to an anchor link in the page footer —
+       it's a system-health check, not a decision surface. If the pipeline
+       ever finds a real inconsistency, this can be promoted back. #}
+
+    {% if briefing.actions %}
+    <sl-tab-panel name="actions">
+        <section id="actions">
+            <h2 style="margin-top: .5rem;">Action queue ({{ briefing.actions|length }})</h2>
+            {{ sort_strip("uc-grid-actions", [("age", "Age"), ("ticker", "Ticker")]) }}
+            <div class="uc-grid" id="uc-grid-actions">
+                {% for a in briefing.actions %}
+                {{ unified_card(a, tech_by_ticker.get(resolve_ticker(a, 'action')), 'action') }}
+                {% endfor %}
+            </div>
+        </section>
+    </sl-tab-panel>
+    {% endif %}
+
+    <sl-tab-panel name="equities">
+        <section id="equity-reviews">
+            <h2 style="margin-top: .5rem;">Equity reviews ({{ briefing.equity_reviews|length }})</h2>
+            {% if briefing.equity_reviews %}
+            {{ sort_strip("uc-grid-equities", [("pl", "P&L"), ("weight", "Weight"), ("ticker", "Ticker")]) }}
+            <div class="uc-grid" id="uc-grid-equities">
+                {% for r in briefing.equity_reviews %}
+                {{ unified_card(r, tech_by_ticker.get(resolve_ticker(r, 'equity')), 'equity') }}
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">No equity reviews in this briefing.</div>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+
+    <sl-tab-panel name="options">
+        <section id="options-reviews">
+            <h2 style="margin-top: .5rem;">Options reviews ({{ briefing.options_reviews|length }})</h2>
+            {% if briefing.options_reviews %}
+            {{ sort_strip("uc-grid-options", [("pl", "P&L"), ("dte", "DTE"), ("ticker", "Ticker")]) }}
+            <div class="uc-grid" id="uc-grid-options">
+                {% for o in briefing.options_reviews %}
+                {{ unified_card(o, tech_by_ticker.get(resolve_ticker(o, 'option')), 'option') }}
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">No options reviews in this briefing.</div>
+            {% endif %}
+
+            {# Task #17 — strategy proposals that don't attach to an open
+               option position (tier policy notes, strangles, CC/collar on
+               names with no open option). Moved here from the retired
+               Strategy tab; never dropped (hard rule #24). #}
+            {% if strategy_standalone %}
+            <h3 style="margin: 1.25rem 0 .6rem;">Strategy proposals ({{ strategy_standalone|length }})</h3>
+            <p class="muted" style="font-size: 12px;">
+                Per-name strategy proposals and policy notes. Covered-call /
+                collar proposals on names with an open option position render
+                inline on that position's card above.
+            </p>
+            <div class="uc-grid" id="uc-grid-strategy">
+                {% for s in strategy_standalone %}
+                {{ unified_card(s, tech_by_ticker.get(resolve_ticker(s, 'strategy')), 'strategy') }}
+                {% endfor %}
+            </div>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+
+    {% if merged_ideas %}
+    <sl-tab-panel name="ideas">
+        <section id="ideas-and-candidates">
+            <h2 style="margin-top: .5rem;">💎 Ideas &amp; Candidates ({{ merged_ideas|length }})</h2>
+            <p class="muted" style="font-size: 12px; margin-bottom: 1rem;">
+                Merged from <code>new_ideas</code> (screener), <code>long_term_opportunities</code>
+                (LONG_DATED_CSP · BUY · ADD · LT_ADD · PULLBACK_CSP · plus deferred / skipped reasons)
+                and sub-lot completions from <code>strategy_upgrades</code> (task #17).
+                Hard rule #32 — capacity-gated opportunities are surfaced as ⏸ deferred, never hidden.
+            </p>
+            {# Task #17 — client-side filter chips. Filters by the
+               data-idea-* attributes on each card; "All" restores. #}
+            <div class="uc-sort uc-idea-filter" data-target="uc-grid-ideas">
+                <span class="uc-sort-label">Filter:</span>
+                <button type="button" class="uc-sort-chip uc-sort-active" onclick="ucIdeaFilter('all', this)">All</button>
+                <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('short', this)">Short-dated (≤ 60 DTE)</button>
+                <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('long', this)">Long-dated (&gt; 60 DTE)</button>
+                <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('sublot', this)">Sub-lot</button>
+                <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('deferred', this)">Deferred</button>
+                <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('skipped', this)">Skipped</button>
+            </div>
+            {{ sort_strip("uc-grid-ideas", [("ticker", "Ticker")]) }}
+            <div class="uc-grid" id="uc-grid-ideas">
+                {% for n in merged_ideas %}
+                {{ unified_card(n, tech_by_ticker.get(resolve_ticker(n, 'idea')), 'idea') }}
+                {% endfor %}
+            </div>
+        </section>
+    </sl-tab-panel>
+    {% endif %}
+
+    {# ─── Technical Read tab (task #7) ───
+       One infographic-style card per ticker in the day's technicals.json,
+       grouped by portfolio role. Position tickers missing a deep read get
+       an explicit "chart data unavailable" skeleton (hard rule #19).
+       UNCHANGED by task #10 — this tab IS the base card, no overlay. #}
+    {% if tech_read and tech_read.deep_count %}
+    <sl-tab-panel name="technical">
+        <section id="technical-read">
+            <h2 style="margin-top: .5rem;">🎯 Technical Read ({{ tech_read.deep_count }}/{{ tech_read.count }} with deep data)</h2>
+            <p class="muted" style="font-size: 12px; margin-bottom: 1rem;">
+                Deep per-ticker read (BB 20/2 · MACD 12/26/9 · ATR 14 · SMA slopes ·
+                52w range · drawdown · returns), computed from this cycle's OHLC pull.
+                Verdicts: short-term = 1-4 weeks, long-term = 3-12 months.
+            </p>
+            {% for group in tech_read.groups %}
+            <h3 style="margin: 1.25rem 0 .6rem;">{{ group.title }} ({{ group.cards|length }})</h3>
+            <div class="tc-grid">
+                {% for t in group.cards %}{{ tech_card(t) }}{% endfor %}
+            </div>
+            {% endfor %}
+            {% if tech_read.skipped %}
+            <p class="muted" style="font-size: 12px; margin-top: 1rem;">
+                <em>{{ tech_read.skipped }} watchlist name(s) without a deep read this cycle
+                are covered by the Thematic Scout pulse and not shown here.</em>
+            </p>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+    {% endif %}
+
+    {# ─── Rotation Advisor tab ───
+       Cross-references current holdings against theme peers + Parkev
+       + FV + FINVIZ to surface "better than what I hold" swaps.
+       Three flavors: equity rotation, option rotation, capital plan. #}
+    {% if _rot_total > 0 %}
+    <sl-tab-panel name="rotations">
+        <section id="rotations">
+            <h2 style="margin-top: .5rem;">🔁 Rotation Opportunities</h2>
+            <p class="muted">
+                Cross-references your current book against theme peers scored on
+                RSI · IV · drawdown · Parkev tier · fair value · S/R confluence.
+                Only shows swaps where the alternative scores meaningfully higher.
+            </p>
+
+            {% if _rot.capital_plan %}
+            {% for plan in _rot.capital_plan %}
+            <div class="rotation-plan">
+                <header>
+                    <strong>💰 Capital Reallocation Plan</strong>
+                    <span class="muted">
+                        {{ plan.summary.equity_swaps }} equity swap(s) ·
+                        {{ plan.summary.option_swaps }} option reset(s) ·
+                        frees ~{{ plan.summary.freed_pct_nlv }}% NLV
+                    </span>
+                </header>
+                <p class="rotation-rationale">{{ plan.rationale }}</p>
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            {% if _rot.equity %}
+            <h3 style="margin-top: 1.25rem;">📈 Equity swaps ({{ _rot.equity|length }})</h3>
+            <div class="uc-grid" id="uc-grid-rotations-equity">
+                {% for r in _rot.equity %}
+                {{ unified_card(r, tech_by_ticker.get(resolve_ticker(r, 'rotation')), 'rotation', {'mode': 'equity'}) }}
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if _rot.options %}
+            <h3 style="margin-top: 1.25rem;">🔄 Option rotations ({{ _rot.options|length }})</h3>
+            <p class="muted" style="font-size: 12px;">Positions at ≥30% capture on names where RSI + IV are still favorable — reset the premium clock.</p>
+            <div class="uc-grid" id="uc-grid-rotations-options">
+                {% for r in _rot.options %}
+                {{ unified_card(r, tech_by_ticker.get(resolve_ticker(r, 'rotation')), 'rotation', {'mode': 'option'}) }}
+                {% endfor %}
+            </div>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+    {% endif %}
+
+    {# ─── Task #16 — Benchmark & Attribution tab panel ───
+       Renders alpha-vs-SPY table + P/L attribution buckets + a portfolio
+       vs SPY cumulative-return chart. All data comes from the briefing
+       JSON's benchmark_report; missing data renders an explanatory
+       placeholder (never a 500, never hidden). #}
+    <sl-tab-panel name="benchmark">
+        <section id="benchmark">
+            <h2 style="margin-top: .5rem;">📊 Benchmark &amp; Attribution</h2>
+            {% set _br = briefing.benchmark_report or {} %}
+            {% set _bench = _br.get('benchmark') or {} %}
+            {% set _attr = _br.get('attribution') or {} %}
+
+            {% if _bench.get('status') == 'ok' and _bench.get('windows') %}
+            <p class="muted">
+                vs <strong>{{ _bench.get('benchmark_ticker', 'SPY') }}</strong>
+                · tracking since {{ _bench.get('inception_date') or '—' }}
+                · {{ _bench.get('snapshot_count', 0) }} snapshots
+            </p>
+            <table>
+                <thead>
+                    <tr><th>Window</th><th>Portfolio</th>
+                        <th>{{ _bench.get('benchmark_ticker', 'SPY') }}</th><th>Alpha</th></tr>
+                </thead>
+                <tbody>
+                    {% for w in _bench.get('windows', []) %}
+                    <tr>
+                        <td>{{ w.get('name') }}</td>
+                        {% if w.get('portfolio_return_pct') is not none %}
+                        <td class="num">{{ "%+.1f%%"|format(w.get('portfolio_return_pct')) }}</td>
+                        <td class="num">{{ "%+.1f%%"|format(w.get('spy_return_pct')) if w.get('spy_return_pct') is not none else "n/a" }}</td>
+                        {% set _a = w.get('alpha_pct') %}
+                        <td class="num">
+                            {% if _a is not none %}
+                            <strong style="color: {{ 'var(--color-red, #EF4444)' if _a < 0 else 'var(--color-green, #34D399)' }};">
+                                {{ "%+.1f%%"|format(_a) }}</strong>{{ " ⚠️" if _a < 0 else "" }}
+                            {% else %}n/a{% endif %}
+                        </td>
+                        {% else %}
+                        <td class="muted" colspan="3">n/a — {{ w.get('note') or 'no data' }}</td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if _bench.get('note') %}
+            <p class="muted" style="font-size: .82rem;"><em>{{ _bench.get('note') }}</em></p>
+            {% endif %}
+
+            <div class="chart-card" style="margin-top: 1rem;">
+                <div class="chart-target" data-chart-url="/charts/benchmark.json?date={{ briefing.date.isoformat() }}" style="min-height: 320px;"></div>
+            </div>
+            {% else %}
+            <p class="muted">
+                {% if _bench.get('status') == 'insufficient_history' %}
+                Insufficient snapshot history for a benchmark read —
+                {{ _bench.get('note') or 'need more daily snapshots' }}.
+                {% else %}
+                No benchmark data for this briefing (older snapshot, feature
+                disabled, or data unavailable that cycle).
+                {% endif %}
+            </p>
+            {% endif %}
+
+            {% if _attr.get('status') == 'ok' and _attr.get('periods') %}
+            <h3 style="margin-top: 1.4rem;">P/L attribution</h3>
+            <p class="muted" style="font-size: .82rem;">
+                Inferred from snapshot-to-snapshot position deltas — estimates,
+                not a trade ledger. Large "unattributed" = data inconsistency.
+            </p>
+            <table>
+                <thead>
+                    <tr><th>Period</th><th>ΔNLV</th><th>Realized eq</th>
+                        <th>Unrealized eq</th><th>Premium (net)</th>
+                        <th>Option MTM</th><th>Assignments</th><th>Hedges</th>
+                        <th>Int/Div</th><th>Unattributed</th><th>Cash drag</th></tr>
+                </thead>
+                <tbody>
+                    {% for p in _attr.get('periods', []) %}
+                    {% set _b = p.get('buckets') or {} %}
+                    <tr>
+                        <td>{{ p.get('name') }} <span class="muted">({{ p.get('start_date') }})</span></td>
+                        <td class="num">{{ "${:+,.0f}".format(p.get('nlv_change')) if p.get('nlv_change') is not none else "—" }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('realized_equity', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('unrealized_equity', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('option_premium_net', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('option_mtm', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('assignment_pnl', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('hedge_pnl', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(_b.get('interest_dividends', 0)) }}</td>
+                        <td class="num">{{ "${:+,.0f}".format(p.get('unattributed', 0)) }}</td>
+                        <td class="num">
+                            {% set _cd = (p.get('cash_drag') or {}).get('opportunity_cost') %}
+                            {{ "-${:,.0f}".format(_cd) if _cd is not none and _cd >= 0 else ("+${:,.0f}".format(-_cd) if _cd is not none else "—") }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if _attr.get('note') %}
+            <p class="muted" style="font-size: .82rem;"><em>{{ _attr.get('note') }}</em></p>
+            {% endif %}
+            {% elif _attr %}
+            <p class="muted">P/L attribution unavailable — {{ _attr.get('note') or _attr.get('status') or 'no data' }}.</p>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+
+    {# Task #53 — Fable review tab panel. Renders the four canonical
+       sub-sections parsed out of the briefing markdown, with per-section
+       styling so cross-section observations get more visual weight than
+       the improvement one-liner. Metadata footer shows which flavor
+       generated it (v1 critic or v2 advisor + memory). #}
+    {% if fable_review and fable_review.present %}
+    <sl-tab-panel name="fable">
+        <section id="fable-review" style="max-width: 68ch;">
+            <h2 style="margin-top: .5rem;">🔍 Fable's second opinion</h2>
+            <p class="muted" style="margin-top: -.4rem;">
+                An LLM read over today's briefing. Observations only —
+                the deterministic pipeline stays source-of-truth for
+                trade recommendations. Fail-open: any API error still
+                ships the briefing.
+            </p>
+
+            {% set _sec = fable_review.sections %}
+
+            {% if _sec.cross_section %}
+            <h3 style="margin-top: 1.4rem;">Cross-section observations</h3>
+            <ul class="fable-list">
+                {% for bullet in _sec.cross_section %}
+                <li>{{ bullet | inline_md }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if _sec.themes %}
+            <h3 style="margin-top: 1.4rem;">Themes I notice</h3>
+            <ul class="fable-list">
+                {% for bullet in _sec.themes %}
+                <li>{{ bullet | inline_md }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if _sec.contradictions %}
+            <h3 style="margin-top: 1.4rem;">Contradictions or stale items</h3>
+            <ul class="fable-list">
+                {% for bullet in _sec.contradictions %}
+                <li>{{ bullet | inline_md }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if _sec.improvement %}
+            <h3 style="margin-top: 1.4rem;">One thing that would meaningfully improve the book</h3>
+            <blockquote style="border-left: 3px solid var(--sl-color-primary-500);
+                               padding: .4rem .8rem; margin: .5rem 0;
+                               color: var(--sl-color-neutral-800);
+                               font-style: italic;">
+                {{ _sec.improvement[0] | inline_md }}
+            </blockquote>
+            {% endif %}
+
+            {# If parsing produced no sections (raw section present but
+               format drifted), fall back to rendering the raw text so
+               nothing is silently swallowed. #}
+            {% if not _sec.cross_section and not _sec.themes
+                  and not _sec.contradictions and not _sec.improvement
+                  and fable_review.raw_text %}
+            <div style="white-space: pre-wrap; margin-top: 1rem;
+                        color: var(--sl-color-neutral-800);">{{ fable_review.raw_text | inline_md }}</div>
+            {% endif %}
+
+            {# Metadata footer — model + elapsed + flavor hint. #}
+            {% set _meta = fable_review.metadata or {} %}
+            {% if _meta %}
+            <p class="muted" style="margin-top: 1.8rem; font-size: .82rem;">
+                Model:
+                <code>{{ _meta.model or 'unknown' }}</code>
+                {% if _meta.elapsed_ms %} · generated in {{ _meta.elapsed_ms }} ms{% endif %}
+                {% if _meta.review_count_before is defined %}
+                {% if _meta.review_count_before and _meta.review_count_before > 0 %}
+                · advisor + memory ({{ _meta.review_count_before }}d)
+                {% else %}
+                · advisor · first-run (no memory yet)
+                {% endif %}
+                {% endif %}
+                {% if _meta.request_id %} · <code>{{ _meta.request_id }}</code>{% endif %}
+            </p>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+    {% endif %}
+
+    {% if briefing.consistency_report %}
+    <sl-tab-panel name="consistency">
+        <section>
+            <h2 style="margin-top: .5rem;">Consistency report</h2>
+            <p class="muted">
+                Total positions: <span class="num">{{ briefing.consistency_report.total_positions or 0 }}</span>
+                · Changed: <span class="num">{{ briefing.consistency_report.recommendations_changed or 0 }}</span>
+                · Inconsistencies: <span class="num">{{ briefing.consistency_report.inconsistencies_found or 0 }}</span>
+            </p>
+            {% if briefing.consistency_report.note %}
+            <p class="muted"><em>{{ briefing.consistency_report.note }}</em></p>
+            {% endif %}
+        </section>
+    </sl-tab-panel>
+    {% endif %}
+</sl-tab-group>
+
+{# Task #53 — when the URL hash is #fable (link from home page callout),
+   auto-activate the Fable tab so the user lands in the right pane. Uses
+   Shoelace's `show()` method on <sl-tab-group>. Fires on load AND on
+   hashchange (so back/forward navigation works). Fail-silent if the tab
+   isn't present. #}
+<script>
+(function () {
+    function activateTabFromHash() {
+        var hash = (window.location.hash || "").replace(/^#/, "");
+        if (!hash) return;
+        var group = document.querySelector("sl-tab-group");
+        if (!group) return;
+        // Sections we know about that map 1:1 to tab panel names
+        var mapping = { fable: "fable", ideas: "ideas", rotations: "rotations",
+                        actions: "actions", equities: "equities", options: "options",
+                        // Task #17 — old deep links keep working: long-term
+                        // content lives in Ideas, strategy content in Options.
+                        "long-term": "ideas", strategy: "options",
+                        technical: "technical", consistency: "consistency",
+                        benchmark: "benchmark" };
+        var panel = mapping[hash];
+        if (!panel) return;
+        // Shoelace's show() is async — call after ready
+        (group.updateComplete || Promise.resolve()).then(function () {
+            try { group.show(panel); } catch (e) { /* fail silent */ }
+        });
+    }
+    window.addEventListener("load", activateTabFromHash);
+    window.addEventListener("hashchange", activateTabFromHash);
+})();
+
+// Task #10 — sort chip strip for unified-card grids. Reorders the cards
+// in place; "default" restores server order (cached on first sort).
+// Numeric keys (pl / weight / dte / age) sort descending; ticker sorts
+// ascending; cards missing the key sort last. Fail-silent throughout.
+function ucSort(gridId, key, btn) {
+    var grid = document.getElementById(gridId);
+    if (!grid) return;
+    var cards = Array.prototype.slice.call(grid.querySelectorAll(":scope > .uc-card"));
+    if (!grid.dataset.ucIndexed) {
+        cards.forEach(function (c, i) { c.dataset.idx = String(i); });
+        grid.dataset.ucIndexed = "1";
+    }
+    cards.sort(function (a, b) {
+        if (key === "default") return (+a.dataset.idx) - (+b.dataset.idx);
+        if (key === "ticker") return (a.dataset.ticker || "￿").localeCompare(b.dataset.ticker || "￿");
+        var av = parseFloat(a.dataset[key]);
+        var bv = parseFloat(b.dataset[key]);
+        var an = isNaN(av), bn = isNaN(bv);
+        if (an && bn) return (+a.dataset.idx) - (+b.dataset.idx);
+        if (an) return 1;
+        if (bn) return -1;
+        return bv - av;
+    });
+    cards.forEach(function (c) { grid.appendChild(c); });
+    var strip = document.querySelector('.uc-sort[data-target="' + gridId + '"]:not(.uc-idea-filter)');
+    if (strip) {
+        strip.querySelectorAll(".uc-sort-chip").forEach(function (b) { b.classList.remove("uc-sort-active"); });
+        if (btn) btn.classList.add("uc-sort-active");
+    }
+}
+
+// Task #17 — Ideas filter chips. Toggles card visibility by the
+// data-idea-* attributes stamped on each idea card by unified_card.html.
+// Filtering is display-only (server order preserved); "All" restores.
+// Fail-silent throughout — a missing grid or attribute never throws.
+function ucIdeaFilter(filter, btn) {
+    var grid = document.getElementById("uc-grid-ideas");
+    if (!grid) return;
+    var cards = Array.prototype.slice.call(grid.querySelectorAll(":scope > .uc-card"));
+    cards.forEach(function (c) {
+        var kind = (c.dataset.ideaKind || "").toUpperCase();
+        var status = (c.dataset.ideaStatus || "").toLowerCase();
+        var bucket = (c.dataset.ideaBucket || "").toLowerCase();
+        var show = true;
+        if (filter === "short") show = bucket === "short";
+        else if (filter === "long") show = bucket === "long";
+        else if (filter === "sublot") show = kind === "SUB_LOT";
+        else if (filter === "deferred") show = status === "deferred";
+        else if (filter === "skipped") show = status === "skipped" || status === "capacity_blocked";
+        c.style.display = show ? "" : "none";
+    });
+    var strip = document.querySelector(".uc-idea-filter");
+    if (strip) {
+        strip.querySelectorAll(".uc-sort-chip").forEach(function (b) { b.classList.remove("uc-sort-active"); });
+        if (btn) btn.classList.add("uc-sort-active");
+    }
+}
+</script>
+{% endblock %}

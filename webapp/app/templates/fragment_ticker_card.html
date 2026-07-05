@@ -1,0 +1,57 @@
+{# Ticker hover card — HTMX swap target.
+   Self-contained: includes Parkev chip, tier badge, sparkline placeholder,
+   price + latest mentions. Renders inside #ticker-popover. #}
+<article class="ticker-card">
+    <header>
+        <h4 style="margin: 0;">
+            <a href="/positions/{{ ticker }}">{{ ticker }}</a>
+            {{ parkev_chip(ticker) | safe }}
+            {{ tier_badge(ticker) | safe }}
+        </h4>
+        {% if current_price %}
+        <p class="muted" style="margin: .1rem 0 0; font-size: 12px;">
+            <span class="num">${{ "{:,.2f}".format(current_price) }}</span> as of {{ current_date }}
+        </p>
+        {% endif %}
+    </header>
+
+    <div class="chart-target sparkline-mini"
+         data-chart-url="/charts/sparkline/{{ ticker }}.json?days=30"
+         style="min-height: 120px; max-height: 120px;"></div>
+
+    {% if mentions %}
+    <div class="ticker-card-mentions">
+        <div class="eyebrow" style="margin: 0 0 .35rem 0;">Latest mentions</div>
+        <ul style="margin: 0; padding-left: 1.2rem;">
+            {% for m in mentions[:3] %}
+            <li style="font-size: 12px; margin-bottom: .15rem;">
+                <span class="muted">{{ m.date }}</span>
+                <span class="rec-{{ m.kind or m.recommendation }}" title="{{ m.kind or m.recommendation or '' }}"><span class="action-icon">{{ (m.kind or m.recommendation) | action_icon }}</span> <strong>{{ m.kind or m.recommendation or "—" }}</strong></span>
+                — {{ (m.detail or "")[:80] | inline_md }}{% if m.detail and m.detail|length > 80 %}…{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% if mentions|length > 3 %}
+        <p style="margin: .25rem 0 0; font-size: 11px;">
+            <a href="/positions/{{ ticker }}">View all {{ mentions|length }} mentions →</a>
+        </p>
+        {% endif %}
+    </div>
+    {% else %}
+    <p class="muted" style="font-size: 12px;">No briefing mentions yet.</p>
+    {% endif %}
+
+    <script>
+        // Bootstrap any sparkline targets that arrived via HTMX swap.
+        if (typeof Plotly !== 'undefined') {
+            document.querySelectorAll('.sparkline-mini[data-chart-url]:not([data-bootstrapped])').forEach(function (n) {
+                n.setAttribute('data-bootstrapped', '1');
+                fetch(n.getAttribute('data-chart-url'))
+                    .then(function (r) { return r.json(); })
+                    .then(function (spec) {
+                        Plotly.newPlot(n, spec.data || [], spec.layout || {}, {responsive: true, displayModeBar: false});
+                    });
+            });
+        }
+    </script>
+</article>

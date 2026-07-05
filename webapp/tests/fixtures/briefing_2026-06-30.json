@@ -1,0 +1,136 @@
+{
+  "date": "2026-06-30",
+  "regime": "RISK_ON",
+  "nlv": 1000000.00,
+  "cash": 50000.00,
+  "snapshot_dir": "tests/fixtures/snapshots/2026-06-30",
+  "directives_active_count": 3,
+  "directives_expired_count": 0,
+  "equity_reviews": [
+    {
+      "ticker": "NVDA",
+      "price": 200.0,
+      "qty": 500.0,
+      "market_value": 100000.0,
+      "weight": 0.10,
+      "pl_pct": 0.20,
+      "thesis_status": "ACTIVE",
+      "technical_status": "UPTREND",
+      "recommendation": "HOLD",
+      "rationale": "Thesis intact.",
+      "third_party_rec": "TOP 12 · High",
+      "matrix_cell_id": "STUB_HOLD"
+    },
+    {
+      "ticker": "AMZN",
+      "price": 240.0,
+      "qty": 100.0,
+      "market_value": 24000.0,
+      "weight": 0.024,
+      "pl_pct": 0.18,
+      "thesis_status": "ACTIVE",
+      "technical_status": "UPTREND",
+      "recommendation": "HOLD",
+      "rationale": "Fundamentals strong.",
+      "third_party_rec": "TOP 12",
+      "matrix_cell_id": "STUB_HOLD"
+    }
+  ],
+  "options_reviews": [
+    {
+      "underlying": "NVDA",
+      "contract": "NVDA_PUT_180_20260918",
+      "type": "PUT",
+      "qty": -1.0,
+      "strike": 180.0,
+      "expiration": "2026-09-18",
+      "current_mid": 3.20,
+      "entry_price": 6.00,
+      "days_to_expiry": 80,
+      "iv_rank": 50.0,
+      "recommendation": "TAKE_PROFIT",
+      "rationale": "+47% captured; consider close.",
+      "matrix_cell_id": "PUT_NORMAL_OTM_TAKE_PROFIT",
+      "roll_target": null,
+      "roll_candidates": [],
+      "warnings": []
+    }
+  ],
+  "new_ideas": [
+    {
+      "ticker": "CAPACITY",
+      "name": "",
+      "source": "capacity_gates_blocked",
+      "instruction": null,
+      "rationale": "New CSP entries blocked: coverage 0.07x < 0.50x",
+      "capacity_blocked": true
+    }
+  ],
+  "long_term_opportunities": [
+    {
+      "kind": "LONG_DATED_CSP",
+      "ticker": "AMZN",
+      "trigger_reasons": ["RSI 45", "third-party BUY"],
+      "concrete_trade": "SELL AMZN $230P Jan 16 '27 — collateral $23,000",
+      "rationale": "Tier-3 BUY, RSI favorable, support at $228.",
+      "yield_or_cost": "premium $620",
+      "source": "long_term_opportunities"
+    },
+    {
+      "kind": "DEFERRED_ADD_HAS_CSP",
+      "ticker": "META",
+      "trigger_reasons": ["RSI 42", "third-party BUY"],
+      "concrete_trade": "BUY ~$5,000 of META",
+      "rationale": "You already hold a short put at $570 — let the CSP work.",
+      "yield_or_cost": "",
+      "source": "long_term_opportunities"
+    },
+    {
+      "kind": "EXIT",
+      "ticker": "TSLA",
+      "trigger_reasons": ["third-party rec: SELL"],
+      "concrete_trade": "SELL TSLA — exit position",
+      "rationale": "Third-party downgrade. Not an idea, excluded from Ideas tab.",
+      "source": "recommendation-list-fetcher"
+    }
+  ],
+  "strategy_upgrades": [
+    {
+      "type": "tier_a_no_cc",
+      "underlying": "NVDA",
+      "tier": "A",
+      "shares_held": 500,
+      "current_price": 200.0,
+      "current_weight_pct": 10.0,
+      "rationale": "Tier A: no CC recommendations."
+    }
+  ],
+  "consistency_report": {
+    "total_positions": 3,
+    "recommendations_unchanged": 2,
+    "recommendations_changed": 1,
+    "changes_with_trigger": 0,
+    "inconsistencies_found": 0,
+    "note": "Test V2 briefing fixture (with actions array)."
+  },
+  "actions": [
+    {
+      "key": "CLOSE:NVDA_PUT_180_20260918",
+      "kind": "CLOSE",
+      "ident": "NVDA_PUT_180_20260918",
+      "summary": "**CLOSE** NVDA_PUT_180_20260918 — +47% ($+280); buy-to-close limit $3.20",
+      "first_flagged": "2026-06-28",
+      "days_flagged": 2,
+      "recon_status": "IGNORED"
+    },
+    {
+      "key": "HEDGE:SPY",
+      "kind": "HEDGE",
+      "ident": "SPY",
+      "summary": "**HEDGE** SPY: add 10× $560P Aug 7 $4,200",
+      "first_flagged": "2026-06-22",
+      "days_flagged": 8,
+      "recon_status": "IGNORED"
+    }
+  ]
+}

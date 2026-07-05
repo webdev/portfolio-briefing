@@ -141,31 +141,124 @@ def _load_sr_module():
 
 
 # --------------------------------------------------------------------------
+# Lazy-load the persistent OHLC cache (lives in daily-portfolio-briefing).
+# Task #9: warm-cache runs skip the full 300d yfinance download per ticker.
+# Fail-open — any load/read problem falls back to the raw yfinance call.
+# --------------------------------------------------------------------------
+
+_OHLC_MODULE = None
+_OHLC_TRIED = False
+
+
+def _load_ohlc_cache():
+    global _OHLC_MODULE, _OHLC_TRIED
+    if _OHLC_TRIED:
+        return _OHLC_MODULE
+    _OHLC_TRIED = True
+    target = (_REPO_ROOT / "skills" / "daily-portfolio-briefing" / "scripts"
+              / "analysis" / "ohlc_cache.py")
+    if not target.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("briefing_ohlc_cache", target)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["briefing_ohlc_cache"] = mod
+        spec.loader.exec_module(mod)
+        _OHLC_MODULE = mod
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"  [warn] ohlc_cache module load failed: {e}", file=sys.stderr)
+        _OHLC_MODULE = None
+    return _OHLC_MODULE
+
+
+def _history_300d(ticker: str):
+    """300d daily bars — persistent cache when available, raw yfinance else."""
+    mod = _load_ohlc_cache()
+    if mod is not None:
+        try:
+            return mod.cached_history(ticker, days=300)
+        except Exception as e:  # noqa: BLE001 - fail-open to raw fetch
+            print(f"  [warn] ohlc cache for {ticker}: {e} — uncached path",
+                  file=sys.stderr)
+    import yfinance as yf
+    return yf.Ticker(ticker).history(period="300d")
+
+
+# --------------------------------------------------------------------------
+# Lazy-load the briefing's technical_indicators module (canonical IV rank —
+# Task #12: one 252-obs percentile shared with snapshot_inputs + screener).
+# Fail-open — if the module can't load, fall back to the inline computation.
+# --------------------------------------------------------------------------
+
+_TI_MODULE = None
+_TI_TRIED = False
+
+
+def _load_ti_module():
+    global _TI_MODULE, _TI_TRIED
+    if _TI_TRIED:
+        return _TI_MODULE
+    _TI_TRIED = True
+    target = (_REPO_ROOT / "skills" / "daily-portfolio-briefing" / "scripts"
+              / "analysis" / "technical_indicators.py")
+    if not target.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "briefing_technical_indicators", target)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["briefing_technical_indicators"] = mod
+        spec.loader.exec_module(mod)
+        _TI_MODULE = mod
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"  [warn] technical_indicators module load failed: {e}",
+              file=sys.stderr)
+        _TI_MODULE = None
+    return _TI_MODULE
+
+
+def _iv_rank(closes) -> float | None:
+    """IV rank proxy — canonical 252-obs percentile from the briefing's
+    technical_indicators.iv_rank_252 when loadable; inline fallback keeps the
+    scout working standalone (fail-open, same formula minus the .tail cap)."""
+    ti = _load_ti_module()
+    if ti is not None:
+        try:
+            return ti.iv_rank_252(closes)
+        except Exception as e:  # noqa: BLE001 - fail-open to inline math
+            print(f"  [warn] iv_rank_252: {e} — inline fallback", file=sys.stderr)
+    rets = closes.pct_change().dropna()
+    if len(rets) < 21:
+        return None
+    rolling_vol = (rets.rolling(20).std() * math.sqrt(252)).dropna().tail(252)
+    if rolling_vol.empty:
+        return None
+    cur = float(rolling_vol.iloc[-1])
+    if math.isnan(cur):
+        return None
+    return round(float((rolling_vol <= cur).sum()) / len(rolling_vol) * 100.0, 1)
+
+
+# --------------------------------------------------------------------------
 # yfinance technical signals (same logic as snapshot_inputs._full_technicals)
 # --------------------------------------------------------------------------
 
 def _fetch_technicals(ticker: str) -> dict | None:
     """Return {iv_rank, rsi_14, sma_50, sma_200, drawdown_pct, spot, fivedayret, support_resistance}."""
     try:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
-        hist = t.history(period="300d")
-        if hist.empty or len(hist) < 60:
+        hist = _history_300d(ticker)
+        if hist is None or hist.empty or len(hist) < 60:
             return None
         closes = hist["Close"].dropna()
         spot = float(closes.iloc[-1])
 
-        # IV rank (252d realized-vol percentile)
-        rets = closes.pct_change().dropna()
-        iv_rank = None
-        if len(rets) >= 21:
-            rolling_vol = (rets.rolling(20).std() * math.sqrt(252)).dropna()
-            if not rolling_vol.empty:
-                cur = float(rolling_vol.iloc[-1])
-                if not math.isnan(cur):
-                    iv_rank = round(
-                        float((rolling_vol <= cur).sum()) / len(rolling_vol) * 100.0, 1
-                    )
+        # IV rank — canonical 252-obs realized-vol percentile, shared with
+        # snapshot_inputs + broad-universe-screener (technical_indicators.iv_rank_252)
+        iv_rank = _iv_rank(closes)
 
         # RSI(14) Wilder's
         rsi_14 = None
@@ -396,18 +489,31 @@ def _verdict(
     # name reaching here is technically clean.
     #
     # Distinct verdict label "CSP ENTRY (independent setup)" so the
-    # renderer can attach a ⚠ "no third-party rec — verify independently"
-    # badge and the user is reminded to apply their own catalyst check.
+    # renderer can attach a ⚠ badge to remind the user to validate the
+    # catalyst against their other sources. The badge phrasing depends on
+    # whether Parkev has ANY rec on the name (misleading to say "no rec"
+    # when Parkev actually rates it HOLD — that's a false negative that
+    # made the user think the ticker mapping was broken, see 2026-07-03):
+    #   - Parkev HOLD → "Parkev HOLD (not a BUY catalyst)"
+    #   - Parkev SELL was caught above; won't hit this branch
+    #   - No rec at all → "no third-party rec"
     if (rsi is not None and 35 <= rsi <= 55
             and iv is not None and iv >= cfg["iv_rank_elevated"]):
+        if rec_u == "HOLD":
+            catalyst_note = "Parkev HOLD (not a BUY catalyst) — verify independently"
+        else:
+            catalyst_note = "no third-party rec — verify catalyst independently"
         reasons.append(
             f"RSI {rsi:.0f} in pullback band + IV rank {iv:.0f} elevated "
-            f"(no third-party rec — verify catalyst independently)"
+            f"({catalyst_note})"
         )
         return "CSP ENTRY (independent setup)", reasons, True
 
     # No BUY rec and technicals don't qualify — just monitor
-    reasons.append("no third-party catalyst")
+    if rec_u == "HOLD":
+        reasons.append("third-party HOLD, technicals don't qualify for independent entry")
+    else:
+        reasons.append("no third-party catalyst")
     return "WATCH", reasons, False
 
 

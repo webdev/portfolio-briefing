@@ -1,0 +1,234 @@
+{# ─── unified_card(base, tech, tab_kind, extra=None) — task #10 ───
+   One universal ticker card for every briefing tab:
+     top    — tab-specific extras (verb badge / weight / contract / …)
+     middle — the full infographic tech card (task #7 macro, reused);
+              when the deep read is missing, a compact "chart data
+              unavailable" skeleton (hard rule #19 — explicit, never
+              fabricated); when the row has NO ticker at all (capacity
+              placeholders), the tech section is omitted entirely.
+     bottom — tab-specific affordances (counterpoint disclosure w/ the
+              existing HTMX lazy-load pattern, unchanged).
+
+   MUST be imported `with context` — it calls the context helpers
+   resolve_ticker / option_pl_pct / extras_tone and the context
+   functions parkev_chip / tier_badge, plus briefing + counterpoint_keys
+   for the actions footer. Every field access is guarded so a missing
+   value renders "—" (fail open), never a 500. #}
+{% from "_macros/tech_card.html" import tech_card %}
+
+{% macro _metric(label, value) %}
+{% if value is not none and value != "" %}<span class="uc-metric"><span class="uc-metric-label">{{ label }}</span><span class="uc-metric-value num">{{ value }}</span></span>{% endif %}
+{% endmacro %}
+
+{% macro _pl(pl) %}
+{%- if pl is not none -%}
+<span class="num {{ 'uc-pos' if pl > 0 else ('uc-neg' if pl < 0 else '') }}">{{ "{:+.1%}".format(pl) }}</span>
+{%- else -%}—{%- endif -%}
+{% endmacro %}
+
+{% macro unified_card(base, tech, tab_kind, extra=None) %}
+{% set _tk = resolve_ticker(base, tab_kind) %}
+{% set _opl = option_pl_pct(base) if tab_kind == 'option' else none %}
+<article class="uc-card uc-{{ tab_kind }}"
+         data-ticker="{{ _tk or '' }}"
+         {% if tab_kind == 'equity' and base.pl_pct is not none %}data-pl="{{ base.pl_pct }}"{% endif %}
+         {% if tab_kind == 'equity' and base.weight is not none %}data-weight="{{ base.weight }}"{% endif %}
+         {% if tab_kind == 'option' and _opl is not none %}data-pl="{{ _opl }}"{% endif %}
+         {% if tab_kind == 'option' and base.days_to_expiry is not none %}data-dte="{{ base.days_to_expiry }}"{% endif %}
+         {% if tab_kind == 'action' and base.days_flagged is not none %}data-age="{{ base.days_flagged }}"{% endif %}
+         {% if tab_kind == 'strategy' and base.current_weight_pct is not none %}data-weight="{{ base.current_weight_pct }}"{% endif %}
+         {# Task #17 — Ideas filter chips key off these attributes. #}
+         {% if tab_kind == 'idea' %}data-idea-kind="{{ base.kind or '' }}" data-idea-status="{{ base.status or '' }}" data-idea-dte="{{ base.dte if base.dte is not none else '' }}" data-idea-bucket="{{ base.dte_bucket or '' }}"{% endif %}>
+
+    {# ══ TOP: tab-specific extras ══ #}
+    {% if tab_kind == 'action' %}
+    <div class="uc-extras uc-tone-{{ extras_tone(base.kind) }}">
+        <div class="uc-extras-head">
+            <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ base.kind }}</strong></span>
+            <span class="uc-ident">{{ base.ident | pretty_contract }}</span>
+            <span class="uc-extras-right">
+                {% if base.days_flagged and base.days_flagged >= 6 %}
+                    <span class="num uc-age-stale">⏳ {{ base.days_flagged }}d</span>
+                {% elif base.days_flagged %}
+                    <span class="num muted">{{ base.days_flagged }}d</span>
+                {% else %}
+                    <span class="muted">◔ new</span>
+                {% endif %}
+                <span class="muted uc-recon">{{ base.recon_status or "—" }}</span>
+            </span>
+        </div>
+        {% if base.summary %}<div class="uc-extras-note">{{ base.summary | summary_html(base.kind, base.ident) }}</div>{% endif %}
+    </div>
+
+    {% elif tab_kind == 'equity' %}
+    <div class="uc-extras uc-tone-{{ extras_tone(base.recommendation) }}">
+        <div class="uc-extras-head">
+            <span class="uc-badge rec-{{ base.recommendation }}" title="{{ base.recommendation or '' }}"><span class="action-icon">{{ base.recommendation | action_icon }}</span> <strong>{{ (base.recommendation | humanize_action) if base.recommendation else "—" }}</strong></span>
+            <span class="uc-extras-right">
+                {{ parkev_chip(base.ticker) | safe }}
+                {{ tier_badge(base.ticker) | safe }}
+            </span>
+        </div>
+        <div class="uc-extras-metrics">
+            {{ _metric("Weight", "{:.1%}".format(base.weight) if base.weight is not none else none) }}
+            {{ _metric("Spot", "${:,.2f}".format(base.price) if base.price is not none else none) }}
+            {{ _metric("Qty", "{:,.0f}".format(base.qty) if base.qty is not none else none) }}
+            {{ _metric("Value", "${:,.0f}".format(base.market_value) if base.market_value is not none else none) }}
+            <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(base.pl_pct) }}</span></span>
+        </div>
+        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+    </div>
+
+    {% elif tab_kind == 'option' %}
+    {% set _short = (base.qty is not none) and (base.qty < 0) %}
+    <div class="uc-extras uc-tone-{{ extras_tone(base.recommendation) }}">
+        <div class="uc-extras-head">
+            <span class="uc-badge uc-badge-contract {{ 'uc-put' if (base.type or '')|upper == 'PUT' else 'uc-call' }}">{{ 'SHORT' if _short else 'LONG' }} {{ (base.type or '?')|upper }}</span>
+            <span class="uc-ident">{% if base.contract %}{{ base.contract | pretty_contract }}{% else %}<strong>{{ base.underlying }}</strong>{% endif %}</span>
+            <span class="uc-extras-right">
+                <span class="uc-badge rec-{{ base.recommendation }}" title="{{ base.recommendation or '' }}"><span class="action-icon">{{ base.recommendation | action_icon }}</span> <strong>{{ (base.recommendation | humanize_action) if base.recommendation else "—" }}</strong></span>
+            </span>
+        </div>
+        <div class="uc-extras-metrics">
+            {{ _metric("Qty", "{:.0f}".format(base.qty) if base.qty is not none else none) }}
+            {{ _metric("DTE", base.days_to_expiry if base.days_to_expiry is not none else none) }}
+            {{ _metric("Mid", "${:,.2f}".format(base.current_mid) if base.current_mid is not none else none) }}
+            {{ _metric("Entry", "${:,.2f}".format(base.entry_price) if base.entry_price is not none else none) }}
+            <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(_opl) }}</span></span>
+            {{ _metric("IV rank", "{:.1f}".format(base.iv_rank) if base.iv_rank else none) }}
+        </div>
+        <div class="uc-extras-sub">
+            {% if base.matrix_cell_id %}<code class="uc-matrix-cell" title="wheel-roll-advisor matrix cell">{{ base.matrix_cell_id }}</code>{% endif %}
+            {{ parkev_chip(base.underlying) | safe }}
+        </div>
+        {% if base.warnings %}
+        <div class="uc-warnings">{% for w in base.warnings %}<span class="uc-warning">⚠ {{ w }}</span>{% endfor %}</div>
+        {% endif %}
+        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+        {# Task #17 — inline strategy-upgrade affordances (WRITE CC /
+           COLLAR) attached to this underlying's option card. Data comes
+           from split_strategy_upgrades in the route; when the context
+           doesn't provide it (other callers), nothing renders. #}
+        {% if strategy_attached is defined and _tk and strategy_attached.get(_tk) %}
+        <div class="uc-strategy-affordances">
+            {% for su in strategy_attached.get(_tk) %}
+            <div class="uc-affordance uc-affordance-{{ su.type }}">
+                <span class="uc-badge rec-{{ su.type }}" title="{{ su.type or '' }}"><span class="action-icon">{{ su.type | action_icon }}</span> <strong>{{ strategy_affordance_label(su.type) or (su.type | humanize_action) }}</strong></span>
+                {% if su.rationale %}<span class="uc-extras-note muted">{{ su.rationale | inline_md }}</span>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+
+    {% elif tab_kind == 'longterm' %}
+    <div class="uc-extras uc-tone-{{ extras_tone(base.kind) }}">
+        <div class="uc-extras-head">
+            <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind or '' }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ (base.kind | humanize_action) if base.kind else "—" }}</strong></span>
+            {% if _tk %}<span class="uc-extras-right">{{ parkev_chip(_tk) | safe }} {{ tier_badge(_tk) | safe }}</span>{% endif %}
+        </div>
+        {% if base.concrete_trade %}<div class="uc-extras-note uc-trade">{{ base.concrete_trade | inline_md }}</div>{% endif %}
+        {% if base.yield_or_cost %}<div class="uc-extras-sub muted num">{{ base.yield_or_cost }}</div>{% endif %}
+        {% if base.trigger_reasons %}
+        <div class="uc-chips">{% for t in base.trigger_reasons %}<span class="uc-chip-mini">{{ t }}</span>{% endfor %}</div>
+        {% endif %}
+        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+    </div>
+
+    {% elif tab_kind == 'strategy' %}
+    <div class="uc-extras uc-tone-{{ extras_tone(base.type) }}">
+        <div class="uc-extras-head">
+            <span class="uc-badge rec-{{ base.type }}" title="{{ base.type or '' }}"><span class="action-icon">{{ base.type | action_icon }}</span> <strong>{{ (base.type | humanize_action) if base.type else "—" }}</strong></span>
+            <span class="uc-extras-right">
+                <span class="chip tier-{{ base.tier }}">{{ base.tier or "—" }}</span>
+                {% if _tk %}{{ parkev_chip(_tk) | safe }}{% endif %}
+            </span>
+        </div>
+        <div class="uc-extras-metrics">
+            {{ _metric("Shares", base.shares_held if base.shares_held is not none else none) }}
+            {{ _metric("Price", "${:,.2f}".format(base.current_price) if base.current_price is not none else none) }}
+            {{ _metric("Weight", "{:.1f}%".format(base.current_weight_pct) if base.current_weight_pct is not none else none) }}
+        </div>
+        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+    </div>
+
+    {% elif tab_kind == 'idea' %}
+    <div class="uc-extras uc-tone-{{ extras_tone(base.kind) }}">
+        <div class="uc-extras-head">
+            <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind or '' }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ (base.kind | humanize_action) if base.kind else "—" }}</strong></span>
+            <span class="status-chip {{ base.status_class }}">{{ base.status_label }}</span>
+            <span class="uc-extras-right">
+                {% if _tk %}{{ parkev_chip(_tk) | safe }} {{ tier_badge(_tk) | safe }}{% endif %}
+            </span>
+        </div>
+        {% if base.source_label and base.source_label != "—" %}<div class="uc-extras-sub muted">Source: {{ base.source_label }}</div>{% endif %}
+        {% if base.concrete_trade %}<div class="uc-extras-note uc-trade">{{ base.concrete_trade | inline_md }}</div>{% endif %}
+        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+    </div>
+
+    {% elif tab_kind == 'rotation' %}
+    {% set _mode = (extra or {}).get('mode', 'equity') %}
+    <div class="uc-extras uc-tone-roll">
+        {% if _mode == 'option' %}
+        <div class="uc-extras-head">
+            <span class="uc-badge uc-badge-contract">🔄 RESET</span>
+            <span class="uc-ident">{{ base['from'].symbol | pretty_contract }}</span>
+            <span class="uc-extras-right"><span class="muted num">at {{ "{:.0f}".format(base['from'].captured_pct) if base['from'].captured_pct is not none else "—" }}% capture</span></span>
+        </div>
+        {% if base.to and base.to.hint %}<div class="uc-extras-note muted">{{ base.to.hint | inline_md }}</div>{% endif %}
+        {% else %}
+        <div class="uc-extras-head">
+            <span class="uc-rotation-from">
+                <a href="/positions/{{ base['from'].ticker }}" class="rotation-ticker">{{ base['from'].ticker }}</a>
+                {% if base['from'].weight_pct is not none %}<span class="muted num">{{ base['from'].weight_pct }}%</span>{% endif %}
+                {% if base['from'].tier %}<span class="tier-{{ base['from'].tier|lower }}">Tier {{ base['from'].tier }}</span>{% endif %}
+                <span class="muted num">score {{ base['from'].score }}</span>
+            </span>
+            <span class="uc-rotation-arrow">→</span>
+            <span class="uc-rotation-to">
+                <a href="/positions/{{ base.to.ticker }}" class="rotation-ticker rotation-ticker-target">{{ base.to.ticker }}</a>
+                <span class="num rotation-score-to">score {{ base.to.score }}</span>
+                <span class="num rotation-improvement">+{{ base.to.improvement }}</span>
+            </span>
+            {% if base.to.parkev_label %}<span class="uc-extras-right muted">{{ base.to.parkev_label }}</span>{% endif %}
+        </div>
+        {% if base.to.reasons %}
+        <div class="uc-chips">{% for reason in base.to.reasons %}<span class="rotation-reason-chip">{{ reason }}</span>{% endfor %}</div>
+        {% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+
+    {# ══ MIDDLE: the shared tech card (or explicit fallback) ══ #}
+    {% if tech %}
+    <div class="uc-tech">{{ tech_card(tech) }}</div>
+    {% elif _tk %}
+    <div class="tc-skeleton-compact" data-ticker="{{ _tk }}">
+        <div class="tc-skeleton-head">
+            <a class="tc-tk no-popover" href="/positions/{{ _tk }}">{{ _tk }}</a>
+        </div>
+        <div class="tc-unavailable-note">📉 Chart data unavailable this cycle — verify manually.</div>
+    </div>
+    {% endif %}
+
+    {# ══ BOTTOM: tab-specific affordances ══ #}
+    {% if tab_kind == 'action' %}
+    {% set action_key = base.key or ((base.kind or '') ~ ":" ~ (base.ident or '')) %}
+    {% if counterpoint_keys is defined and action_key in counterpoint_keys %}
+    {# Counterpoint disclosure — same Shoelace + HTMX lazy-load pattern as
+       before the unified-card refactor (hard rule #14). #}
+    <sl-details class="counterpoint-disclosure" summary="⚖️ Show counterpoint">
+        {# Trigger uses sl-after-show (fires late in the reveal cycle, after
+           Shoelace has fully promoted the custom element) with an intersect
+           fallback for the rare case where the details never emits. Fixes
+           user-reported "Loading..." never resolving on port 17777. #}
+        <div class="counterpoint-target"
+            hx-get="/fragment/counterpoint/{{ briefing.date.isoformat() }}/{{ action_key }}"
+            hx-trigger="sl-after-show from:closest sl-details once, intersect once"
+            hx-target="this"
+            hx-swap="innerHTML"><span class="muted">Loading counterpoint…</span></div>
+    </sl-details>
+    {% endif %}
+    {% endif %}
+</article>
+{% endmacro %}

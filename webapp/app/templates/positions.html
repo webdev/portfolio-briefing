@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Positions{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>Positions</h1>
+    <p class="muted">As of {{ as_of }} · {{ positions|length }} rows</p>
+</hgroup>
+
+{% if not positions %}
+<div class="empty">No positions snapshot loaded for {{ as_of }}.</div>
+{% else %}
+
+<section>
+    <h2>Equities ({{ equities|length }})</h2>
+    {% if equities %}
+    <table class="compact sortable">
+        <thead>
+            <tr>
+                <th data-sort="str">Ticker</th>
+                <th data-sort="num" class="num">Qty</th>
+                <th data-sort="num" class="num">Price</th>
+                <th data-sort="num" class="num">Value</th>
+                <th data-sort="num" class="num">P/L %</th>
+                <th data-sort="str">Account</th>
+                <th>Parkev</th>
+                <th>Tier</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in equities %}
+            <tr>
+                <td><a href="/positions/{{ p.symbol }}"><strong>{{ p.symbol }}</strong></a></td>
+                <td class="num">{{ "{:,.0f}".format(p.qty) if p.qty else "—" }}</td>
+                <td class="num">${{ "{:,.2f}".format(p.price) if p.price else "—" }}</td>
+                <td class="num">${{ "{:,.0f}".format(p.marketValue) if p.marketValue else "—" }}</td>
+                <td class="num" style="color: {{ 'var(--color-positive)' if p.totalGainPct and p.totalGainPct > 0 else ('var(--color-danger)' if p.totalGainPct and p.totalGainPct < 0 else 'var(--color-text-tertiary)') }}">
+                    {{ "{:+.1f}%".format(p.totalGainPct) if p.totalGainPct else "—" }}
+                </td>
+                <td class="muted">{{ p.accountDesc or "—" }}</td>
+                <td>{{ parkev_chip(p.symbol) | safe }}</td>
+                <td>{{ tier_badge(p.symbol) | safe }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No equity positions.</div>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Options ({{ options|length }})</h2>
+    {% if options %}
+    {# Columns Underlying / Type / Strike / Expiry are all carried inside the
+       pretty_contract chip rendered for Symbol — removing them de-duplicates
+       and lets the actionable numeric columns (Qty / Mid / P/L / Δ / IV) breathe. #}
+    <table class="compact sortable">
+        <thead>
+            <tr>
+                <th>Contract</th>
+                <th data-sort="num" class="num">Qty</th>
+                <th data-sort="num" class="num">Mid</th>
+                <th data-sort="num" class="num">P/L %</th>
+                <th data-sort="num" class="num">Δ</th>
+                <th data-sort="num" class="num">IV%</th>
+                <th>Parkev</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for o in options %}
+            <tr>
+                <td>{{ o.symbol | pretty_contract }}</td>
+                <td class="num">{{ "{:.0f}".format(o.qty) if o.qty else "—" }}</td>
+                <td class="num">${{ "{:.2f}".format(o.currentMid) if o.currentMid else "—" }}</td>
+                <td class="num" style="color: {{ 'var(--color-positive)' if o.totalGainPct and o.totalGainPct > 0 else ('var(--color-danger)' if o.totalGainPct and o.totalGainPct < 0 else 'var(--color-text-tertiary)') }}">
+                    {{ "{:+.1f}%".format(o.totalGainPct) if o.totalGainPct else "—" }}
+                </td>
+                <td class="num">{{ "{:.2f}".format(o.delta) if o.delta else "—" }}</td>
+                <td class="num">{{ "{:.1f}".format(o.ivPct) if o.ivPct else "—" }}</td>
+                <td>{{ parkev_chip(o.underlying) | safe }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No option positions.</div>
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}

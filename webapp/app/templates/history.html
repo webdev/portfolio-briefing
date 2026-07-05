@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}History — time-series{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>History</h1>
+    <p class="muted">{{ snapshot_count }} snapshots loaded. Charts use the last 90 days by default.</p>
+</hgroup>
+
+<section>
+    <div class="chart-card">
+        <h2>NLV &amp; cash</h2>
+        <div class="chart-target" data-chart-url="/charts/nlv.json?days=90" style="min-height: 360px;"></div>
+    </div>
+
+    <div class="chart-card">
+        <h2>Stress coverage</h2>
+        <p class="muted" style="margin: 0 0 .5rem; font-size: 12px;">
+            cash ÷ short-put obligation. Red line = 0.50× floor (new CSPs blocked below). Yellow = 0.70× rebuild target.
+        </p>
+        <div class="chart-target" data-chart-url="/charts/coverage.json?days=90" style="min-height: 360px;"></div>
+    </div>
+
+    <div class="chart-card">
+        <h2>Expiration ladder ({{ latest_date or "—" }})</h2>
+        <p class="muted" style="margin: 0 0 .5rem; font-size: 12px;">
+            Short-put obligation grouped by expiration. Yellow line = 20% NLV warning, red = 30% NLV critical (hard rule #21).
+        </p>
+        <div class="chart-target" data-chart-url="/charts/expiration-ladder.json" style="min-height: 360px;"></div>
+    </div>
+</section>
+{% endblock %}

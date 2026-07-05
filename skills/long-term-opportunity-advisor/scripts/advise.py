@@ -7,8 +7,25 @@ Inputs: live positions + third-party recs + RSI + IV rank + drawdown + 200-SMA.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, asdict
 from typing import Optional
+
+
+def _safe_shares(dollars: float, spot: float | None) -> int:
+    """Fail-open share count. Returns 0 when spot is unusable (NaN, None, ≤0).
+
+    Was the source of `TypeError: cannot convert float NaN to integer`
+    when yfinance returned NaN spot on holidays / stale bars.
+    """
+    if spot is None:
+        return 0
+    try:
+        if math.isnan(spot) or spot <= 0:
+            return 0
+        return int(dollars / spot)
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass
@@ -95,7 +112,7 @@ def evaluate_equity_action(
                 kind="ADD",
                 ticker=ticker,
                 trigger_reasons=triggers + [f"third-party {rec}"],
-                concrete_trade=f"BUY ~$5,000 of {ticker} (~{int(5000/spot)} shares @ ~${spot:.2f})",
+                concrete_trade=f"BUY ~$5,000 of {ticker} (~{_safe_shares(5000, spot)} shares @ ~${spot:.2f})",
                 rationale=f"Pullback in a third-party {rec} name. Weight {weight_pct:.1f}% below "
                           f"6% target — room to scale in.",
                 yield_or_cost=f"$5K initial; can scale to ${target_weight_pct/100*1000000:.0f} target on further weakness",
@@ -281,7 +298,7 @@ def generate_long_term_opportunities(
                 ticker=ticker,
                 trigger_reasons=[f"third-party {rec_upper}", f"RSI {rsi:.0f}",
                                   "not yet held"],
-                concrete_trade=f"OPEN position in {ticker} ~$5,000 (~{int(5000/spot)} shares @ ~${spot:.2f})",
+                concrete_trade=f"OPEN position in {ticker} ~$5,000 (~{_safe_shares(5000, spot)} shares @ ~${spot:.2f})",
                 rationale=f"Third-party {rec_upper} on a name not in portfolio. RSI {rsi:.0f} suggests "
                           "favorable entry timing.",
                 yield_or_cost="$5K initial position; scale based on continued thesis support",

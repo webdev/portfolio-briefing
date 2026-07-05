@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+{% from "_macros/tech_card.html" import tech_card %}
+{% from "_macros/tech_legend.html" import tech_legend %}
+{% block title %}{{ report_title }} — {{ date }}{% endblock %}
+
+{% macro status_chip(status, tone, icon, label) %}
+    <span class="rep-status rep-status-{{ tone }}">
+        <span class="rep-status-icon">{{ icon }}</span>
+        <span class="rep-status-label">{{ label }}</span>
+    </span>
+{% endmacro %}
+
+{% macro metric_chip(m) %}
+    <span class="rep-metric rep-metric-{{ m.tone }}">
+        <span class="rep-metric-label">{{ m.label }}</span>
+        <span class="rep-metric-value">{{ m.value }}</span>
+    </span>
+{% endmacro %}
+
+{# tech_enabled distinguishes "this route supplies a tech map" (Setups)
+   from "this route never fetched tech data" (/candidates, /when-to-enter
+   deep-links). The unavailable skeleton only renders on the former —
+   claiming "chart data unavailable" on a page that simply didn't ask for
+   it would be a false statement (hard rule #19). #}
+{% macro card(c, tech=None, tech_enabled=False) %}
+<article class="rep-card rep-card-{{ c.status_tone }}" id="card-{{ c.ticker }}">
+    <header class="rep-card-head">
+        <div class="rep-card-head-left">
+            {{ status_chip(c.status, c.status_tone, c.status_icon, c.status_label) }}
+            <a class="rep-card-ticker no-popover" href="/positions/{{ c.ticker }}">{{ c.ticker }}</a>
+            {% if c.is_etf %}<span class="rep-etf-pill">ETF</span>{% endif %}
+            <span class="rep-card-price">{{ c.price }}</span>
+        </div>
+        <div class="rep-card-head-right">
+            {% if c.flags and c.flags.top_conviction %}
+                <span class="rep-badge rep-badge-gold" title="Top conviction signal">🏆 Top conviction</span>
+            {% endif %}
+            {% if c.flags and c.flags.rsi_favourable %}
+                <span class="rep-badge rep-badge-green" title="RSI in the favorable band">✅ RSI favourable</span>
+            {% endif %}
+            {% if c.flags and c.flags.no_third_party %}
+                <span class="rep-badge rep-badge-amber" title="No third-party rec — verify independently">⚠ No 3P rec</span>
+            {% endif %}
+        </div>
+    </header>
+
+    {% if c.metrics %}
+    <div class="rep-metrics">
+        {% for m in c.metrics %}{{ metric_chip(m) }}{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if c.read %}
+    <div class="rep-row rep-read">
+        <span class="rep-row-label">Read</span>
+        <span class="rep-row-body">{{ c.read | inline_md }}</span>
+    </div>
+    {% endif %}
+
+    {% if c.verdict %}
+    <div class="rep-row rep-verdict">
+        <span class="rep-row-label">Verdict</span>
+        <span class="rep-row-body">{{ c.verdict | inline_md }}</span>
+    </div>
+    {% endif %}
+
+    {% if c.trigger %}
+    <div class="rep-row rep-trigger">
+        <span class="rep-row-label">{% if c.status == 'WAIT' %}Wait for{% else %}Trigger{% endif %}</span>
+        <span class="rep-row-body">{{ c.trigger | inline_md }}</span>
+    </div>
+    {% endif %}
+
+    {% if c.fair_value %}
+    <div class="rep-row rep-fv">
+        <span class="rep-row-label">FV</span>
+        <span class="rep-row-body">{{ c.fair_value | inline_md }}</span>
+    </div>
+    {% endif %}
+
+    {% if c.earnings %}
+    <div class="rep-row rep-earn">
+        <span class="rep-row-label">Earnings</span>
+        <span class="rep-row-body">{{ c.earnings | inline_md }}</span>
+    </div>
+    {% endif %}
+
+    {% if c.deferred_note %}
+    <div class="rep-row rep-deferred">
+        <span class="rep-row-body">{{ c.deferred_note | inline_md }}</span>
+    </div>
+    {% endif %}
+
+    {# Task #18 — visible tech card, matching the unified card design on
+       /briefing/{date} (task #10). The full infographic technical read
+       renders inline (no collapsed disclosure). When the ticker's deep
+       read is missing this cycle, an explicit compact skeleton — never
+       fabricated numbers (hard rule #19). #}
+    {% if tech %}
+    <div class="rep-tech">{{ tech_card(tech) }}</div>
+    {% elif tech_enabled and c.ticker %}
+    <div class="rep-tech">
+        <div class="tc-skeleton-compact" data-ticker="{{ c.ticker }}">
+            <div class="tc-skeleton-head">
+                <a class="tc-tk no-popover" href="/positions/{{ c.ticker }}">{{ c.ticker }}</a>
+            </div>
+            <div class="tc-unavailable-note">📉 Chart data unavailable this cycle — verify manually.</div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if c.extras %}
+    <div class="rep-extras">
+        {% for x in c.extras %}<div>{{ x | inline_md }}</div>{% endfor %}
+    </div>
+    {% endif %}
+</article>
+{% endmacro %}
+
+{% block content %}
+<hgroup>
+    <h1>{{ report_title }} &mdash; {{ date }}</h1>
+    {% if structured and structured.subtitle %}
+        <p class="muted">{{ structured.subtitle | inline_md }}</p>
+    {% else %}
+        <p class="muted">{{ report_subtitle }}</p>
+    {% endif %}
+</hgroup>
+
+{# Task #13 — technical-indicator legend, collapsible. #}
+{{ tech_legend() }}
+
+{# ─── Date navigator ─── #}
+<div class="rep-nav">
+    <div class="rep-nav-dates">
+        {% if neighbor_dates.prev %}
+            <sl-button size="small" variant="default" href="{{ report_base_url }}/{{ neighbor_dates.prev }}">← {{ neighbor_dates.prev }}</sl-button>
+        {% else %}
+            <sl-button size="small" variant="default" disabled>← prev</sl-button>
+        {% endif %}
+        {% if neighbor_dates.next %}
+            <sl-button size="small" variant="default" href="{{ report_base_url }}/{{ neighbor_dates.next }}">{{ neighbor_dates.next }} →</sl-button>
+        {% else %}
+            <sl-button size="small" variant="default" disabled>next →</sl-button>
+        {% endif %}
+    </div>
+    <label class="rep-nav-jump">
+        Jump to date
+        <sl-input
+            type="date"
+            size="small"
+            value="{{ date }}"
+            onsl-change="if (this.value) window.location.href = '{{ report_base_url }}/' + this.value;">
+        </sl-input>
+    </label>
+    <a href="/briefing/{{ date }}" class="muted rep-nav-briefing">Briefing for {{ date }} →</a>
+</div>
+
+{% if structured and structured.sections %}
+    {# ─── Capacity banner (UX critique #10) ───
+       When entries are gated by stress coverage, lead with the count of
+       deferred items and the systemic cause — not just the per-card chip.
+       The banner upgrades to bad-tone (red) when ENTRY_NOW_DEFERRED count
+       is high and zero ENTRY_NOW are actionable. #}
+    {% set deferred_count = (summary_counts.get('ENTRY_NOW_DEFERRED', 0) + summary_counts.get('TRIAL_DEFERRED', 0)) if summary_counts else 0 %}
+    {% set actionable_count = (summary_counts.get('ENTRY_NOW', 0) + summary_counts.get('STRONG_BUY', 0) + summary_counts.get('CANDIDATE', 0)) if summary_counts else 0 %}
+    {% set capacity_critical = "ENTRY GATES: CLOSED" in (structured.capacity or "") %}
+    {% if structured.capacity %}
+    <div class="rep-banner {{ 'rep-banner-bad' if capacity_critical else 'rep-banner-info' }}">
+        <span class="rep-banner-icon">{{ '🚨' if capacity_critical else '🔒' }}</span>
+        <div class="rep-banner-body">
+            {% if deferred_count > 0 and actionable_count == 0 %}
+                <strong style="color: var(--color-text-primary);">{{ deferred_count }} {{ 'ENTRY' if deferred_count == 1 else 'ENTRIES' }} QUALIFY on technicals but are DEFERRED</strong> —
+                stress coverage gate is closed. To unlock: close oversized positions to rebuild coverage,
+                OR pick the highest-conviction ones to rotate INTO existing capacity.
+                <br><span style="font-size: 11px; color: var(--color-text-tertiary);">{{ structured.capacity }}</span>
+            {% else %}
+                {{ structured.capacity }}
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# ─── Summary chips (counts by status) ─── #}
+    {% if summary_counts %}
+    <div class="rep-summary">
+        <strong class="rep-summary-total">{{ summary_counts.values() | sum }} cards</strong>
+        {% set label_map = {
+            'STRONG_BUY':           ['🌟', 'Strong buy', 'ok'],
+            'ENTRY_NOW':            ['🟢', 'Entry now', 'ok'],
+            'ENTRY_NOW_DEFERRED':   ['⏸',  'Deferred', 'info'],
+            'CANDIDATE':            ['🎯', 'Candidate', 'ok'],
+            'TRIAL':                ['🟡', 'Trial', 'warn'],
+            'TRIAL_DEFERRED':       ['⏸',  'Trial deferred', 'info'],
+            'WAIT':                 ['🟡', 'Wait', 'warn'],
+            'WATCH':                ['👀', 'Watch', 'muted'],
+            'HELD':                 ['⏸',  'Held (RSI)', 'info'],
+            'AVOID':                ['🔴', 'Avoid', 'bad'],
+        } %}
+        {% for status, count in summary_counts.items() %}
+            {% set meta = label_map.get(status, ['•', status.replace('_', ' ').title(), 'muted']) %}
+            <span class="rep-summary-chip rep-summary-{{ meta[2] }}">
+                <span>{{ meta[0] }}</span>
+                <strong>{{ count }}</strong>
+                <span class="muted">{{ meta[1] }}</span>
+            </span>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {# ─── Status filter (client-side) ─── #}
+    {# Task #58: "Actionable" filter aligns with the hero counter definition —
+       both ok (ready to fire) AND info (deferred by capacity gates). When
+       coverage is < 0.50× every otherwise-actionable candidate is info-toned,
+       so keying the filter on 'ok' alone hid every card the hero was counting.
+       Users clicked "26 cards actionable" and saw zero. Fix: filter='actionable'
+       matches both tones; keep 'info' as a separate "just deferred" button. #}
+    <div class="rep-filter">
+        <span class="rep-filter-label">Filter:</span>
+        <sl-button-group label="Filter cards">
+            <sl-button size="small" variant="primary" data-filter="all" onclick="filterCards('all', this)">All</sl-button>
+            <sl-button size="small" data-filter="actionable" onclick="filterCards('actionable', this)">🟢 Actionable</sl-button>
+            <sl-button size="small" data-filter="info" onclick="filterCards('info', this)">⏸ Deferred only</sl-button>
+            <sl-button size="small" data-filter="warn" onclick="filterCards('warn', this)">🟡 Wait</sl-button>
+            <sl-button size="small" data-filter="muted" onclick="filterCards('muted', this)">👀 Watch</sl-button>
+            <sl-button size="small" data-filter="bad" onclick="filterCards('bad', this)">🔴 Avoid</sl-button>
+        </sl-button-group>
+    </div>
+
+    {# ─── Actionable hero (Tier 1 UX simplification) ───
+       Lead with actionable cards from ALL sections in a single row so
+       the user sees "here's what to look at today" before drilling
+       into theme-grouped noise. Skip when nothing is actionable. #}
+    {% set all_actionable = [] %}
+    {% for sec in structured.sections %}
+        {% for c in sec.cards %}
+            {% if c.status_tone in ['ok', 'info'] %}
+                {% set _ = all_actionable.append(c) %}
+            {% endif %}
+        {% endfor %}
+    {% endfor %}
+    {% if all_actionable %}
+    <section class="rep-actionable-hero">
+        <div class="rep-actionable-head">
+            <strong>🎯 Actionable today</strong>
+            <span class="muted">{{ all_actionable|length }} card{{ 's' if all_actionable|length != 1 else '' }} across all themes</span>
+        </div>
+        <div class="rep-cards-grid">
+            {% for c in all_actionable[:6] %}{{ card(c, (tech_cards | default({})).get(c.ticker), tech_cards is defined) }}{% endfor %}
+        </div>
+        {% if all_actionable|length > 6 %}
+        <p class="muted rep-actionable-more"><em>Plus {{ all_actionable|length - 6 }} more — see theme sections below.</em></p>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {# ─── Sections (grouped by theme) ─── #}
+    {% for sec in structured.sections %}
+        {% if sec.cards %}
+            <section class="rep-section">
+                <div class="rep-section-head">
+                    {% if sec.kind == 'h2' %}
+                        <h2 class="rep-section-title">
+                            {% if sec.theme %}<span class="rep-section-theme">{{ sec.theme }}</span>{% endif %}
+                            {{ sec.title }}
+                            <span class="rep-section-count">({{ sec.cards | length }})</span>
+                        </h2>
+                    {% else %}
+                        <h3 class="rep-section-subtitle">
+                            {{ sec.title }}
+                            <span class="rep-section-count">({{ sec.cards | length }})</span>
+                        </h3>
+                    {% endif %}
+                    {% if sec.subtitle %}
+                        <p class="rep-section-meta muted">{{ sec.subtitle | inline_md }}</p>
+                    {% endif %}
+                </div>
+                {# Split cards into ACTIONABLE (ok / warn / info) and
+                   NOISE (muted watch + bad avoid). Lead with actionable
+                   fully visible; collapse noise behind a <sl-details>
+                   expander so the user's eye lands on decisions. #}
+                {% set actionable = sec.cards | selectattr('status_tone', 'in', ['ok', 'info', 'warn']) | list %}
+                {% set noise = sec.cards | rejectattr('status_tone', 'in', ['ok', 'info', 'warn']) | list %}
+                {% if actionable %}
+                <div class="rep-cards-grid">
+                    {% for c in actionable %}{{ card(c, (tech_cards | default({})).get(c.ticker), tech_cards is defined) }}{% endfor %}
+                </div>
+                {% endif %}
+                {% if noise %}
+                <sl-details class="rep-noise-expander" summary="Show {{ noise|length }} watch/avoid card{{ 's' if noise|length != 1 else '' }} for this section">
+                    <div class="rep-cards-grid">
+                        {% for c in noise %}{{ card(c, (tech_cards | default({})).get(c.ticker), tech_cards is defined) }}{% endfor %}
+                    </div>
+                </sl-details>
+                {% endif %}
+                {% if not actionable and not noise %}
+                <p class="muted">No cards in this section.</p>
+                {% endif %}
+            </section>
+        {% endif %}
+    {% endfor %}
+
+    <footer class="rep-footer">
+        Source: <code>{{ source_path }}</code>
+    </footer>
+{% elif rendered_html %}
+    {# Fall back to raw markdown if the structured parser couldn't handle it #}
+    <article class="markdown-rendered">{{ rendered_html | safe }}</article>
+    <footer class="rep-footer">Source: <code>{{ source_path }}</code></footer>
+{% else %}
+    <article class="alert alert-red">
+        <strong>No {{ report_title|lower }} for {{ date }}.</strong>
+        Expected to find <code>{{ source_path }}</code> on disk.
+        Run the pipeline to generate one.
+    </article>
+{% endif %}
+
+<script>
+// Client-side card filter — hides cards whose tone doesn't match.
+// Task #58: 'actionable' is a virtual filter meaning "ok OR info" — the
+// same definition the hero counter uses. Without this, clicking 🟢
+// Actionable hides all cards on any day where entry gates are closed
+// (all otherwise-ok cards are demoted to info=deferred).
+function filterCards(tone, btn) {
+    const matchTones = tone === 'actionable' ? ['ok', 'info'] : [tone];
+    document.querySelectorAll('.rep-card').forEach(el => {
+        if (tone === 'all') {
+            el.style.display = '';
+        } else {
+            const match = matchTones.some(t => el.classList.contains('rep-card-' + t));
+            el.style.display = match ? '' : 'none';
+        }
+    });
+    // Hide section + count if empty after filtering
+    document.querySelectorAll('.rep-section').forEach(sec => {
+        const visible = sec.querySelectorAll('.rep-card:not([style*="none"])').length;
+        sec.style.display = visible === 0 ? 'none' : '';
+    });
+    // Also hide the actionable hero if its own cards all got filtered out —
+    // otherwise the header "26 cards" persists while the grid is empty.
+    document.querySelectorAll('.rep-actionable-hero').forEach(hero => {
+        const visible = hero.querySelectorAll('.rep-card:not([style*="none"])').length;
+        hero.style.display = visible === 0 ? 'none' : '';
+    });
+    // Update active button
+    document.querySelectorAll('[data-filter]').forEach(b => b.removeAttribute('variant'));
+    if (btn) btn.setAttribute('variant', 'primary');
+}
+</script>
+{% endblock %}

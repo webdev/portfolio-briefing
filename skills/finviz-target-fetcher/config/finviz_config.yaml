@@ -1,0 +1,40 @@
+# FINVIZ target-fetcher config
+# All values can be overridden via env vars: PB_FINVIZ_<UPPERCASE_KEY>
+
+# How long to keep a per-ticker target cached. Analyst targets don't change
+# minute-to-minute; 24h is generous and fits the once-a-day briefing run.
+cache_ttl_hours: 24
+
+# Polite throttling — don't hammer the public endpoint.
+# 2.0 sec/req = max 30 req/min. Real-world usage is one batch per day.
+rate_limit_seconds: 2.0
+
+# Soft daily cap on total requests. Held positions ~30-50 tickers + top
+# Scout candidates ~20-30 = comfortably under 60. Above this the skill
+# returns None for additional tickers rather than risking an IP block.
+daily_request_cap: 60
+
+# Timeout per request (seconds)
+request_timeout_seconds: 15
+
+# User-Agent for the public scrape. Realistic Mac Chrome UA — matches
+# what the canslim-screener already uses successfully.
+user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Cross-check divergence threshold. When FMP analyst PT and FINVIZ target
+# disagree by more than this percentage, flag the divergence in the
+# briefing's Data Quality panel. Routine 10-15% drift between sources is
+# normal; >20% means one source is stale or wrong.
+divergence_threshold_pct: 20.0
+
+# ETF-aware: never call FINVIZ for these tickers (they have no
+# meaningful per-fund analyst target). The list comes from
+# `intrinsic_value.DEFAULT_ETFS` at runtime; this is just a safety net.
+known_etfs:
+  - SPY
+  - QQQ
+  - IWM
+  - SMH
+  - SOXX
+  - VOO
+  - DIA

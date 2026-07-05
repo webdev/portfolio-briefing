@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Search — "{{ q }}"{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>Search</h1>
+    <p class="muted">Cross-snapshot search across briefing mentions (equity_reviews · options_reviews · long_term_opportunities · new_ideas · strategy_upgrades · actions).</p>
+</hgroup>
+
+<form class="search-form" action="/search" method="get">
+    <input name="q" value="{{ q }}" placeholder="Ticker, action kind, or date prefix (e.g. NVDA, CLOSE, 2026-06)" autofocus>
+    <select name="type" aria-label="Source filter">
+        <option value="" {% if not source_filter %}selected{% endif %}>All sources</option>
+        <option value="equity_review" {% if source_filter == 'equity_review' %}selected{% endif %}>Equity reviews</option>
+        <option value="options_review" {% if source_filter == 'options_review' %}selected{% endif %}>Options reviews</option>
+        <option value="action" {% if source_filter == 'action' %}selected{% endif %}>Actions</option>
+        <option value="long_term_opportunity" {% if source_filter == 'long_term_opportunity' %}selected{% endif %}>Long-term opps</option>
+        <option value="new_idea" {% if source_filter == 'new_idea' %}selected{% endif %}>New ideas</option>
+        <option value="strategy_upgrade" {% if source_filter == 'strategy_upgrade' %}selected{% endif %}>Strategy upgrades</option>
+    </select>
+    <button type="submit">Search</button>
+</form>
+
+{% if not q %}
+    <div class="empty">
+        Type a query above. Examples:
+        <ul style="color: var(--color-text-tertiary); margin-top: .5rem;">
+            <li><a href="/search?q=NVDA">NVDA</a> — every briefing mention</li>
+            <li><a href="/search?q=CLOSE&type=action">CLOSE</a> — every CLOSE action across snapshots</li>
+            <li><a href="/search?q=2026-06">2026-06</a> — every June briefing's mentions</li>
+            <li><a href="/search?q=HEDGE&type=action">HEDGE</a> — every hedge action</li>
+        </ul>
+    </div>
+{% elif not results %}
+    <div class="empty">No mentions found for <code>{{ q }}</code>{% if source_filter %} in {{ source_filter }}{% endif %}.</div>
+{% else %}
+
+<section>
+    <div class="eyebrow">Results &middot; {{ results|length }} mention{{ "s" if results|length != 1 else "" }}{% if source_filter %} in {{ source_filter }}{% endif %}</div>
+
+    {% if distinct_tickers and distinct_tickers|length <= 12 %}
+    <p class="muted" style="margin-bottom: 1rem;">Tickers in results:
+        {% for tk in distinct_tickers %}
+            <a href="/positions/{{ tk }}"><code>{{ tk }}</code></a>{% if not loop.last %} · {% endif %}
+        {% endfor %}
+    </p>
+    {% endif %}
+
+    <div class="search-results">
+        {% for r in results %}
+        <article class="search-result">
+            <div class="search-result-head">
+                <span class="date"><a href="/briefing/{{ r.date }}">{{ r.date }}</a></span>
+                <span class="src">{{ r.source }}</span>
+                <span class="rec-{{ r.kind or r.recommendation }}" title="{{ r.kind or r.recommendation or '' }}"><span class="action-icon">{{ (r.kind or r.recommendation) | action_icon }}</span> <strong>{{ r.kind or r.recommendation or "—" }}</strong></span>
+                <a href="/positions/{{ r.ticker }}"
+                   hx-get="/fragment/ticker_card/{{ r.ticker }}"
+                   hx-trigger="mouseenter"
+                   hx-target="#ticker-popover"
+                   hx-swap="innerHTML"><strong>{{ r.ticker }}</strong></a>
+            </div>
+            <div class="search-result-body">
+                {% if r.ident %}{{ r.ident | pretty_contract_compact }} · {% endif %}
+                {{ r.detail or "—" }}
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+
+{% endif %}
+{% endblock %}

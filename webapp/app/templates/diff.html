@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Diff — {{ date_a }} vs {{ date_b }}{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>Diff &mdash; <span class="num">{{ date_a }}</span> vs <span class="num">{{ date_b }}</span></h1>
+    <p class="muted">Position / action / Parkev / NLV changes between two snapshots.</p>
+</hgroup>
+
+<form class="diff-pickers"
+      hx-get="/fragment/diff/" hx-trigger="change"
+      hx-target="#diff-body" hx-swap="innerHTML"
+      onchange="this.setAttribute('hx-get', '/fragment/diff/' + this.date_a.value + '/' + this.date_b.value); htmx.process(this);">
+    <label>Older
+        <select name="date_a">
+            {% for d in all_dates %}
+            <option value="{{ d }}" {% if d == date_a %}selected{% endif %}>{{ d }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Newer
+        <select name="date_b">
+            {% for d in all_dates %}
+            <option value="{{ d }}" {% if d == date_b %}selected{% endif %}>{{ d }}</option>
+            {% endfor %}
+        </select>
+    </label>
+</form>
+
+<div id="diff-body">
+    {% include "diff_body.html" %}
+</div>
+{% endblock %}

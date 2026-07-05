@@ -140,13 +140,97 @@ def main():
         # without re-loading from disk.
         # Stashed after snapshot_inputs runs; see Step 2.
 
+        # Step 1.7: Fetch FINVIZ analyst targets (public scrape mode).
+        # Second source for analyst PT + normalized 1-5 recommendation
+        # score. Extends hard rule #12 (intrinsic value). Fail-open: any
+        # network error / block returns None per ticker; the briefing
+        # still renders without the FINVIZ chip. Cached 24h in
+        # <snapshot_dir>/.finviz_target_cache.json — hitting FINVIZ at
+        # most once per day for held + Parkev tier-3+ tickers (~50
+        # requests, well under the 60/day soft cap).
+        print("[Step 1.7] Fetching FINVIZ analyst targets (public scrape)...")
+        try:
+            _finviz_fetcher_dir = (Path(__file__).resolve().parent.parent.parent
+                                   / "finviz-target-fetcher" / "scripts")
+            sys.path.insert(0, str(_finviz_fetcher_dir))
+            from fetch_finviz_targets import fetch_targets as _fetch_finviz
+            _finviz_tickers = set()
+            for r in (recommendations_list or []):
+                tier = r.get("rating_tier") or 0
+                if tier >= 3 and r.get("ticker"):
+                    _finviz_tickers.add(str(r["ticker"]).upper())
+            # Also include currently-held tickers via a peek at accounts.json
+            # (positions haven't been fetched yet at this stage — cheap file read)
+            _accounts_p = snapshot_dir / "accounts.json"
+            if _accounts_p.exists():
+                import json as _json
+                try:
+                    _accts = _json.loads(_accounts_p.read_text(encoding="utf-8"))
+                    for _acct in _accts if isinstance(_accts, list) else _accts.get("accounts", []):
+                        for _pos in _acct.get("positions", []) or []:
+                            _tk = (_pos.get("symbol") or _pos.get("underlying") or "").upper()
+                            if _tk and "_" not in _tk:  # skip option contract symbols
+                                _finviz_tickers.add(_tk)
+                except Exception:
+                    pass
+            if _finviz_tickers:
+                _fv_targets, _fv_stats = _fetch_finviz(
+                    _finviz_tickers, cache_dir=snapshot_dir,
+                )
+                print(f"[Step 1.7]   {_fv_stats.successful} fetched · "
+                      f"{len([v for v in _fv_targets.values() if v])} with data · "
+                      f"{_fv_stats.blocked} blocked · daily_cap_hit={_fv_stats.daily_cap_hit}")
+            else:
+                print("[Step 1.7]   no tickers to fetch (no Parkev tier-3+ recs)")
+        except Exception as _e:
+            print(f"[Step 1.7] FINVIZ fetch failed (non-fatal): {_e}")
+
         # Step 2: Snapshot inputs
         print("[Step 2] Snapshotting inputs...")
-        snapshot_data = snapshot_inputs(
-            config, snapshot_dir,
-            etrade_fixture=args.etrade_fixture,
-            etrade_live=args.etrade_live,
-        )
+        # Build candidate chain-fetch list from Parkev BUY+ tickers so every
+        # actionable recommendation downstream has a live CSP ticket
+        # (CLAUDE.md rules #19 + #24). Without this, candidates like UBER
+        # show "E*TRADE chain unavailable — no CSP ticket" because the
+        # snapshot only fetched chains for currently-held option underlyings.
+        # Scope: tier ≥ 3 (BUY, Top 25/15/12, Top Stock) — about 95-100 names
+        # from Parkev's 191-rec sheet. Adds ~30-80 chain fetches; with 16
+        # parallel workers, ~3-4s extra runtime. Worth it for chain coverage
+        # on every actionable rec.
+        extra_chain_tickers: set[str] = set()
+        for r in (recommendations_list or []):
+            tier = r.get("rating_tier") or 0
+            if tier >= 3:  # BUY (3), Top 25/15/12 (4), Top Stock (5)
+                tk = r.get("ticker")
+                if tk:
+                    extra_chain_tickers.add(str(tk).upper())
+
+        try:
+            snapshot_data = snapshot_inputs(
+                config, snapshot_dir,
+                etrade_fixture=args.etrade_fixture,
+                etrade_live=args.etrade_live,
+                extra_chain_underlyings=sorted(extra_chain_tickers),
+            )
+        except Exception as _snap_err:
+            # 401 from E*TRADE = token hard-expired past midnight ET.
+            # Surface the fix instead of just re-raising the raw traceback.
+            _err_str = str(_snap_err)
+            if "401" in _err_str or "Unauthorized" in _err_str:
+                print("\n" + "=" * 72)
+                print("E*TRADE TOKEN EXPIRED (401 Unauthorized)")
+                print("=" * 72)
+                print("Your OAuth 1.0a token has hit its midnight-ET hard expiry.")
+                print("This needs a fresh browser handshake — a renewal call won't fix it.")
+                print("")
+                print("To re-authenticate, run in a terminal:")
+                print("")
+                print("  cd ~/workspace/portfolio-briefing")
+                print("  uv run python skills/daily-portfolio-briefing/scripts/etrade_auth.py --authenticate")
+                print("")
+                print("This opens the E*TRADE authorize URL in your browser, you approve,")
+                print("paste the verifier code back, and the pipeline resumes.")
+                print("=" * 72 + "\n")
+            raise
         # Make recommendations available to downstream skills via snapshot_data
         snapshot_data["recommendations_list"] = recommendations_list
 
@@ -201,6 +285,7 @@ def main():
             snapshot_data,
             recommendations_list,
             config,
+            gate_state=gate_state,
         )
         print(f"  Surfaced {len(long_term_ops)} long-term opportunity signal(s)")
 
@@ -249,6 +334,10 @@ def main():
                 entry = existing_short_puts.setdefault(t, {"count": 0, "strikes": []})
                 entry["count"] += abs(qty)
                 entry["strikes"].append(float(p.get("strike", 0) or 0))
+        # thematic_scout knobs (task #9): parallel defaults ON (pure speedup,
+        # same per-ticker logic); flip parallel:false in briefing.yaml to fall
+        # back to the sequential loop if yfinance ever rate-limits.
+        _ts_cfg = config.get("thematic_scout") or {}
         scout_payload = run_thematic_research(
             snapshot_dir=snapshot_dir,
             recs_map=recs_map,
@@ -256,6 +345,8 @@ def main():
             existing_short_puts=existing_short_puts,
             refresh=args.refresh_scout,
             ttl_hours=24,
+            parallel=bool(_ts_cfg.get("parallel", True)),
+            max_workers=int(_ts_cfg.get("max_workers", 8)),
         )
 
         # Step 7.4: Fill reconciliation + recommendation aging (spec Step 7.5).
@@ -331,6 +422,94 @@ def main():
                 f"{capital_plan_dict['skipped_actions']} skipped)"
             )
 
+        # Step 7.5: Rotation Advisor — find better entries than what user holds.
+        # Cross-references current holdings against theme peers + Parkev
+        # + FMP FV + FINVIZ target to surface "close SOFI, buy UBER" swaps.
+        # Fail-open: any missing input → skip that flavor, still render the
+        # rotation panel with the flavors that had data.
+        print("[Step 7.5] Computing rotation opportunities...")
+        rotation_opportunities: dict = {"equity": [], "options": [], "capital_plan": [], "stats": {}}
+        try:
+            from analysis import rotation_advisor
+            import yaml as _yaml
+            # Load theme universes from the thematic-scout skill
+            _theme_path = (Path(__file__).resolve().parent.parent.parent
+                           / "thematic-scout" / "references" / "theme_universes.yaml")
+            _theme_universes = {}
+            if _theme_path.exists():
+                with open(_theme_path) as _f:
+                    _theme_universes = _yaml.safe_load(_f) or {}
+            # Assemble holdings dict from equity_reviews
+            _holdings = []
+            for r in equity_reviews or []:
+                # Handle both dict rows and pydantic-like objects
+                _tk = r.get("ticker") if isinstance(r, dict) else getattr(r, "ticker", None)
+                _w = r.get("weight") if isinstance(r, dict) else getattr(r, "weight", None)
+                if not _tk:
+                    continue
+                _tier = None
+                try:
+                    from analysis.position_tiers import tier_for
+                    _tier = tier_for(_tk, config)
+                except Exception:
+                    pass
+                _holdings.append({
+                    "ticker": _tk,
+                    "weight_pct": (_w or 0) * 100,
+                    "tier": _tier or "C",
+                })
+            # Options list from options_reviews
+            _options_raw = [
+                (r if isinstance(r, dict) else r.__dict__)
+                for r in (options_reviews or [])
+            ]
+            _technicals = snapshot_data.get("technicals") or {}
+            _recs_map = {(r.get("ticker") or "").upper(): r
+                        for r in (recommendations_list or []) if r.get("ticker")}
+            # FMP fair values — best-effort read from the cache
+            _fv_by_ticker = {}
+            _fv_cache = snap_root / "intrinsic_value_cache.json"
+            if _fv_cache.exists():
+                try:
+                    _fv_by_ticker = {
+                        k.upper(): v for k, v in
+                        (json.loads(_fv_cache.read_text()).items())
+                    }
+                except Exception:
+                    pass
+            # FINVIZ cache
+            _finviz_targets = {}
+            _fv_finviz_cache = snap_root / ".finviz_target_cache.json"
+            if _fv_finviz_cache.exists():
+                try:
+                    _raw = json.loads(_fv_finviz_cache.read_text())
+                    _finviz_targets = {
+                        k.upper(): (v if v and not v.get("_null") else None)
+                        for k, v in _raw.items()
+                    }
+                except Exception:
+                    pass
+            _stress_cov = None
+            try:
+                _stress_cov = (snapshot_data.get("stress_coverage") or {}).get("coverage_ratio")
+            except Exception:
+                pass
+            rotation_opportunities = rotation_advisor.build_rotation_opportunities(
+                holdings=_holdings,
+                options=_options_raw,
+                theme_universes=_theme_universes,
+                technicals=_technicals,
+                recommendations=_recs_map,
+                finviz_targets=_finviz_targets,
+                fv_by_ticker=_fv_by_ticker,
+                stress_coverage=_stress_cov,
+            )
+            print(f"[Step 7.5]   {rotation_opportunities['stats']['equity_count']} equity · "
+                  f"{rotation_opportunities['stats']['options_count']} option · "
+                  f"{rotation_opportunities['stats']['capital_moves']} capital moves")
+        except Exception as _e:
+            print(f"[Step 7.5] rotation advisor failed (non-fatal): {_e}")
+
         # Step 8: Aggregate and render
         print("[Step 8] Aggregating and rendering briefing...")
         briefing_markdown, briefing_json = aggregate_briefing(
@@ -352,6 +531,12 @@ def main():
             gate_state=gate_state,
             aging_info=aging_info,
         )
+
+        # Attach rotation opportunities to the briefing JSON so the web
+        # app + downstream consumers can render the Rotations tab.
+        # Attached AFTER aggregate_briefing since aggregate never sees it.
+        if isinstance(briefing_json, dict):
+            briefing_json["rotation_opportunities"] = rotation_opportunities
 
         # Step 9: Quality gate
         print("[Step 9] Running quality gate...")
@@ -530,6 +715,63 @@ def main():
                     _shutil_w.copy(_wte_path, _deliv_w / _wte_path.name)
         except Exception as _we:
             print(f"  WARNING: when-to-enter report failed: {_we}", file=sys.stderr)
+
+        # Step 8.7: Broad-universe screener — daily wheel setups on names NOT
+        # already covered by Parkev's list or the Scout themes. Opt-in via
+        # briefing.yaml → screeners.broad_universe.enabled. Fail-open: any
+        # screener error is a warning, never blocks the briefing.
+        try:
+            _bu_cfg = (config.get("screeners") or {}).get("broad_universe") or {}
+            if _bu_cfg.get("enabled"):
+                print("[Step 8.7] Broad-universe screener...")
+                import importlib.util as _ilu_bu
+                import os as _os_bu
+                import shutil as _shutil_bu
+                _bu_path = (Path(__file__).resolve().parents[2]
+                            / "broad-universe-screener" / "scripts" / "screen_universe.py")
+                _bu_spec = _ilu_bu.spec_from_file_location("broad_universe_screener", _bu_path)
+                _bu_mod = _ilu_bu.module_from_spec(_bu_spec)
+                sys.modules["broad_universe_screener"] = _bu_mod
+                _bu_spec.loader.exec_module(_bu_mod)
+
+                _bu_config = _bu_mod.load_config(None)
+                # Output cache (task #9): reuse a same-day, same-config result
+                # younger than cache_ttl_hours instead of re-running the whole
+                # FMP scan + yfinance deep-dive. The banner + fair values below
+                # are ALWAYS re-computed fresh; fail-open (any cache problem →
+                # full run). Disable via screeners.broad_universe.cache_enabled.
+                _bu_result, _bu_from_cache = _bu_mod.run_screener_cached(
+                    _bu_config,
+                    date_str=today_date_str,
+                    cache_dir=_bu_mod.REPO_ROOT / "state" / "cache",
+                    cache_enabled=bool(_bu_cfg.get("cache_enabled", True)),
+                    ttl_hours=float(_bu_cfg.get("cache_ttl_hours", 6)),
+                )
+                if _bu_from_cache:
+                    print("  Broad-universe screener: cache hit — reused "
+                          f"today's result ({len(_bu_result.hits)} setups, "
+                          "FMP + yfinance calls skipped)")
+                _bu_mod.annotate_fair_values(
+                    _bu_result.hits, api_key=_os_bu.getenv("FMP_API_KEY"),
+                    cache_path=snapshot_dir.parent / "intrinsic_value_cache.json",
+                )
+                _bu_md = _bu_mod.render_report(
+                    _bu_result, date_str=today_date_str,
+                    capacity_banner=(gate_state.banner if gate_state is not None else None),
+                    capacity_open=(gate_state.open if gate_state is not None else True),
+                )
+                _bu_out = output_path.parent / f"daily_screener_{today_date_str}.md"
+                _bu_out.write_text(_bu_md)
+                print(f"Broad-universe screener: {_bu_out} "
+                      f"({len(_bu_result.hits)} setups)")
+                if not args.no_delivery and not is_draft:
+                    _deliv_bu = (Path(args.delivery_dir).expanduser() if args.delivery_dir
+                                 else Path(_os_bu.getenv("PORTFOLIO_BRIEFING_DELIVERY_DIR",
+                                                         str(Path.home() / "Documents" / "briefings"))).expanduser())
+                    _deliv_bu.mkdir(parents=True, exist_ok=True)
+                    _shutil_bu.copy(_bu_out, _deliv_bu / _bu_out.name)
+        except Exception as _bue:
+            print(f"  WARNING: broad-universe screener failed: {_bue}", file=sys.stderr)
 
         if is_draft:
             print(f"\nWARNING: Briefing marked as DRAFT due to quality gate issues.")

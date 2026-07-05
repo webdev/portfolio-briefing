@@ -1,0 +1,105 @@
+{# ─── tech_card(t) — infographic-style technical-analysis ticker card ───
+   `t` is the view-model built by app/tech_card.py (build_card /
+   build_for_ticker). Layout + palette copied from the user's standalone
+   technical_analysis_infographic.html so the webapp card reads the same:
+   header · returns · signal chips · BB track · S/R track · trend 2×2 ·
+   ST/LT verdicts. Hard rule #19: when the deep read is missing, the card
+   says "chart data unavailable, verify manually" — never placeholders. #}
+{% macro tech_card(t) %}
+<article class="tech-card{% if not t.available %} tech-card-unavailable{% endif %}" data-ticker="{{ t.ticker }}">
+    <header class="tc-head">
+        <div class="tc-head-l">
+            <a class="tc-tk no-popover" href="/positions/{{ t.ticker }}">{{ t.ticker }}</a>
+            {% if t.name %}<span class="tc-nm">{{ t.name }}</span>{% endif %}
+        </div>
+        {% if t.spot_str %}<span class="tc-spot num">{{ t.spot_str }}</span>{% endif %}
+    </header>
+
+    {% if not t.available %}
+    <div class="tc-unavailable-note">
+        📉 Chart data unavailable this cycle — verify manually.
+        <span class="tc-unavailable-sub">The deep technical read (BB · MACD · ATR · SMA · 52w) was not computed for {{ t.ticker }} in this snapshot.</span>
+    </div>
+    {% else %}
+
+    {# Returns row: 1w · 1m · 1y (or 3m) · ATH DD — green/red per sign #}
+    <div class="tc-returns">
+        {% for r in t.returns %}
+        <span class="tc-ret-item">{{ r.label }} <span class="tc-ret-{{ r.tone }} num">{{ r.value }}</span></span>
+        {% endfor %}
+    </div>
+
+    {# Signal chips: RSI · BB · MACD #}
+    <div class="tc-signals">
+        {% for c in t.chips %}
+        <span class="tc-chip tc-chip-{{ c.tone }}">{{ c.icon }} {{ c.label }}</span>
+        {% endfor %}
+    </div>
+
+    {# Bollinger Band position track #}
+    <div class="tc-bb">
+        <div class="tc-bb-labels">
+            <span>{{ t.bb.lower_str }}</span><span>{{ t.bb.mid_str }}</span><span>{{ t.bb.upper_str }}</span>
+        </div>
+        <div class="tc-bb-track">
+            <div class="tc-bb-mid-line"></div>
+            <div class="tc-bb-marker {{ t.bb.marker_class }}" style="left: {{ '%.1f' | format(t.bb.marker_left) }}%;"></div>
+        </div>
+        <div class="tc-bb-labels tc-bb-sublabels">
+            <span>Compressed</span><span>{{ t.bb.width_str }}</span><span>Stretched</span>
+        </div>
+    </div>
+
+    {# Support / Resistance track on the 52-week range #}
+    {% if t.sr %}
+    <div class="tc-sr">
+        <div class="tc-sr-track">
+            {% for left in t.sr.sup_lines %}<div class="tc-sr-line tc-sr-sup" style="left: {{ '%.1f' | format(left) }}%;"></div>{% endfor %}
+            {% for left in t.sr.res_lines %}<div class="tc-sr-line tc-sr-res" style="left: {{ '%.1f' | format(left) }}%;"></div>{% endfor %}
+            {% if t.sr.marker_left is not none %}<div class="tc-sr-marker" style="left: {{ '%.1f' | format(t.sr.marker_left) }}%;"></div>{% endif %}
+        </div>
+        <div class="tc-sr-labels"><span>{{ t.sr.lo_str }}</span><span>{{ t.sr.hi_str }}</span></div>
+        <div class="tc-sr-legend">
+            {% if t.sr.nearest_sup %}<div class="tc-sr-note tc-sr-note-sup">{{ t.sr.nearest_sup }}</div>{% endif %}
+            {% if t.sr.nearest_res %}<div class="tc-sr-note tc-sr-note-res">{{ t.sr.nearest_res }}</div>{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="tc-sr tc-sr-unavailable">S/R clusters unavailable this cycle — no levels shown (fail closed).</div>
+    {% endif %}
+
+    {# Trend 2×2 grid #}
+    <div class="tc-trend">
+        <div class="tc-trend-item">
+            <span class="tc-trend-label">Trend</span>
+            <span class="tc-trend-val">{{ t.trend.cross_str }}</span>
+        </div>
+        <div class="tc-trend-item">
+            <span class="tc-trend-label">vs 200-SMA</span>
+            <span class="tc-trend-val"><span class="tc-ret-{{ t.trend.vs200_tone }} num">{{ t.trend.vs200_str }}</span></span>
+        </div>
+        <div class="tc-trend-item">
+            <span class="tc-trend-label">52w range</span>
+            <span class="tc-trend-val num">{{ t.trend.range_str }}</span>
+        </div>
+        <div class="tc-trend-item">
+            <span class="tc-trend-label">Vol / ATR</span>
+            <span class="tc-trend-val num">{{ t.trend.vol_str }}</span>
+        </div>
+    </div>
+
+    {# Verdicts: short-term + long-term #}
+    <div class="tc-verdicts">
+        <div class="tc-verdict">
+            <span class="tc-v-label">Short-term (1-4 weeks)</span>
+            <span class="tc-v-val tc-v-{{ t.st.tone }}">{{ t.st.label }}</span>
+        </div>
+        <div class="tc-verdict">
+            <span class="tc-v-label">Long-term (3-12 months)</span>
+            <span class="tc-v-val tc-v-{{ t.lt.tone }}">{{ t.lt.label }}</span>
+        </div>
+    </div>
+
+    {% endif %}
+</article>
+{% endmacro %}

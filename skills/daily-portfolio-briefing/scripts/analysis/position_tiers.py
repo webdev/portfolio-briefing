@@ -214,15 +214,143 @@ def cc_settings_for_tier(tier: str, config: dict | None) -> dict:
     return out
 
 
-def is_cc_enabled_for_tier(tier: str, config: dict | None) -> bool:
-    """True if covered-call recommendations are allowed for this tier.
+def engineered_cc_eligible(
+    ticker: str,
+    config: dict | None,
+    *,
+    spot: float | None,
+    rsi: float | None,
+    iv_rank: float | None,
+    drawdown_pct: float | None,
+    sma_200: float | None,
+    analyst_pt: float | None,
+) -> tuple[bool, dict, list[str]]:
+    """Evaluate whether a Tier A engineered CC fires on `ticker` today.
+
+    Returns (eligible, envelope_dict, reasons_or_blockers).
+    envelope_dict includes the *minimum* rebound-proof strike so the
+    caller (strategy_upgrades.py) can pick the actual strike from the
+    live chain at or above it.
+
+    See CLAUDE.md hard rule #34 + engineered mode block in briefing.yaml.
+    """
+    reasons: list[str] = []
+    settings = cc_settings_for_tier("A", config) or {}
+    eng = (settings.get("engineered") or {}) if isinstance(settings, dict) else {}
+    empty_envelope = {"applies": False}
+
+    if not eng or not eng.get("enabled"):
+        return (False, empty_envelope, ["engineered mode disabled"])
+
+    # Ticker must still be on the willingness list (belt + suspenders)
+    whitelist = settings.get("willing_to_write_cc_on") or []
+    whitelist_upper = {str(t).upper() for t in whitelist if t}
+    if ticker.upper() not in whitelist_upper:
+        return (False, empty_envelope,
+                [f"{ticker} not on willing_to_write_cc_on whitelist"])
+
+    # Numeric gates
+    if rsi is None or rsi < float(eng.get("rsi_floor", 40)):
+        reasons.append(f"RSI {rsi} below floor {eng.get('rsi_floor', 40)}")
+    if iv_rank is None or iv_rank < float(eng.get("min_iv_rank", 70)):
+        reasons.append(f"IV rank {iv_rank} below {eng.get('min_iv_rank', 70)}")
+    if drawdown_pct is None or drawdown_pct < float(eng.get("min_drawdown_pct", 10)):
+        reasons.append(
+            f"drawdown {drawdown_pct}% below {eng.get('min_drawdown_pct', 10)}% "
+            "— no rebound premium in the setup"
+        )
+
+    if reasons:
+        return (False, empty_envelope, reasons)
+
+    # Compute the minimum rebound-proof strike.
+    #
+    # The 200-SMA is the practical 21-day snapback target; analyst PT is a
+    # 12-month target. Using analyst PT as a HARD floor pushes strikes so
+    # far OTM (35-45%) that premium collapses to pennies. So:
+    #   - HARD floor:  max(spot × (1 + min_otm_pct/100),  200-SMA)
+    #   - SOFT flag:   note when strike is also above analyst PT — that's
+    #                  a bonus safety marker, not a gate.
+    # Callers that want the ultra-conservative "above analyst PT too"
+    # behavior can set `min_strike_above_analyst_pt: true` in engineered.
+    if not spot or spot <= 0:
+        return (False, empty_envelope, ["spot missing"])
+    baseline = spot * (1 + float(eng.get("min_otm_pct", 13)) / 100.0)
+    candidates = [baseline]
+    if eng.get("require_rebound_proof", True):
+        if sma_200 and sma_200 > spot:
+            candidates.append(sma_200)
+    # Optional ultra-conservative: also require above analyst PT
+    if eng.get("min_strike_above_analyst_pt", False):
+        if analyst_pt and analyst_pt > spot:
+            candidates.append(analyst_pt)
+    min_strike = max(candidates)
+    # Round up to nearest $5 for cleaner chain matching
+    min_strike = ((int(min_strike / 5) + 1) * 5)
+
+    # Note whether the resulting strike is also above analyst PT — a "bonus"
+    # safety signal the caller can surface in the recommendation.
+    above_analyst_pt = bool(analyst_pt and min_strike > analyst_pt)
+
+    envelope = {
+        "applies": True,
+        "ticker": ticker.upper(),
+        "min_strike": min_strike,
+        "min_strike_pct_otm": round((min_strike / spot - 1) * 100, 1),
+        "max_delta": float(eng.get("max_delta", 0.15)),
+        "max_dte": int(eng.get("max_dte", 21)),
+        "coverage_cap_pct": float(eng.get("coverage_cap_pct", 20)),
+        "above_analyst_pt": above_analyst_pt,
+        "rationale": (
+            f"Tier A ENGINEERED CC — spot ${spot:.2f}, "
+            f"strike ≥ ${min_strike} ({round((min_strike/spot-1)*100)}% OTM), "
+            + (f"rebound-proof above 200-SMA ${sma_200:.0f}"
+               if sma_200 else f"≥{eng.get('min_otm_pct', 13)}% OTM baseline")
+            + (f" (bonus: also above analyst PT ${analyst_pt:.0f})"
+               if above_analyst_pt and analyst_pt else "")
+            + f". Cover ≤{eng.get('coverage_cap_pct', 20)}% of shares, "
+            f"DTE ≤{eng.get('max_dte', 21)}."
+        ),
+    }
+    return (True, envelope, ["engineered gates all pass"])
+
+
+def is_cc_enabled_for_tier(tier: str, config: dict | None,
+                            ticker: str | None = None) -> bool:
+    """True if covered-call recommendations are allowed for this tier
+    OR (Tier A only) for the specific ticker via per-name override.
 
     Tier A's default is False (no CCs on long-term core compounders).
-    Tier B / C default to True. A user can override either way via
-    `covered_call_tiers.tier_x.enabled`.
+    But the user can OPT IN for specific Tier A names via config:
+
+        covered_call_tiers:
+          tier_a:
+            enabled: false                # default: no
+            willing_to_write_cc_on:       # explicit opt-in list
+              - NVDA                      # write conservative CCs
+              - MSFT
+
+    When the ticker is on the willing list, we return True regardless of
+    the tier default — but the STRICT envelope (max_delta ≤ 0.10,
+    min_otm_pct ≥ 20, coverage_cap_pct ≤ 20, max_dte ≤ 30, rsi_floor ≥ 75)
+    still applies via cc_settings_for_tier. Callers MUST use the strict
+    envelope for these opt-in tier-A writes.
+
+    Tier B / C default to True. Ticker override is Tier A only — for
+    Tier B/C, the ticker parameter is ignored.
     """
     settings = cc_settings_for_tier(tier, config)
-    return bool(settings.get("enabled", True))
+    base_enabled = bool(settings.get("enabled", True))
+    if base_enabled:
+        return True
+    # Tier A opt-in check
+    if tier and tier.upper() == "A" and ticker:
+        whitelist = settings.get("willing_to_write_cc_on") or []
+        if isinstance(whitelist, list):
+            whitelist_upper = {str(t).upper() for t in whitelist}
+            if ticker.upper() in whitelist_upper:
+                return True
+    return False
 
 
 def concentration_cap_for_tier(tier: str, config: dict | None) -> float:

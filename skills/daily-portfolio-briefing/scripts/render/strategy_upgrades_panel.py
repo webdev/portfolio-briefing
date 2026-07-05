@@ -45,8 +45,11 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     # "READY TO WRITE" list into a "Wait for strength" section. Only RSI-favored
     # (≥60) or RSI-unknown writes stay actionable. Oversold (<35) was already
     # pulled into the "Held back by RSI" footer via rsi_blocked above.
-    cc_ready = [c for c in new_ccs if not c.get("rsi_wait")]
-    cc_wait = [c for c in new_ccs if c.get("rsi_wait")]
+    # lt_secular_wait (hard rule #39): a new CC on a measured LT
+    # `secular-uptrend` chart caps a compounder — demoted to the wait list
+    # alongside the RSI mid-range demotion (shown, never hidden).
+    cc_ready = [c for c in new_ccs if not c.get("rsi_wait") and not c.get("lt_secular_wait")]
+    cc_wait = [c for c in new_ccs if c.get("rsi_wait") or c.get("lt_secular_wait")]
 
     def _render_cc(cc: dict, header_badge: str) -> None:
         from datetime import date, timedelta
@@ -96,6 +99,8 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         )
         if cc.get("rsi_14") is not None:
             lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
+        if cc.get("lt_secular_note"):
+            lines.append(f"  - **⚠ LT-trend:** {cc.get('lt_secular_note')}")
         if earnings_blocked:
             lines.append(
                 f"  - ⚠ Earnings on {earnings_date} — defer writing until after the print "
@@ -266,6 +271,11 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             lines.append("")
 
     # === SUB-LOT COMPLETIONS ===
+    # Discipline-deferred sub-lots (has-CSP entry mechanism / LT-verdict gate,
+    # hard rules #22 / #39) are pulled out of the actionable list into a
+    # deferred subsection — shown with the reason, never hidden (rule #24).
+    sublots_deferred = [s for s in sublots if s.get("discipline_deferred")]
+    sublots = [s for s in sublots if not s.get("discipline_deferred")]
     if sublots:
         lines.append(f"### Sub-lot Completions ({len(sublots)})")
         lines.append("")
@@ -281,6 +291,13 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             lines.append(f"**{symbol} — {held} shares (need {to_buy} more)**{_promo_badge(sub)}")
             if sub.get("rsi_14") is not None:
                 lines.append(f"  - **RSI:** {sub.get('rsi_tag')} — {sub.get('rsi_note', '')}")
+            # Capacity-gate DEFERRED tag (hard rule #41) — full ticket still
+            # renders; it just can't read as a green light while coverage is
+            # below the floor.
+            if sub.get("capacity_deferred_tag"):
+                lines.append(f"  - **{sub.get('capacity_deferred_tag')}**")
+            if sub.get("lt_verdict_warning"):
+                lines.append(f"  - **⚠ LT-trend note:** {sub.get('lt_verdict_warning')}")
             lines.append(f"  - Current: {held} shares @ ${price:.2f} = ${held * price:,.0f} ({held / 100 * 100:.0f}% of lot)")
             lines.append(f"  - Buy {to_buy} more = ${cost:,.0f} → {held + to_buy}-share lot ({post_weight:.1f}% NLV post-buy)")
 
@@ -308,6 +325,26 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 )
 
             lines.append("")
+
+    # === SUB-LOT COMPLETIONS — DEFERRED (discipline gates) ===
+    if sublots_deferred:
+        lines.append(
+            f"### 🛡️ Sub-lot completions — deferred "
+            f"(discipline gates) ({len(sublots_deferred)})"
+        )
+        lines.append(
+            "_Held out of the actionable list by the has-CSP entry-mechanism "
+            "deferral (rule #22) or the LT-verdict gate (rule #39). Shown so "
+            "nothing is silently dropped (rule #24)._"
+        )
+        lines.append("")
+        for sub in sublots_deferred:
+            sym = sub.get("underlying")
+            held = int(sub.get("shares_held") or 0)
+            to_buy = int(sub.get("shares_to_buy") or 0)
+            reason = sub.get("discipline_reason") or "discipline gate"
+            lines.append(f"- **{sym}** — {held} shares (would need {to_buy} more) · ⏸ {reason}")
+        lines.append("")
 
     # === HELD BACK BY RSI (removed by the central hook) ===
     if rsi_removed:

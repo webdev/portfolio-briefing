@@ -167,15 +167,26 @@ themes:
     notes: "Satellite buildout + earth observation feeding AI models. SPCX added at IPO 2026-06-12."
 
   ancillary_robotics:
-    name: "Robotics"
+    name: "Robotics & Autonomy"
     group: "Ancillary"
     anchors:
+      # ── Platforms (physical + software) ──
       - TSLA   # tesla — Optimus + FSD as robotics platform
       - PATH   # UiPath — RPA / software robots
       - AMZN   # amazon — warehouse robotics
       - UBER   # mobility / autonomy via Waymo partnerships — added 2026-06-01
+      # ── Perception & sensing (added 2026-07-02) ──
+      # The "eyes" of AI-in-the-physical-world — ADAS, machine vision, lidar.
+      # Rationale: the platforms above are useless without perception; theme
+      # widened to cover the sensor stack alongside the actuator stack.
+      - MBLY   # Mobileye — ADAS + computer vision market leader (Intel-majority)
+      - CGNX   # Cognex — industrial machine vision (the "eyes" of factory robots)
+      - APTV   # Aptiv — ADAS software + AV/EV tier-1 supplier
+      - OUST   # Ouster — lidar (post-Velodyne consolidation)
+      - LAZR   # Luminar — automotive lidar (Volvo/Mercedes) — speculative, small cap
+      - AEVA   # Aeva — FMCW lidar (differentiated tech) — speculative, micro cap
     etfs: [BOTZ, ROBO]
-    notes: "Physical + software robotics, including autonomous-mobility platforms"
+    notes: "Physical + software robotics AND the perception layer (vision + lidar) that powers them. NVDA (Isaac/GR00T/Drive AV) is tracked under semis but is arguably the largest robotics-enablement platform in the market — theme momentum reads may undercount NVDA's contribution."
 
   ancillary_drones:
     name: "Drones"

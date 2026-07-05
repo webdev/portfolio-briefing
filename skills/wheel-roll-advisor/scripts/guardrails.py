@@ -84,6 +84,114 @@ def check_crash_stop(
     return GuardrailResult(fired=False)
 
 
+def check_smart_take_profit(
+    position: Dict[str, Any],
+    params: Dict[str, Any],
+) -> GuardrailResult:
+    """Smart take-profit rule — the "optimize gains without crazy risk" gate.
+
+    Task #49 answer to user (2026-07-01): "closing at 32% is wasteful,
+    optimize for gains, but don't want crazy risk."
+
+    Three-layer logic — each layer is a decision hook:
+
+    1. **Time-adjusted early close** — close a trade that's going
+       exceptionally fast. Rule: close when captured >= 2× the linear
+       decay expected for time elapsed. E.g., 40% capture in 10 days of
+       a 60-DTE trade (17% duration elapsed) means 40 / (17 × 2) = 1.18×
+       expected — fire CLOSE. Rewards fast wins; ignores slow trades.
+
+    2. **Gamma-escape** — if DTE < gamma_escape_dte (default 10 days)
+       AND captured >= gamma_escape_min_profit (default 0.30), CLOSE.
+       Locks in the win before the last-week gamma-risk zone eats it.
+
+    3. **Hard ceiling** — if captured >= hard_ceiling_pct (default 0.85),
+       CLOSE unconditionally. The remaining premium isn't worth waiting
+       for; gamma risk grows exponentially near max profit.
+
+    All three fire as CLOSE_FOR_PROFIT so the summary line reads
+    "💰 CLOSE (profit)" in the UI. Returns HOLD when none fire — the
+    matrix walker then applies the standard cells.
+    """
+    entry = float(position.get("entryPrice", 0))
+    current_mid = float(position.get("currentMid", 0))
+    dte = int(position.get("daysToExpiry", 0))
+    initial_dte = int(position.get("initialDte", 0)) or int(position.get("totalDte", 0))
+
+    if entry <= 0 or current_mid < 0:
+        return GuardrailResult(fired=False)
+
+    profit_pct = (entry - current_mid) / entry
+    if profit_pct <= 0:
+        return GuardrailResult(fired=False)
+
+    # Layer 3: HARD CEILING — always close near max profit
+    hard_ceiling = float(params.get("hard_ceiling_pct", 0.85))
+    if profit_pct >= hard_ceiling:
+        return GuardrailResult(
+            fired=True,
+            decision=Decision(
+                decision="CLOSE_FOR_PROFIT",
+                matrix_cell="GUARDRAIL_HARD_CEILING",
+                rationale=(
+                    f"Hard-ceiling close — captured {profit_pct*100:.0f}% "
+                    f"(≥{hard_ceiling*100:.0f}%). Remaining premium not worth "
+                    f"gamma risk."
+                ),
+                warnings=["hard_ceiling_fired"],
+            ),
+        )
+
+    # Layer 2: GAMMA ESCAPE — close in the last week
+    gamma_dte = int(params.get("gamma_escape_dte", 10))
+    gamma_min = float(params.get("gamma_escape_min_profit", 0.30))
+    if dte <= gamma_dte and profit_pct >= gamma_min:
+        return GuardrailResult(
+            fired=True,
+            decision=Decision(
+                decision="CLOSE_FOR_PROFIT",
+                matrix_cell="GUARDRAIL_GAMMA_ESCAPE",
+                rationale=(
+                    f"Gamma-escape close — DTE {dte} ≤ {gamma_dte}, "
+                    f"captured {profit_pct*100:.0f}%. Lock the win before "
+                    f"the gamma-risk zone."
+                ),
+                warnings=["gamma_escape_fired"],
+            ),
+        )
+
+    # Layer 1: TIME-ADJUSTED — close fast winners
+    if initial_dte > 0 and dte < initial_dte:
+        days_elapsed = initial_dte - dte
+        pct_elapsed = days_elapsed / initial_dte
+        # Multiplier — fire when profit ≥ multiplier × linear expected decay
+        multiplier = float(params.get("time_adjusted_multiplier", 2.0))
+        expected_linear = pct_elapsed * multiplier
+        # Only relevant when the trade has been alive long enough to matter
+        min_days_elapsed = int(params.get("time_adjusted_min_days_elapsed", 3))
+        min_profit_floor = float(params.get("time_adjusted_min_profit", 0.30))
+        if (days_elapsed >= min_days_elapsed
+            and profit_pct >= min_profit_floor
+            and profit_pct >= expected_linear):
+            return GuardrailResult(
+                fired=True,
+                decision=Decision(
+                    decision="CLOSE_FOR_PROFIT",
+                    matrix_cell="GUARDRAIL_TIME_ADJUSTED",
+                    rationale=(
+                        f"Time-adjusted close — captured {profit_pct*100:.0f}% "
+                        f"in {days_elapsed}d of {initial_dte}d "
+                        f"({pct_elapsed*100:.0f}% duration elapsed). Trade is "
+                        f"{profit_pct/max(pct_elapsed, 0.01):.1f}× faster than "
+                        f"linear — lock the win, redeploy the collateral."
+                    ),
+                    warnings=["time_adjusted_fired"],
+                ),
+            )
+
+    return GuardrailResult(fired=False)
+
+
 def check_open_order(context: Dict[str, Any]) -> GuardrailResult:
     """Check if there's already an open order pending."""
     
@@ -235,17 +343,23 @@ def run_pre_matrix_guardrails(
 ) -> Optional[Decision]:
     """Run pre-matrix guardrails in order. Return first that fires."""
     
+    # Task #49: smart take-profit params live in a nested "smart_take_profit"
+    # block under wheel_parameters. Flatten them into the params dict the
+    # guardrail expects (falls back to sensible defaults if unset).
+    smart_tp_params = {**params, **(params.get("smart_take_profit") or {})}
+
     checks = [
         check_loss_stop(position, params),
         check_crash_stop(position),
+        check_smart_take_profit(position, smart_tp_params),  # ← task #49
         check_open_order(context),
         check_earnings_imminent(position, underlying, params),
     ]
-    
+
     for result in checks:
         if result.fired:
             return result.decision
-    
+
     return None
 
 

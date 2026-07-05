@@ -147,6 +147,82 @@ def save_state(path, state: dict) -> None:
     p.write_text(json.dumps(state, indent=2))
 
 
+def _notify_webapp() -> tuple[bool, dict]:
+    """POST to the webapp's /refresh/notify so it re-materializes
+    projections immediately (task #46). Returns (ok, payload_dict).
+
+    Payload includes {snapshots_loaded, latest_date, checksum} — the
+    checksum is a short SHA-256 prefix of the briefing file the webapp
+    sees, so the bot's delivery message can include the same value and
+    the user has a visual match (task #50).
+
+    Config:
+      - PB_WEBAPP_URL: base URL. Defaults to http://127.0.0.1:17776.
+        Set to empty string to disable notify entirely.
+
+    Fail-open: any error is logged to stderr and swallowed.
+    """
+    default_url = "http://127.0.0.1:17776"
+    webapp_url = os.environ.get("PB_WEBAPP_URL", default_url).rstrip("/")
+    if not webapp_url:
+        return (False, {"error": "PB_WEBAPP_URL empty — webapp notify disabled"})
+    try:
+        r = requests.post(f"{webapp_url}/refresh/notify", timeout=15)
+        if r.status_code == 200:
+            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            n = data.get("snapshots_loaded", "?")
+            chk = data.get("checksum") or "?"
+            print(f"[webapp-notify] {webapp_url} materialized OK "
+                  f"({n} snapshots · checksum {chk})", file=sys.stderr)
+            return (True, data)
+        else:
+            print(f"[webapp-notify] {webapp_url} returned {r.status_code}",
+                  file=sys.stderr)
+            return (False, {"error": f"HTTP {r.status_code}"})
+    except requests.RequestException as e:
+        print(f"[webapp-notify] {webapp_url} unreachable: {e}", file=sys.stderr)
+        return (False, {"error": str(e)})
+
+
+def _briefing_checksum(path: str) -> str | None:
+    """Compute the same short SHA-256 prefix the webapp shows, so the
+    delivery message carries the value the user will see on the UI."""
+    import hashlib
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:8]
+    except OSError:
+        return None
+
+
+def _extract_fable_section(md: str) -> str | None:
+    """Pull the "## 🔍 Fable's second opinion" section out of the
+    briefing so we can send it as a standalone Telegram message
+    (task #51). Returns None when the section is absent.
+
+    The section starts at "## 🔍 Fable's second opinion" and ends at
+    the next "## " header OR end-of-file, whichever comes first.
+    """
+    if not md or "## 🔍 Fable's second opinion" not in md:
+        return None
+    lines = md.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## 🔍 Fable"):
+            start = i
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+    section = "\n".join(lines[start:end]).strip()
+    # Trim to Telegram's 4096-char message limit with some headroom.
+    return section[:4000]
+
+
 def run_briefing(repo_root, delivery_dir, log_dir):
     """Run the scheduled briefing; return (exit_code, briefing_path, log_tail)."""
     script = Path(repo_root) / "skills" / "daily-portfolio-briefing" / "scripts" / "run_briefing_scheduled.sh"
@@ -260,7 +336,28 @@ class BriefingBot:
                         self.tg.send_message(chat_id, chunk, parse_mode="MarkdownV2")
                 else:
                     self.tg.send_message(chat_id, extract_summary(md))
-                self.tg.send_document(chat_id, briefing_path, caption="Full briefing")
+                # Compute checksum + surface it in the caption so the user
+                # can visually match the value shown in the webapp UI
+                # (task #50).
+                chk = _briefing_checksum(briefing_path) or "?"
+                caption = f"Full briefing · checksum {chk}"
+                self.tg.send_document(chat_id, briefing_path, caption=caption)
+                # Task #51: pull the fable-review section from the
+                # briefing and send it as a follow-up message. Falls
+                # back gracefully when the section is absent.
+                fable_section = _extract_fable_section(md)
+                if fable_section:
+                    self.tg.send_message(chat_id, fable_section)
+                # Ping the webapp so it re-materializes projections
+                # immediately (task #46).
+                ok, payload = _notify_webapp()
+                if ok:
+                    webapp_chk = payload.get("checksum") or "?"
+                    match = "✅ matches" if webapp_chk == chk else "⚠ mismatch"
+                    self.tg.send_message(
+                        chat_id,
+                        f"🔄 Webapp updated · checksum {webapp_chk} {match}",
+                    )
             else:
                 self.tg.send_message(
                     chat_id,

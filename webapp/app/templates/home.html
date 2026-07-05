@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% block title %}Home — Portfolio Briefing{% endblock %}
+
+{% block content %}
+{% if not briefing %}
+    <article class="alert alert-red">
+        <strong>No briefings loaded yet.</strong>
+        Expected to find <code>briefing_*.json</code> under <code>{{ delivery_dir }}</code>.
+        Run the pipeline (<code>uv run python skills/daily-portfolio-briefing/scripts/run_briefing.py</code>) to generate one.
+    </article>
+{% else %}
+
+    {# ─── PRIMARY READING PATH — document view of the raw briefing ───
+       User feedback (2026-06-30): "regular markdown file was a lot more
+       understandable." This link is prominent so the linear-read flow
+       is the FIRST thing offered. The dashboard below is optional
+       skim-first surface. #}
+    <a class="home-doc-link" href="/briefing/{{ briefing.date.isoformat() }}/md">
+        <span class="home-doc-link-icon">📄</span>
+        <div>
+            <strong>Read as document</strong>
+            <span class="muted">— the full briefing as a plain-text memo, top to bottom</span>
+        </div>
+        <span class="home-doc-link-arrow">→</span>
+    </a>
+
+    {# ─── HERO — one-sentence portfolio state ─── #}
+    <section class="home-hero home-hero-{{ hero_sentence.tone }}">
+        <div class="home-hero-inner">
+            <span class="home-hero-icon">{{ hero_sentence.icon }}</span>
+            <h1 class="home-hero-text">{{ hero_sentence.text }}</h1>
+        </div>
+        <div class="home-hero-meta">
+            <span class="muted">{{ briefing.date.isoformat() }}</span>
+            {% if topbar and topbar.checksum %}
+                <span class="home-hero-checksum" title="Briefing SHA-256 fingerprint. Changes when you regenerate — proves the UI matches the freshly-run pipeline.">{{ topbar.checksum }}</span>
+            {% endif %}
+            {% if briefing.regime %}
+                · <span class="pill-regime regime-{{ briefing.regime }}">{{ briefing.regime }}</span>
+            {% endif %}
+        </div>
+    </section>
+
+    {# ─── ROUTINE CHECKLIST — dismissable, resets daily ───
+       Tier 3 UX: guide the morning workflow for a "read once, act,
+       close" user. Persisted in localStorage keyed by date so it
+       resets each morning. Fully client-side: no backend state. #}
+    <section class="home-checklist" id="home-checklist"
+             data-date="{{ briefing.date.isoformat() }}"
+             style="display: none;">
+        <header class="home-checklist-head">
+            <strong>📋 Morning routine</strong>
+            <button class="home-checklist-dismiss" onclick="dismissChecklist()" title="Hide until tomorrow">✕</button>
+        </header>
+        <ol class="home-checklist-steps">
+            {% if red_flag_counts.critical %}
+            <li data-step="review-critical">
+                <label>
+                    <input type="checkbox" onchange="saveChecklist()">
+                    <span>Review <strong>{{ red_flag_counts.critical }} critical alert{{ 's' if red_flag_counts.critical != 1 else '' }}</strong> above</span>
+                </label>
+            </li>
+            {% endif %}
+            {% if urgent_actions %}
+            <li data-step="approve-actions">
+                <label>
+                    <input type="checkbox" onchange="saveChecklist()">
+                    <span>Decide on <strong>{{ urgent_actions|length }} urgent action{{ 's' if urgent_actions|length != 1 else '' }}</strong> below</span>
+                </label>
+            </li>
+            {% endif %}
+            {% if top_opportunities %}
+            <li data-step="skim-opps">
+                <label>
+                    <input type="checkbox" onchange="saveChecklist()">
+                    <span>Skim <strong>top opportunities</strong> (or <a href="/setups/latest">see all setups</a>)</span>
+                </label>
+            </li>
+            {% endif %}
+            <li data-step="note-watch">
+                <label>
+                    <input type="checkbox" onchange="saveChecklist()">
+                    <span>Note what to watch tomorrow (<a href="/history">history</a> / <a href="/diff/yesterday/latest">diff</a>)</span>
+                </label>
+            </li>
+        </ol>
+    </section>
+
+    {# ─── KPI STRIP — flat text, no cards ─── #}
+    <section class="home-kpi-strip">
+        <span class="home-kpi">
+            <span class="home-kpi-label">NLV</span>
+            <span class="home-kpi-value num">${{ "{:,.0f}".format(briefing.nlv) if briefing.nlv else "n/a" }}</span>
+        </span>
+        <span class="home-kpi-sep">·</span>
+        <span class="home-kpi">
+            <span class="home-kpi-label">Cash</span>
+            <span class="home-kpi-value num">{{ "{:.1f}%".format(briefing.cash_pct * 100) if briefing.cash_pct is not none else "n/a" }}</span>
+            {% if briefing.cash %}<span class="muted num">(${{ "{:,.0f}".format(briefing.cash) }})</span>{% endif %}
+        </span>
+        <span class="home-kpi-sep">·</span>
+        <span class="home-kpi {{ 'home-kpi-red' if coverage is not none and coverage < 0.5 else ('home-kpi-yellow' if coverage is not none and coverage < 0.7 else 'home-kpi-green') }}">
+            <span class="home-kpi-label">Coverage</span>
+            <span class="home-kpi-value num">{{ "{:.2f}×".format(coverage) if coverage is not none else "n/a" }}</span>
+        </span>
+    </section>
+
+    {# ─── URGENT ACTIONS — max 3 ─── #}
+    {% if urgent_actions %}
+    <section class="home-urgent">
+        <header class="home-section-head">
+            <strong>🎯 Urgent actions ({{ urgent_actions|length }})</strong>
+            {% if briefing.actions|length > urgent_actions|length %}
+            <a href="/briefing/{{ briefing.date.isoformat() }}#actions" class="muted">{{ briefing.actions|length - urgent_actions|length }} more in the full briefing →</a>
+            {% endif %}
+        </header>
+        <div class="home-urgent-cards">
+            {% for a in urgent_actions %}
+            {% set variant = action_variant(a.kind, a.summary) %}
+            <article class="home-urgent-card rec-{{ a.kind }} home-urgent-{{ variant.tone }}">
+                <header class="home-urgent-card-head">
+                    <span class="action-icon">{{ variant.icon }}</span>
+                    <strong title="{{ variant.note or '' }}">{{ variant.label }}</strong>
+                    <span class="home-urgent-card-ident">{{ a.ident | pretty_contract }}</span>
+                    {% if a.days_flagged and a.days_flagged >= 3 %}
+                    <span class="home-urgent-card-age {{ 'stalled' if a.days_flagged >= 6 else '' }}"
+                          title="This decision first surfaced {{ a.days_flagged }} days ago — verify against today's price before acting. Take-profit thresholds may no longer apply if the position moved back toward break-even.">
+                        ⏳ {{ a.days_flagged }}d stale
+                    </span>
+                    {% endif %}
+                </header>
+                <div class="home-urgent-card-summary">
+                    {{ a.summary | summary_html(a.kind, a.ident) }}
+                </div>
+                {% if variant.note %}
+                <div class="home-urgent-card-note">
+                    <em>{{ variant.note }}</em>
+                </div>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {# ─── DIFF SUMMARY — one line ─── #}
+    {% if diff_summary %}
+    <section class="home-diff-strip">
+        <span class="home-diff-label">Since {{ diff_summary.dates.a or "yesterday" }}:</span>
+        {% if diff_summary.nlv_delta is not none %}
+            <span class="home-diff-item">
+                NLV
+                <strong class="num" style="color: {{ 'var(--color-positive)' if diff_summary.nlv_delta >= 0 else 'var(--color-danger)' }}">
+                    {{ "{:+,.0f}".format(diff_summary.nlv_delta) }}
+                </strong>
+                {% if diff_summary.nlv_pct is not none %}({{ "{:+.1%}".format(diff_summary.nlv_pct) }}){% endif %}
+            </span>
+            <span class="home-kpi-sep">·</span>
+        {% endif %}
+        {% if diff_summary.added or diff_summary.removed %}
+            <span class="home-diff-item">
+                {% if diff_summary.added %}{{ diff_summary.added }} added{% endif %}
+                {% if diff_summary.added and diff_summary.removed %}, {% endif %}
+                {% if diff_summary.removed %}{{ diff_summary.removed }} removed{% endif %}
+            </span>
+            <span class="home-kpi-sep">·</span>
+        {% endif %}
+        {% if diff_summary.new_actions or diff_summary.done_actions %}
+            <span class="home-diff-item">
+                {% if diff_summary.new_actions %}🆕 {{ diff_summary.new_actions }} new{% endif %}
+                {% if diff_summary.new_actions and diff_summary.done_actions %}, {% endif %}
+                {% if diff_summary.done_actions %}✓ {{ diff_summary.done_actions }} done{% endif %}
+            </span>
+            <span class="home-kpi-sep">·</span>
+        {% endif %}
+        <a href="/diff/yesterday/latest" class="muted">See full diff →</a>
+    </section>
+    {% endif %}
+
+    {# ─── FABLE PREVIEW — one-line LLM callout with link to full review ───
+       Task #53. Only shown when a review exists for the latest briefing.
+       Design: single sentence, italic, link to full tab. Not competing
+       with the deterministic surfaces above; complementing them. #}
+    {% if fable_preview and fable_preview.first_observation %}
+    <section class="home-fable" style="border-left: 3px solid var(--sl-color-primary-500);
+                                       padding: .5rem .8rem; margin: 1rem 0;
+                                       background: var(--sl-color-neutral-50);
+                                       border-radius: .3rem;">
+        <div style="display: flex; align-items: baseline; justify-content: space-between;
+                    gap: .6rem; flex-wrap: wrap;">
+            <strong style="color: var(--sl-color-neutral-900);">🔍 Fable's read</strong>
+            <a href="/briefing/{{ fable_preview.date }}#fable"
+               style="font-size: .85rem;"
+               class="muted">Full review →</a>
+        </div>
+        <p style="margin: .35rem 0 0 0; color: var(--sl-color-neutral-800);
+                  font-style: italic; line-height: 1.4;">
+            {{ fable_preview.first_observation | inline_md }}
+        </p>
+    </section>
+    {% endif %}
+
+    {# ─── TOP OPPORTUNITIES — max 3 actionable setups ─── #}
+    {% if top_opportunities %}
+    <section class="home-opps">
+        <header class="home-section-head">
+            <strong>💡 Top opportunities</strong>
+            <a href="/setups/latest" class="muted">See all setups →</a>
+        </header>
+        <div class="home-opps-cards">
+            {% for c in top_opportunities %}
+            <article class="home-opp-card">
+                <header class="home-opp-head">
+                    <span class="rep-status rep-status-{{ c.status_tone }}">
+                        <span class="rep-status-icon">{{ c.status_icon }}</span>
+                        <span class="rep-status-label">{{ c.status_label }}</span>
+                    </span>
+                    <a href="/positions/{{ c.ticker }}" class="home-opp-ticker no-popover">{{ c.ticker }}</a>
+                    {% if c.price %}<span class="home-opp-price num">{{ c.price }}</span>{% endif %}
+                </header>
+                {% if c.trigger %}
+                <div class="home-opp-trigger">{{ c.trigger | inline_md }}</div>
+                {% elif c.verdict %}
+                <div class="home-opp-verdict">{{ c.verdict | inline_md }}</div>
+                {% endif %}
+                {% if c.metrics %}
+                <div class="home-opp-metrics">
+                    {% for m in c.metrics[:4] %}
+                    <span class="rep-metric rep-metric-{{ m.tone }}">
+                        <span class="rep-metric-label">{{ m.label }}</span>
+                        <span class="rep-metric-value">{{ m.value }}</span>
+                    </span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {# ─── CONTINUE — where to go next ─── #}
+    <section class="home-continue">
+        <a href="/briefing/{{ briefing.date.isoformat() }}" class="home-continue-link">
+            <strong>📄 Full briefing</strong>
+            <span class="muted">deep-dive on every position, review, and rec</span>
+        </a>
+        <a href="/setups/latest" class="home-continue-link">
+            <strong>💡 Setups</strong>
+            <span class="muted">consolidated candidates + when-to-enter</span>
+        </a>
+        <a href="/positions" class="home-continue-link">
+            <strong>📊 Positions</strong>
+            <span class="muted">all holdings, filterable + sortable</span>
+        </a>
+        <a href="/history" class="home-continue-link">
+            <strong>📈 History</strong>
+            <span class="muted">NLV / coverage / expiration ladder over time</span>
+        </a>
+    </section>
+{% endif %}
+{% endblock %}

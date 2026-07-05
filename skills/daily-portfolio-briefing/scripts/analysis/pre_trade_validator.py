@@ -525,6 +525,48 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
                         rule_id="COVERED_CALL_TIER_VIOLATION",
                     ))
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Rule 15: Put strike overlap (CLAUDE.md hard rule #40)
+    # ─────────────────────────────────────────────────────────────────────
+    # A new short put within 5% of an EXISTING held short put on the same
+    # underlying is the same trade, not diversification — it concentrates
+    # single-name assignment risk (audit 2026-07-03: AMZN $215P proposed
+    # while holding $225P, 4.4% apart). Late-stage backstop for the
+    # generator-side check in analysis.put_overlap_check.
+    if (ctx.action == "SELL_OPEN" and ctx.option_type == "PUT"
+            and ctx.existing_short_puts):
+        try:
+            from analysis import put_overlap_check as _poc
+        except ImportError:
+            try:
+                import put_overlap_check as _poc  # standalone-run fallback
+            except ImportError:
+                _poc = None  # type: ignore
+        if _poc is not None:
+            ov = _poc.check_strike_overlap(
+                ctx.ticker, ctx.strike, ctx.existing_short_puts
+            )
+            if ov.get("overlap"):
+                held = ov.get("existing_strike")
+                dist = ov.get("distance_pct")
+                findings.append(TradeValidation(
+                    severity=SEV_BLOCK,
+                    reason=(
+                        f"Strike overlap — ${ctx.strike:g}P is "
+                        f"{(dist or 0)*100:.1f}% from held ${held:g}P "
+                        f"(inside {_poc.OVERLAP_PCT*100:.0f}% band)"
+                    ),
+                    detail=(
+                        f"You already hold a short ${held:g}P on {ctx.ticker}. "
+                        f"Selling ${ctx.strike:g}P within "
+                        f"{_poc.OVERLAP_PCT*100:.0f}% of it concentrates rather "
+                        f"than diversifies — same assignment zone, doubled "
+                        f"single-name risk. Pick a meaningfully lower strike, a "
+                        f"different name, or wait until the held put resolves."
+                    ),
+                    rule_id="PUT_STRIKE_OVERLAP",
+                ))
+
     # Sort: BLOCK first, then WARN, then OK
     findings.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, 9))
     return findings

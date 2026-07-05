@@ -1,0 +1,60 @@
+# Broad Universe Screener config.
+# Env-var: FMP_API_KEY (required for the broad scan; the same key also powers
+# the optional fair-value cross-check — one key, no extra subscription).
+
+notes: >
+  2026-07-03 (task #8) — swapped the top-of-funnel from FINVIZ Elite CSV
+  export ($40/mo subscription) to FMP's /stable/company-screener, which the
+  already-paid FMP_API_KEY covers. ONE API call per run (free tier is 250
+  calls/day — plenty of headroom). Server-side filters (cap / volume /
+  exchange / no-ETF / actively-trading / US) replace the FINVIZ filter
+  string. FMP cannot pre-filter on RSI/SMA the way FINVIZ Elite did, so the
+  survivor set is larger (~600-1000 vs ~100); deep_dive_max, parallel_fetch,
+  and the in-code RSI reject-early keep the yfinance deep-dive bounded. All
+  discipline gates are unchanged.
+
+fmp_screener:
+  # FMP /stable/ API only — legacy /api/v3 + /api/v4 return HTTP 403 for
+  # keys created after 2025-08-31 (see CLAUDE.md intrinsic-value section).
+  endpoint: "https://financialmodelingprep.com/stable/company-screener"
+  market_cap_floor_usd: 2000000000  # $2B+ (options-liquidity proxy)
+  volume_floor: 500000              # avg daily volume > 500K
+  exchange: "NYSE,NASDAQ"
+  country: "US"                     # US-listed only
+  limit: 1500                       # max universe pull
+  timeout_seconds: 30
+
+# Deep-dive load controls. The FMP universe is 5-10x the old FINVIZ
+# pre-filtered one (no server-side RSI filter), so:
+deep_dive_max: 800     # hard cap on post-exclusion names deep-dived (scale-trap guard)
+parallel_fetch: true   # ThreadPoolExecutor across yfinance fetches (I/O-bound)
+
+# Discipline gates — every output row must pass ALL of these. UNCHANGED by
+# the FMP swap. (Market cap > $2B is now ALSO pre-filtered server-side by
+# the FMP query, but the gate stays as the fail-closed backstop.)
+gates:
+  rsi_min: 35.0
+  rsi_max: 50.0
+  iv_rank_min: 60.0
+  support_max_distance_pct: 5.0   # spot within 5% ABOVE the support level
+  support_min_touches: 3
+  min_hist_days: 90               # need >= 90d OHLC for a "strong" support read
+  earnings_min_days: 21           # no earnings within 21 days; unknown date fails closed
+  min_market_cap_usd: 2000000000  # $2B
+
+# Composite score weights (normalized components, each 0..1, scaled to 0-10).
+score:
+  rsi_weight: 3.5        # RSI closest to 40 = deepest tradeable pullback
+  iv_weight: 3.5         # higher IV rank = fatter premium
+  support_weight: 3.0    # support strength (touches x recency + confluence)
+  support_strength_cap: 5.0   # strength value that maps to a full support score
+
+output:
+  max_rows: 30
+
+# Exclusion sources — names already covered elsewhere. Paths relative to
+# the repo root. Missing sources are a HARD error (fail closed): running
+# without dedup would surface already-tracked names as "new".
+exclusions:
+  theme_universes_path: "skills/thematic-scout/references/theme_universes.yaml"
+  parkev_cache_path: "state/cache/recommendation_list.json"

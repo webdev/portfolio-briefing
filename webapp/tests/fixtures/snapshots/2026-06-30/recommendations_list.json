@@ -1,0 +1,31 @@
+{
+  "fetched_at": "2026-06-30T13:00:00Z",
+  "source": {"name": "parkev_sheet", "url": "test"},
+  "summary": {"total": 2},
+  "recommendations": [
+    {
+      "ticker": "NVDA",
+      "name": "NVIDIA",
+      "recommendation": "BUY",
+      "raw_recommendation": "Top 12 Stock",
+      "rating_tier": 4,
+      "conviction": "High",
+      "conviction_score": 3,
+      "date_updated": "2026-06-15",
+      "age_days": 15,
+      "aging": true
+    },
+    {
+      "ticker": "AMZN",
+      "name": "Amazon",
+      "recommendation": "BUY",
+      "raw_recommendation": "Top 12 Stock",
+      "rating_tier": 4,
+      "conviction": "High",
+      "conviction_score": 3,
+      "date_updated": "2026-06-29",
+      "age_days": 1,
+      "aging": false
+    }
+  ]
+}

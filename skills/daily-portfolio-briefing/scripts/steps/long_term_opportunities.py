@@ -198,9 +198,11 @@ def _compute_funding_hint(snapshot_data: dict) -> dict:
 
 try:
     from analysis import rsi_discipline
+    from analysis.put_overlap_check import check_strike_overlap as _check_strike_overlap
 except ImportError:  # pragma: no cover - path fallback for standalone runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from analysis import rsi_discipline
+    from analysis.put_overlap_check import check_strike_overlap as _check_strike_overlap
 
 
 # Path to long-term-opportunity-advisor scripts. We import its `advise.py`
@@ -241,12 +243,20 @@ def generate_long_term_opportunities_step(
     snapshot_data: dict,
     recommendations_list: list,
     config: dict,
+    gate_state=None,
 ) -> list:
     """
     Produce a ranked list of long-term opportunity dicts for the briefing.
 
     Returns an empty list (not an error) when inputs are missing — long-term
     opportunities are enrichment, not load-bearing.
+
+    ``gate_state`` (optional ``analysis.capacity_gates.GateState``): when
+    provided and the portfolio capacity gates are closed (stress coverage
+    below the 0.50× floor), every surviving new-open rec (LONG_DATED_CSP /
+    ADD) carries the ``⏸ Deferred (capacity gated)`` tag — shown, never
+    hidden (hard rules #24 / #41). ``gate_state=None`` preserves legacy
+    behavior exactly.
     """
     lt = _load_lt_module()
     if lt is None or not hasattr(lt, "generate_long_term_opportunities"):
@@ -376,6 +386,42 @@ def generate_long_term_opportunities_step(
         filtered.append(op)
     op_dicts = filtered
 
+    # LT-verdict discipline gate (hard rule #39, audit 2026-07-03). The
+    # pipeline computes long_term_verdict for every ticker but this step
+    # never consumed it — ZS (LT `broken`, -28% below a falling 200-SMA)
+    # shipped both a LONG_DATED_CSP and an ADD. Block (demote to
+    # SKIPPED_LT_VERDICT, never hide) any new-open rec on a name whose LT
+    # verdict is broken/downtrend/weakening AND spot < 200-SMA. A fresh
+    # (≤14d) tier ≥4 BUY overrides with a visible LT-warning annotation.
+    try:
+        from analysis import lt_verdict_gate as _lvg
+    except ImportError:
+        _lvg = None
+    if _lvg is not None:
+        _rec_by_ticker: dict = {}
+        for r in (recommendations_list or []):
+            if isinstance(r, dict) and r.get("ticker"):
+                _rec_by_ticker[str(r["ticker"]).upper()] = r
+        _lt_gated: list = []
+        for op in op_dicts:
+            kind = (op.get("kind") or "").upper()
+            if kind not in ("LONG_DATED_CSP", "ADD"):
+                _lt_gated.append(op)
+                continue
+            t = (op.get("ticker") or "").upper()
+            g = _lvg.check_lt_verdict_gate(t, snapshot_data, _rec_by_ticker.get(t))
+            if not g["pass"]:
+                op["skip_reason"] = g["reason"]
+                op["kind_when_skipped"] = kind
+                op["kind"] = "SKIPPED_LT_VERDICT"
+                op["lt_verdict"] = g.get("verdict")
+            elif g.get("warning"):
+                op["lt_verdict"] = g.get("verdict")
+                op["lt_verdict_warning"] = g["warning"]
+                op.setdefault("trigger_reasons", []).insert(0, f"⚠ {g['warning']}")
+            _lt_gated.append(op)
+        op_dicts = _lt_gated
+
     # Filter: respect existing short-put positions for LONG_DATED_CSP.
     # The advisor doesn't see the user's existing short put exposure, so
     # without this gate it can suggest stacking a 3rd put on a name where
@@ -457,24 +503,25 @@ def generate_long_term_opportunities_step(
             op["kind"] = "SKIPPED_LT_CSP"
             filtered_again.append(op)
             continue
-        # Strike-overlap check: parse proposed strike from concrete_trade
+        # Strike-overlap check (hard rule #40): parse proposed strike from
+        # concrete_trade and run the shared analysis.put_overlap_check —
+        # the same function that gates PULLBACK_CSP and validator Rule 15.
         import re as _re
         sm = _re.search(r"\$(\d+(?:\.\d+)?)P\b", op.get("concrete_trade", ""))
         if sm:
             proposed_strike = float(sm.group(1))
-            for held_strike in existing["strikes"]:
-                if held_strike <= 0:
-                    continue
-                rel = abs(proposed_strike - held_strike) / held_strike
-                if rel <= STRIKE_OVERLAP_PCT:
-                    op["skip_reason"] = (
-                        f"proposed ${proposed_strike:g}P is within "
-                        f"{STRIKE_OVERLAP_PCT*100:.0f}% of existing "
-                        f"${held_strike:g}P — concentrates rather than diversifies"
-                    )
-                    op["kind_when_skipped"] = "LONG_DATED_CSP"
-                    op["kind"] = "SKIPPED_LT_CSP"
-                    break
+            ov = _check_strike_overlap(
+                t, proposed_strike, existing["strikes"],
+                overlap_pct=STRIKE_OVERLAP_PCT,
+            )
+            if ov["overlap"]:
+                op["skip_reason"] = (
+                    f"proposed ${proposed_strike:g}P is within "
+                    f"{STRIKE_OVERLAP_PCT*100:.0f}% of existing "
+                    f"${ov['existing_strike']:g}P — concentrates rather than diversifies"
+                )
+                op["kind_when_skipped"] = "LONG_DATED_CSP"
+                op["kind"] = "SKIPPED_LT_CSP"
         filtered_again.append(op)
     op_dicts = filtered_again
 
@@ -728,6 +775,25 @@ def generate_long_term_opportunities_step(
     # Pull REAL premium/bid/ask from live yfinance chains for each LT_CSP so
     # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
     _enrich_with_live_premiums(op_dicts)
+
+    # Universal capacity-gate DEFERRED tag (hard rules #24 / #41, audit
+    # 2026-07-03 finding #7): when stress coverage sits below the 0.50×
+    # floor, every SURVIVING new-open rec here carries the deferred tag —
+    # the full ticket still renders (never hidden), but it can't read as a
+    # green-lit trade while the book can't cover what it already has.
+    try:
+        from analysis import capacity_gate as _cap
+        _cap_tag = _cap.capacity_deferred_tag(gate_state, config)
+        if _cap_tag:
+            for op in op_dicts:
+                if ((op.get("kind") or "").upper() in ("LONG_DATED_CSP", "ADD")
+                        and not op.get("skip_reason")):
+                    op["capacity_deferred"] = True
+                    triggers = op.setdefault("trigger_reasons", [])
+                    if not any(_cap.DEFERRED_TAG in str(x) for x in triggers):
+                        triggers.insert(0, _cap_tag)
+    except ImportError:
+        pass
 
     # Compute a funding-hint footer so the Skipped section can tell the user
     # how much cash they could free by closing their high-capture short puts

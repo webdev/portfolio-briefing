@@ -52,6 +52,68 @@ except ImportError:
                                consolidated_panel_md="", gate_results={})
 
 
+def _run_fable_review_cascade(
+    briefing_markdown: str,
+    snapshot_dir,
+    config: dict | None,
+) -> list[str]:
+    """LLM second-opinion pass — cascades v2 (advisor) → v1 (critic).
+
+    Runs AFTER all deterministic rules have shaped the briefing.
+    Observations only, no trade recommendations. Fail-open: any API
+    error is silently caught, briefing still ships.
+
+    Two flavors, cascading:
+
+      1. v2 advisor (task #54, fable_advisor.py) — persona + memory.
+         Preferred when briefing.yaml → fable_advisor.enabled: true.
+         Reads state/fable_advisor_memory.md for continuity.
+      2. v1 review (task #51, fable_review.py) — locked-down critic,
+         no memory. Fallback when v2 is disabled OR errors (belt and
+         suspenders — TDD hard rule #33).
+
+    Returns the review markdown lines ready to append (empty list when
+    both disabled or both errored).
+    """
+    review_lines: list[str] = []
+    v2_used = False
+
+    # Attempt v2 first if enabled
+    v2_cfg = ((config or {}).get("fable_advisor") or {})
+    if v2_cfg.get("enabled"):
+        try:
+            from analysis import fable_advisor as _fa
+            fa_result = _fa.generate_advisor_review(
+                briefing_markdown, snapshot_dir, config=config,
+            )
+            if fa_result.get("status") == "ok":
+                review_lines = _fa.render_review_section(fa_result)
+                v2_used = True
+            else:
+                # v2 ran but didn't produce a usable review — fall
+                # through to v1 (no key, empty briefing, api error).
+                print(f"[aggregate] fable advisor v2 status="
+                      f"{fa_result.get('status')}, falling back to v1",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"[aggregate] fable advisor v2 raised (falling back to v1): {e}",
+                  file=sys.stderr)
+
+    # v1 fallback (also default when v2 disabled)
+    if not v2_used:
+        try:
+            from analysis import fable_review as _fr
+            fr_result = _fr.generate_review(
+                briefing_markdown, snapshot_dir, config=config,
+            )
+            review_lines = _fr.render_review_section(fr_result)
+        except Exception as e:
+            print(f"[aggregate] fable review v1 failed (non-fatal): {e}",
+                  file=sys.stderr)
+
+    return review_lines
+
+
 def aggregate_briefing(
     date_str: str,
     config: dict,
@@ -163,6 +225,38 @@ def aggregate_briefing(
         config=config,
     ))
 
+    # NEW (task #16): Benchmark & Attribution — am I beating SPY, and where
+    # did the return come from? Reads NLV history from prior snapshot dirs +
+    # SPY via the OHLC cache. Fail-open: ANY exception here must never crash
+    # the briefing — the panel is simply omitted and the JSON key stays {}.
+    benchmark_report_json: dict = {}
+    try:
+        bt_cfg = (config.get("benchmark_tracking") or {}) if isinstance(config, dict) else {}
+        if bt_cfg.get("enabled", True):
+            from analysis import benchmark_tracker as _bt
+            from analysis import pnl_attribution as _pa
+            from render.benchmark_panel import render_benchmark_panel
+            _bt_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
+            _bench = _bt.compute_benchmark_from_root(
+                current_nlv=nlv, snapshot_root=_bt_root,
+                as_of=date_str, config=bt_cfg,
+            )
+            # Reuse the benchmark closes for attribution's cash-drag math
+            # (one fetch per cycle, served from the OHLC cache).
+            _spy_closes = _bt.fetch_benchmark_closes(
+                str(bt_cfg.get("benchmark_ticker") or "SPY"), days=400)
+            _attrib = _pa.build_attribution_report(
+                snapshot_root=_bt_root, as_of=date_str, spy_closes=_spy_closes,
+            )
+            lines.extend(render_benchmark_panel(_bench, _attrib))
+            benchmark_report_json = {
+                "benchmark": _bench.to_dict(),
+                "attribution": _attrib.to_dict(),
+            }
+    except Exception as _bte:
+        import sys as _sys
+        print(f"[aggregate] benchmark panel failed (non-fatal): {_bte}", file=_sys.stderr)
+
     # Open-orders audit — every pending GTC order on E*TRADE gets run through
     # the pre-trade validator so stale or rule-violating orders surface BEFORE
     # they fill. Motivating case: MU $960P Aug 21 SELL_OPEN @ $154 GTC that
@@ -240,6 +334,26 @@ def aggregate_briefing(
             import sys as _sys
             print(f"[aggregate] candidate section failed: {_cbe}", file=_sys.stderr)
 
+    # NEW: Technical Read + Per-Ticker Actions — deep per-ticker technical
+    # cards (BB/MACD/ATR/SMA-slopes/52w/ATH + ST/LT verdicts) for every
+    # holding + candidate, followed by the entry/exit recommender's calls
+    # (EXIT_URGENT → TRIM → ENTRY_STRONG → ENTRY_WATCH; HOLD silent).
+    # Driven by snapshot technicals[tk]["deep"] computed this cycle;
+    # fail-closed per ticker. Config: briefing.yaml → technical_analysis.
+    try:
+        _ta_cfg = (config.get("technical_analysis") or {}) if isinstance(config, dict) else {}
+        if _ta_cfg.get("enabled", True):
+            from steps.technical_read import render_technical_read_sections
+            lines.extend(render_technical_read_sections(
+                snapshot_data, config,
+                scout_payload=scout_payload,
+                gate_state=gate_state,
+                recommendations_list=snapshot_data.get("recommendations_list"),
+            ))
+    except Exception as _tre:
+        import sys as _sys
+        print(f"[aggregate] technical read section failed: {_tre}", file=_sys.stderr)
+
     # NEW (Wave 24): Capital plan — re-run capital-planner here with full
     # analytics (hedge_book + stress coverage) AND the rendered action list
     # so it can extract closes/rolls/hedges/CSPs/trims as authored by the
@@ -283,7 +397,7 @@ def aggregate_briefing(
         print(f"[aggregate] red-flag synthesis failed: {_e}", file=_sys.stderr)
 
     # NEW: Add Strategy Upgrades panel
-    upgrades = compute_strategy_upgrades(snapshot_data, equity_reviews, options_reviews, config)
+    upgrades = compute_strategy_upgrades(snapshot_data, equity_reviews, options_reviews, config, analytics=analytics)
     lines.extend(render_strategy_upgrades(upgrades))
 
     # NEW: Add Analyst Brief before diffs
@@ -499,6 +613,61 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] intrinsic-value annotation failed: {_e}", file=_sys.stderr)
 
+    # ── FINVIZ analyst-target annotation (FINVIZ Layer 2) ───────────────
+    # Extend hard rule #12 with a second analyst-target source. FINVIZ
+    # covers tickers FMP misses AND provides a normalized 1-5 analyst
+    # recommendation score. When FMP + FINVIZ both have a target and
+    # disagree by > 20%, the chip carries a ⚠ divergence flag.
+    # Fetches from state/.finviz_target_cache.json (24h TTL) — never
+    # blocks the pipeline on network. Fail-closed: no FINVIZ data → no
+    # chip. Never invents a value (hard rule #19).
+    try:
+        from analysis import finviz_targets as _fvt
+        # Read from the fetcher's cache — no network I/O in the aggregate step
+        import json as _json
+        cache_paths = [
+            snap_root / ".finviz_target_cache.json",
+            (snap_root.parent / ".finviz_target_cache.json") if snap_root else None,
+        ]
+        finviz_map: dict[str, dict] = {}
+        for p in cache_paths:
+            if p and p.exists():
+                try:
+                    raw = _json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        finviz_map = {
+                            k.upper(): (v if v and not v.get("_null") else None)
+                            for k, v in raw.items()
+                        }
+                        break
+                except (OSError, _json.JSONDecodeError):
+                    continue
+        # FMP targets — reuse the fv_map we just built
+        fmp_targets = {}
+        if 'fv_map' in dir():
+            fmp_targets = {
+                k: (v.get("analyst_target") if isinstance(v, dict) else None)
+                for k, v in (fv_map or {}).items()
+                if v
+            }
+        if finviz_map:
+            lines, fv_stats = _fvt.annotate_finviz(
+                lines,
+                finviz_by_ticker=finviz_map,
+                fmp_targets_by_ticker=fmp_targets,
+                known_tickers=list(known) if 'known' in dir() else [],
+                etf_set=etf_set if 'etf_set' in dir() else set(),
+            )
+            if fv_stats["annotated"]:
+                footer = (f"_📈 FINVIZ analyst targets: {fv_stats['annotated']} rec(s) "
+                          f"stamped · {fv_stats['diverged']} diverge from FMP · "
+                          f"{fv_stats['no_data']} without data._")
+                lines.append(footer)
+                lines.append("")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] finviz-target annotation failed: {_e}", file=_sys.stderr)
+
     # ── Parkev chip annotation (CLAUDE.md hard rule #27) ──────────────────
     # Append 🅿️ {RATING} · {CONV} · {AGE} to every ticker-specific header
     # in the rendered briefing. Single-pass post-process — never
@@ -631,6 +800,11 @@ def aggregate_briefing(
     )
     briefing_markdown = pf.rendered_briefing
 
+    # ── Fable review — LAST STEP before returning ─────────────────────
+    _review_lines = _run_fable_review_cascade(briefing_markdown, snapshot_dir, config)
+    if _review_lines:
+        briefing_markdown = briefing_markdown.rstrip() + "\n" + "\n".join(_review_lines)
+
     # Build JSON companion
     briefing_json = {
         "date": date_str,
@@ -646,6 +820,9 @@ def aggregate_briefing(
         "directives_active_count": len(directives_active),
         "directives_expired_count": len(directives_expired),
         "snapshot_dir": str(snapshot_dir),
+        # Task #16 — benchmark tracking + P/L attribution (webapp Benchmark
+        # tab reads this). {} when disabled or unavailable this cycle.
+        "benchmark_report": benchmark_report_json,
     }
     # Step 7.5: per-action aging — tomorrow's run reads this back for
     # reconciliation (each: {key, kind, ident, summary, first_flagged,

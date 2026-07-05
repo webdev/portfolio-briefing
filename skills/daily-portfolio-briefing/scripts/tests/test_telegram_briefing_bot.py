@@ -492,3 +492,141 @@ def test_run_and_deliver_sends_markdownv2_digest(tmp_path):
 def test_format_inline_strips_padded_bold():
     # Telegram 400s on bold entities with leading/trailing whitespace.
     assert tb._format_line_mdv2("x ** y ** z") == "x *y* z"
+
+
+# ─── Webapp notification (task #46) ────────────────────────────────────────
+
+
+def test_notify_webapp_returns_true_on_success(monkeypatch):
+    """Task #46+#50: after briefing completes, _notify_webapp() POSTs
+    and returns (True, payload_dict) with snapshot count + checksum."""
+    class _MockResp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"snapshots_loaded": 42, "checksum": "abc12345",
+                    "latest_date": "2026-07-01"}
+
+    def _mock_post(url, timeout=15):
+        assert url == "http://127.0.0.1:17776/refresh/notify"
+        return _MockResp()
+
+    monkeypatch.setattr(tb.requests, "post", _mock_post)
+    monkeypatch.setenv("PB_WEBAPP_URL", "http://127.0.0.1:17776")
+    ok, payload = tb._notify_webapp()
+    assert ok is True
+    assert payload["snapshots_loaded"] == 42
+    assert payload["checksum"] == "abc12345"
+
+
+def test_notify_webapp_swallows_network_error(monkeypatch):
+    """When the webapp is unreachable, _notify_webapp fails open —
+    logs to stderr but doesn't raise. Returns (False, {'error': ...})."""
+    def _mock_post(url, timeout=15):
+        raise tb.requests.ConnectionError("connection refused")
+
+    monkeypatch.setattr(tb.requests, "post", _mock_post)
+    monkeypatch.setenv("PB_WEBAPP_URL", "http://127.0.0.1:17776")
+    ok, payload = tb._notify_webapp()
+    assert ok is False
+    assert "connection refused" in payload.get("error", "")
+
+
+def test_notify_webapp_respects_disabled_via_empty_url(monkeypatch):
+    """Setting PB_WEBAPP_URL='' explicitly disables the notify."""
+    monkeypatch.setenv("PB_WEBAPP_URL", "")
+    ok, payload = tb._notify_webapp()
+    assert ok is False
+    assert "disabled" in payload.get("error", "")
+
+
+def test_notify_webapp_uses_default_when_env_unset(monkeypatch):
+    """PB_WEBAPP_URL unset → default http://127.0.0.1:17776."""
+    calls = []
+    class _R:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self): return {"snapshots_loaded": 1, "checksum": "xxx"}
+    def _mock_post(url, timeout=15):
+        calls.append(url)
+        return _R()
+    monkeypatch.setattr(tb.requests, "post", _mock_post)
+    monkeypatch.delenv("PB_WEBAPP_URL", raising=False)
+    ok, _ = tb._notify_webapp()
+    assert ok is True
+    assert calls[0] == "http://127.0.0.1:17776/refresh/notify"
+
+
+def test_briefing_checksum_computes_stable_hash(tmp_path):
+    """_briefing_checksum returns first 8 hex chars of SHA-256, stable
+    across calls on the same content, changes when content changes."""
+    p = tmp_path / "briefing.md"
+    p.write_text("# briefing content v1\n")
+    chk1 = tb._briefing_checksum(str(p))
+    chk2 = tb._briefing_checksum(str(p))
+    assert chk1 == chk2
+    assert len(chk1) == 8
+    p.write_text("# briefing content v2 — one char changed\n")
+    chk3 = tb._briefing_checksum(str(p))
+    assert chk3 != chk1
+
+
+def test_briefing_checksum_returns_none_when_file_missing():
+    """Fail-open: missing file → None, never raises."""
+    assert tb._briefing_checksum("/nonexistent/path.md") is None
+
+
+# ─── Fable section extractor (task #51) ────────────────────────────────────
+
+
+def test_extract_fable_section_pulls_review_from_briefing():
+    """The bot's follow-up Telegram message uses this to send just the
+    Fable review — not the whole briefing."""
+    md = """# Daily Briefing
+
+## Actions
+1. CLOSE X
+
+## 🔍 Fable's second opinion
+
+_Automated LLM review._
+
+**Cross-section observations:**
+- point A
+- point B
+
+_Model: opus._
+
+## Appendix
+Some other content"""
+    section = tb._extract_fable_section(md)
+    assert section is not None
+    assert "Fable's second opinion" in section
+    assert "point A" in section
+    assert "Appendix" not in section    # cut at the next H2
+
+
+def test_extract_fable_section_returns_none_when_absent():
+    """When the review section doesn't exist (disabled, error, or
+    older briefing), the extractor cleanly returns None so the bot
+    skips the follow-up message."""
+    assert tb._extract_fable_section("# Briefing\n\n## Actions\n- close") is None
+    assert tb._extract_fable_section("") is None
+    assert tb._extract_fable_section(None) is None
+
+
+def test_extract_fable_section_reaches_end_of_document():
+    """When Fable review IS the last section, we consume to EOF."""
+    md = """# Briefing
+
+## Actions
+1. HOLD
+
+## 🔍 Fable's second opinion
+
+**Themes I notice:**
+- Semis concentration on Sep 18
+"""
+    section = tb._extract_fable_section(md)
+    assert section is not None
+    assert "Semis concentration" in section

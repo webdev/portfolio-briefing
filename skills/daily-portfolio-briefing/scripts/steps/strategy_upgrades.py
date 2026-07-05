@@ -23,10 +23,14 @@ from dataclasses import dataclass, asdict
 try:
     from analysis import rsi_discipline
     from analysis import position_tiers
+    from analysis import capacity_gate
+    from analysis import lt_verdict_gate
 except ImportError:  # pragma: no cover - path fallback for standalone runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from analysis import rsi_discipline
     from analysis import position_tiers
+    from analysis import capacity_gate
+    from analysis import lt_verdict_gate
 
 
 def _safe_price(v) -> float:
@@ -324,6 +328,7 @@ def compute_strategy_upgrades(
     equity_reviews: list,
     options_reviews: list,
     params: dict,
+    analytics: dict | None = None,
 ) -> list[dict]:
     """
     Compute strategy upgrade recommendations for existing positions.
@@ -333,6 +338,9 @@ def compute_strategy_upgrades(
         equity_reviews: list of equity position reviews
         options_reviews: list of option position reviews
         params: dict with config (max_position_pct, etc.)
+        analytics: optional analytics dict (stress_coverage etc.) — drives the
+            universal capacity-gate DEFERRED tag on sub-lot buys (hard rule
+            #41). ``analytics=None`` preserves legacy behavior exactly.
 
     Returns:
         list of upgrade recommendation dicts (one per recommendation)
@@ -810,6 +818,15 @@ def compute_strategy_upgrades(
             and rv.decision == "keep" and rv.badge
         )
 
+        # LT-verdict belt-and-suspenders (hard rule #39, audit 2026-07-03):
+        # a NEW covered call on a name whose measured long_term_verdict is
+        # `secular-uptrend` caps a compounder. Tier-A no-CC already covers
+        # the configured core names (never reaches here); this catches
+        # non-Tier-A names whose chart says compounder. Demoted to the
+        # wait-for-strength list — shown, never hidden. Fail-open on
+        # missing deep tech data.
+        _lt_cc_note = lt_verdict_gate.cc_secular_uptrend_wait(symbol, snapshot_data)
+
         # ─── Tier-aware discipline checks ─────────────────────────────────
         # Tier B raises the RSI floor to 70 (vs the global RSI gate's 60)
         # and demands ≥10% OTM strike + ≤0.15 delta. Build a tier_violations
@@ -860,6 +877,8 @@ def compute_strategy_upgrades(
             "rsi_badge": rv.badge,
             "rsi_blocked": rsi_cc_blocked,
             "rsi_wait": rsi_cc_wait,
+            "lt_secular_wait": bool(_lt_cc_note),
+            "lt_secular_note": _lt_cc_note,
             "shares_held": int(qty),
             "contracts_writable": contracts_writable,
             "current_price": round(price, 2),
@@ -893,6 +912,17 @@ def compute_strategy_upgrades(
     # === Type C: Sub-Lot Completions ===
     # For equity positions with 1-99 shares, buy to reach 100-share lot
 
+    # Universal capacity-gate DEFERRED tag (hard rule #41): a sub-lot
+    # completion is a new-open BUY, so when stress coverage is below the
+    # floor the rec carries the tag — shown, never hidden (hard rule #24).
+    _sublot_capacity_tag = capacity_gate.capacity_deferred_tag(analytics, params)
+
+    # Parkev rec map for the LT-verdict gate's fresh-tier-≥4 override.
+    _sublot_rec_by_ticker: dict = {}
+    for _r in (snapshot_data.get("recommendations_list") or []):
+        if isinstance(_r, dict) and _r.get("ticker"):
+            _sublot_rec_by_ticker[str(_r["ticker"]).upper()] = _r
+
     for equity_pos in positions:
         if equity_pos.get("assetType") != "EQUITY":
             continue
@@ -924,6 +954,43 @@ def compute_strategy_upgrades(
         _buy_rsi = rsi_discipline.rsi_for(symbol, technicals)
         rv = rsi_discipline.hook("buy", _buy_rsi, rsi_th)
 
+        # Has-CSP deferral (hard rule #22 extended per audit 2026-07-03 #5,
+        # the MU 55-share case): an open short put on the name IS the entry
+        # mechanism — assignment delivers a full 100-share lot at a better
+        # basis than buying at spot. Defer the sub-lot buy; shown with the
+        # reason, never hidden.
+        _sublot_deferral = None
+        _held_put_strikes = sorted({
+            float(p.get("strike", 0) or 0)
+            for p in positions
+            if p.get("assetType") == "OPTION"
+            and (p.get("underlying") or "").upper() == str(symbol).upper()
+            and (p.get("type") or "").upper() == "PUT"
+            and float(p.get("qty", 0) or 0) < 0
+            and float(p.get("strike", 0) or 0) > 0
+        })
+        if _held_put_strikes:
+            _strikes_str = ", ".join(f"${s:g}" for s in _held_put_strikes)
+            _sublot_deferral = (
+                f"you already hold a short put on {symbol} at {_strikes_str} — "
+                f"the CSP IS the entry mechanism; assignment delivers 100 shares "
+                f"at a better basis than buying {100 - int(qty)} more at spot. "
+                f"Revisit once the put resolves."
+            )
+
+        # LT-verdict discipline gate (hard rule #39): a sub-lot completion is
+        # a new-open BUY — no buying into a broken/downtrending chart below
+        # the 200-SMA (fresh tier ≥4 BUY overrides, with a visible warning).
+        _sublot_lt_warning = None
+        if _sublot_deferral is None:
+            _g = lt_verdict_gate.check_lt_verdict_gate(
+                symbol, snapshot_data, _sublot_rec_by_ticker.get(str(symbol).upper())
+            )
+            if not _g["pass"]:
+                _sublot_deferral = _g["reason"]
+            elif _g.get("warning"):
+                _sublot_lt_warning = _g["warning"]
+
         # Tag the sub-lot with its tier so the renderer can suppress the
         # "enable covered calls after completion" income projection on Tier A
         # holdings (where CCs are forbidden by policy, CLAUDE.md hard rule #29).
@@ -944,6 +1011,10 @@ def compute_strategy_upgrades(
             "rsi_decision": rv.decision,
             "rsi_badge": rv.badge,
             "rsi_blocked": bool(rsi_gate_on and rv.removed),
+            "discipline_deferred": bool(_sublot_deferral),
+            "discipline_reason": _sublot_deferral,
+            "lt_verdict_warning": _sublot_lt_warning,
+            "capacity_deferred_tag": (_sublot_capacity_tag if not _sublot_deferral else None),
             "position_tier": _sublot_tier,
             "cc_enabled_after_completion": _cc_enabled_after_lot,
             "rationale": (

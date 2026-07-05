@@ -1,0 +1,15 @@
+<footer class="app-footer">
+    <div class="app-footer-inner">
+        <small class="muted">
+            {% if status %}
+                <span>{{ status.snapshot_count }} / {{ status.expected_count }} snapshots loaded</span>
+                <span class="dot">·</span>
+                <span>last ingest <span hx-get="/fragment/refresh-status" hx-trigger="every 60s">{{ status.last_ingest_rel }}</span></span>
+                <span class="dot">·</span>
+                <span>delivery: <code>{{ status.delivery_dir }}</code></span>
+            {% else %}
+                <span>No ingest yet</span>
+            {% endif %}
+        </small>
+    </div>
+</footer>

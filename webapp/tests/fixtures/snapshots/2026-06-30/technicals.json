@@ -1,0 +1,72 @@
+{
+  "NVDA": {
+    "iv_rank": 79.0,
+    "rsi_14": 44.0,
+    "sma_50": 205.1,
+    "sma_200": 191.2,
+    "drawdown_pct": -16.0,
+    "spot": 198.82,
+    "support_resistance": {
+      "spot": 198.82,
+      "supports": [
+        {"price": 191.82, "side": "support", "source": "pivot_d", "touches": 3, "age_days": null, "strength": 2.0, "confluence": ["sma_200"]},
+        {"price": 157.04, "side": "support", "source": "52w_low", "touches": 1, "age_days": null, "strength": 2.0, "confluence": ["52w_low"]}
+      ],
+      "resistances": [
+        {"price": 210.13, "side": "resistance", "source": "swing", "touches": 4, "age_days": 126, "strength": 3.0, "confluence": ["pivot_d", "fib"]},
+        {"price": 226.65, "side": "resistance", "source": "swing", "touches": 2, "age_days": 60, "strength": 2.0, "confluence": []}
+      ],
+      "pivots": {},
+      "confidence": "medium",
+      "note": null
+    },
+    "deep": {
+      "ticker": "NVDA",
+      "spot": 198.82,
+      "bars": 502,
+      "rsi_14": 44.0,
+      "bb_upper": 214.6,
+      "bb_mid": 203.4,
+      "bb_lower": 192.2,
+      "bb_position_pct": 29.6,
+      "bb_width_pct": 11.0,
+      "macd": -1.42,
+      "macd_signal": -0.98,
+      "macd_hist": -0.44,
+      "macd_hist_5d_ago": -1.1,
+      "atr_14": 6.44,
+      "atr_pct": 3.2,
+      "sma_20": 203.4,
+      "sma_50": 205.1,
+      "sma_200": 191.2,
+      "sma_50_slope_pct": -0.8,
+      "sma_200_slope_pct": 2.4,
+      "vs_sma20_pct": -2.3,
+      "vs_sma50_pct": -3.1,
+      "vs_sma200_pct": 4.0,
+      "cross": "golden",
+      "ath": 236.7,
+      "ath_dd_pct": -16.0,
+      "yr_hi": 236.7,
+      "yr_lo": 157.04,
+      "yr_position_pct": 52,
+      "ret_1w_pct": -0.6,
+      "ret_1m_pct": -4.2,
+      "ret_3m_pct": 8.1,
+      "ret_1y_pct": 41.5,
+      "vol_ratio_30d": 0.9,
+      "short_term_verdict": "stabilizing",
+      "long_term_verdict": "uptrend"
+    }
+  },
+  "AMZN": {
+    "iv_rank": 41.0,
+    "rsi_14": 58.0,
+    "sma_50": 231.4,
+    "sma_200": 218.9,
+    "drawdown_pct": -4.0,
+    "spot": 242.1,
+    "support_resistance": null,
+    "deep": null
+  }
+}

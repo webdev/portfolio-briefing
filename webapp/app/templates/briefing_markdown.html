@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Briefing {{ date }} — document view{% endblock %}
+
+{% block content %}
+<div class="doc-view">
+    {# Minimal top bar — just prev/next + link to structured view #}
+    <div class="doc-view-nav">
+        <div class="doc-view-nav-dates">
+            {% if neighbor_dates.prev %}
+                <a href="/briefing/{{ neighbor_dates.prev }}/md">← {{ neighbor_dates.prev }}</a>
+            {% else %}
+                <span class="muted">← prev</span>
+            {% endif %}
+            <span class="doc-view-current">{{ date }}</span>
+            {% if neighbor_dates.next %}
+                <a href="/briefing/{{ neighbor_dates.next }}/md">{{ neighbor_dates.next }} →</a>
+            {% else %}
+                <span class="muted">next →</span>
+            {% endif %}
+        </div>
+        <div class="doc-view-nav-actions">
+            <a href="/briefing/{{ date }}" class="muted">Structured view →</a>
+            <a href="/briefing/{{ date }}/md/raw" class="muted" target="_blank">Raw .md →</a>
+        </div>
+    </div>
+
+    <article class="doc-view-body">
+        {{ rendered_html | safe }}
+    </article>
+
+    <footer class="doc-view-footer muted">
+        Source: <code>{{ source_path }}</code>
+        {% if checksum_json or checksum_md %}
+        <br>
+        Checksum:
+        {% if checksum_json %}<code title="briefing_{{ date }}.json SHA-256 prefix">json:{{ checksum_json }}</code>{% endif %}
+        {% if checksum_md %}<code title="briefing_{{ date }}.md SHA-256 prefix">md:{{ checksum_md }}</code>{% endif %}
+        {% endif %}
+    </footer>
+</div>
+{% endblock %}

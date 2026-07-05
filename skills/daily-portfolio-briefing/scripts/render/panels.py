@@ -96,6 +96,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adapters"))
 
 from analysis import rsi_discipline  # noqa: E402  (scripts dir on sys.path above)
+from analysis import capacity_gate  # noqa: E402
+from analysis import lt_verdict_gate  # noqa: E402
+from analysis import put_overlap_check  # noqa: E402
 
 try:
     from yield_formulas import (  # type: ignore
@@ -1979,6 +1982,18 @@ def render_action_list(
         csp_rsi_th = rsi_discipline.load_thresholds(config_local)
         csp_rsi_gate_on = csp_rsi_th.get("enabled", True)
 
+        # Parkev rec map for the LT-verdict gate's fresh-tier-≥4 override
+        # (hard rule #39). Recs ride along in snapshot_data.
+        _csp_rec_by_ticker: dict = {}
+        for _r in ((snapshot_data or {}).get("recommendations_list") or []):
+            if isinstance(_r, dict) and _r.get("ticker"):
+                _csp_rec_by_ticker[str(_r["ticker"]).upper()] = _r
+
+        # Universal capacity-gate DEFERRED tag (hard rules #24 / #41): when
+        # stress coverage is below the floor, every PULLBACK CSP that still
+        # renders carries the tag — shown for planning, never a green light.
+        _csp_capacity_tag = capacity_gate.capacity_deferred_tag(analytics, config_local)
+
         # Pre-compute existing short-put exposure per ticker. We need this to
         # avoid stacking a 3rd put on a name that already has 2 layered short
         # puts (e.g., VRT_PUT_300 + VRT_PUT_315 → don't recommend $325P on top).
@@ -2050,6 +2065,23 @@ def render_action_list(
                 })
                 continue
 
+            # LT-verdict discipline gate (hard rule #39, audit 2026-07-03).
+            # No new put on a name whose long_term_verdict is broken/
+            # downtrend/weakening while spot sits below the 200-SMA. A fresh
+            # (≤14d) tier ≥4 BUY overrides — kept, but with a visible
+            # LT-trend warning line (the META $515P case).
+            _lt_gate = lt_verdict_gate.check_lt_verdict_gate(
+                ticker, snapshot_data or {}, _csp_rec_by_ticker.get(ticker)
+            )
+            if not _lt_gate["pass"]:
+                _filtered_csps.append({
+                    "ticker": ticker,
+                    "verdict": "LT_VERDICT",
+                    "reason": _lt_gate["reason"],
+                })
+                continue
+            _lt_warning = _lt_gate.get("warning")
+
             # Query live E*TRADE chain for put near 12% OTM, 30-40 DTE
             chain_data = find_put_strike_near(
                 ticker, target_otm_pct=12.0, target_dte_min=25,
@@ -2066,6 +2098,32 @@ def render_action_list(
             from datetime import date as _date_class
             exp_date = _date_class.fromisoformat(target_exp)
             est_dte = (exp_date - datetime.now().date()).days
+
+            # Universal 5% strike-overlap check (hard rule #40, audit
+            # 2026-07-03: AMZN $215P proposed while holding $225P — 4.4%
+            # apart). The put-stack guard above only fires at ≥2 held puts;
+            # this catches the single-held-put duplicate the same way the
+            # LT_CSP path always has.
+            _held_strikes = (existing or {}).get("strikes") or []
+            _ov = put_overlap_check.check_strike_overlap(
+                ticker, target_strike, _held_strikes
+            )
+            if _ov["overlap"]:
+                _filtered_csps.append({
+                    "ticker": ticker,
+                    "verdict": "SKIPPED",
+                    "ev": 0,
+                    "strike": target_strike,
+                    "exp": target_exp,
+                    "reason": (
+                        f"proposed ${target_strike:g}P is "
+                        f"{(_ov['distance_pct'] or 0)*100:.1f}% from existing "
+                        f"${_ov['existing_strike']:g}P (inside "
+                        f"{put_overlap_check.OVERLAP_PCT*100:.0f}% band) — "
+                        f"concentrates rather than diversifies"
+                    ),
+                })
+                continue
 
             # Wash-sale check
             ws_blocked, ws_reason = is_wash_sale_blocked(ticker, as_of_iso, ledger_path=ledger_path)
@@ -2113,6 +2171,15 @@ def render_action_list(
             )
             items.append(f"   - {format_yield_line(csp_y)}")
             items.append(f"   - **Source:** Live E*TRADE chain")
+            # Capacity-gate DEFERRED tag (hard rule #41) — the ticket still
+            # renders in full, but never reads as a green light while stress
+            # coverage sits below the floor.
+            if _csp_capacity_tag:
+                items.append(f"   - **{_csp_capacity_tag}**")
+            # LT-trend warning for fresh-tier-≥4 overrides (hard rule #39) —
+            # the catalyst kept the rec; the trend contradiction stays visible.
+            if _lt_warning:
+                items.append(f"   - **⚠ LT-trend note:** {_lt_warning}")
             if csp_val is not None:
                 items.append(f"   - {format_validation_line(csp_val)}")
             # Affirmative wash-sale + earnings clearance
@@ -2162,9 +2229,10 @@ def render_action_list(
     #   (a) Trade-validator POOR/BLOCK verdicts (negative EV)
     #   (b) Existing-put-stack: skip names where user already has ≥2 short puts
     if _filtered_csps:
-        validator_rejects = [c for c in _filtered_csps if c.get("verdict") not in ("SKIPPED", "RSI_BLOCK")]
+        validator_rejects = [c for c in _filtered_csps if c.get("verdict") not in ("SKIPPED", "RSI_BLOCK", "LT_VERDICT")]
         stack_skips = [c for c in _filtered_csps if c.get("verdict") == "SKIPPED"]
         rsi_blocks = [c for c in _filtered_csps if c.get("verdict") == "RSI_BLOCK"]
+        lt_blocks = [c for c in _filtered_csps if c.get("verdict") == "LT_VERDICT"]
         items.append("")
         if validator_rejects:
             names = ", ".join(
@@ -2179,6 +2247,11 @@ def render_action_list(
             for c in rsi_blocks:
                 items.append(
                     f"_📊 PULLBACK CSP {c['ticker']} blocked — {c.get('reason', 'RSI overbought')}_"
+                )
+        if lt_blocks:
+            for c in lt_blocks:
+                items.append(
+                    f"_📉 PULLBACK CSP {c['ticker']} blocked — {c.get('reason', 'LT-verdict gate (rule #39)')}_"
                 )
         if stack_skips:
             for c in stack_skips:

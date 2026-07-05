@@ -99,6 +99,17 @@ def rank_candidates(
         if max_tenor_days is not None and dte_ext > max_tenor_days:
             continue
 
+        # Reverse-tenor guard — reject rolls that SHORTEN the expiration on
+        # an already-long-dated position. A `ROLL_OUT` that moves from
+        # +500d to +90d = dte_ext -410 is a downgrade, not a roll-out.
+        # Only allow negative dte_ext when the position is short-dated
+        # to begin with (current DTE < 30) — those are legit
+        # roll-forward-and-close-early moves. (Task #13.)
+        if dte_ext < 0:
+            current_dte = int(c.get("current_dte") or c.get("currentDte") or 0)
+            if current_dte >= 30:
+                continue
+
         if is_core:
             # Core mode: prefer cap buffer, then dte extension, then net dollars.
             # Heavy penalty on calendar rolls (same strike) when embedded tax is large.

@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+{% from "_macros/tech_card.html" import tech_card %}
+{% from "_macros/tech_legend.html" import tech_legend %}
+{% block title %}{{ ticker }} — Position drill-down{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>{{ ticker }}</h1>
+    <p class="muted">
+        {{ parkev_chip(ticker) | safe }} ·
+        {{ tier_badge(ticker) | safe }} ·
+        {{ history|length }} snapshots in time-series ·
+        <a href="/parkev/{{ ticker }}">Parkev timeline →</a>
+    </p>
+</hgroup>
+
+{# Task #13 — technical-indicator legend, collapsible. #}
+{{ tech_legend() }}
+
+{# ─── Current state card (UX critique #7) ───
+   Assembled by position_state.build_position_state — RSI, IV, trend vs
+   200-SMA, drawdown, S/R, Parkev, thesis. This was the biggest gap on
+   the drill-down: user had to cross-reference 3 other pages to see
+   these numbers. #}
+{% if state and state.has_data %}
+<section id="current-state">
+    <h2>Current analytical state</h2>
+    <div class="pos-state">
+        {# Header row: spot + recommendation + weight #}
+        <div class="pos-state-header">
+            <div class="pos-state-hero">
+                {% if state.spot %}<span class="pos-state-spot">${{ "{:,.2f}".format(state.spot) }}</span>{% endif %}
+                {% if state.recommendation %}
+                    <span class="pos-state-rec rec-{{ state.recommendation }}">{{ state.recommendation }}</span>
+                {% endif %}
+                {% if state.weight_pct is not none %}
+                    <span class="pos-state-weight muted">{{ "{:.1f}%".format(state.weight_pct) }} NLV</span>
+                {% endif %}
+                {% if state.pl_pct is not none %}
+                    <span class="pos-state-pl num" style="color: {{ 'var(--color-positive)' if state.pl_pct > 0 else 'var(--color-danger)' }}">
+                        {{ "{:+.1f}%".format(state.pl_pct) }} P/L
+                    </span>
+                {% endif %}
+            </div>
+            {% if state.thesis_status or state.technical_status %}
+                <div class="pos-state-thesis muted">
+                    {% if state.thesis_status %}Thesis: <strong>{{ state.thesis_status }}</strong>{% endif %}
+                    {% if state.thesis_status and state.technical_status %} · {% endif %}
+                    {% if state.technical_status %}Technical: <strong>{{ state.technical_status }}</strong>{% endif %}
+                </div>
+            {% endif %}
+        </div>
+
+        {# Chip row: RSI · IV · Trend · Drawdown — all color-toned per hard rule #11 #}
+        <div class="pos-state-chips">
+            <div class="pos-state-chip pos-state-chip-{{ state.technicals.rsi_tone }}">
+                <span class="pos-state-chip-label">RSI</span>
+                <span class="pos-state-chip-value num">{{ "{:.0f}".format(state.technicals.rsi) if state.technicals.rsi is not none else "n/a" }}</span>
+                <span class="pos-state-chip-sub">{{ state.technicals.rsi_label }}</span>
+            </div>
+            <div class="pos-state-chip pos-state-chip-{{ state.technicals.iv_tone }}">
+                <span class="pos-state-chip-label">IV rank</span>
+                <span class="pos-state-chip-value num">{{ "{:.0f}".format(state.technicals.iv_rank) if state.technicals.iv_rank is not none else "n/a" }}</span>
+                <span class="pos-state-chip-sub">{{ state.technicals.iv_label }}</span>
+            </div>
+            <div class="pos-state-chip pos-state-chip-{{ state.technicals.trend_tone }}">
+                <span class="pos-state-chip-label">200-SMA</span>
+                <span class="pos-state-chip-value num">{{ state.technicals.trend_dist or "n/a" }}</span>
+                <span class="pos-state-chip-sub">{{ state.technicals.trend_label }}</span>
+            </div>
+            <div class="pos-state-chip pos-state-chip-{{ state.technicals.dd_tone }}">
+                <span class="pos-state-chip-label">Drawdown</span>
+                <span class="pos-state-chip-value num">{{ "{:.0f}%".format(state.technicals.drawdown) if state.technicals.drawdown is not none else "n/a" }}</span>
+                <span class="pos-state-chip-sub">{{ state.technicals.dd_label }}</span>
+            </div>
+        </div>
+
+        {# S/R + Parkev row #}
+        {% if state.support_resistance.support or state.support_resistance.resistance or state.parkev %}
+        <div class="pos-state-sub">
+            {% if state.support_resistance.support %}
+                {% set s = state.support_resistance.support %}
+                <div class="pos-state-sr">
+                    <span class="pos-state-sr-label">Support</span>
+                    <span class="pos-state-sr-price num">${{ "{:,.2f}".format(s.price) }}</span>
+                    <span class="pos-state-sr-dist muted">({{ s.distance_pct }}% away)</span>
+                    {% if s.confluence %}
+                        <span class="pos-state-sr-conf muted">·
+                            {% for c in s.confluence %}<span class="pos-state-conf-tag">{{ c }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
+                        </span>
+                    {% endif %}
+                    {% if s.touches %}<span class="muted">· {{ s.touches }} touches</span>{% endif %}
+                </div>
+            {% endif %}
+            {% if state.support_resistance.resistance %}
+                {% set r = state.support_resistance.resistance %}
+                <div class="pos-state-sr">
+                    <span class="pos-state-sr-label pos-state-sr-label-res">Resistance</span>
+                    <span class="pos-state-sr-price num">${{ "{:,.2f}".format(r.price) }}</span>
+                    <span class="pos-state-sr-dist muted">({{ r.distance_pct }}% away)</span>
+                    {% if r.confluence %}
+                        <span class="pos-state-sr-conf muted">·
+                            {% for c in r.confluence %}<span class="pos-state-conf-tag">{{ c }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
+                        </span>
+                    {% endif %}
+                    {% if r.touches %}<span class="muted">· {{ r.touches }} touches</span>{% endif %}
+                </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% if state.finviz %}
+        {# Analyst target chip — FINVIZ (Layer 3). Shows target price,
+           implied upside, and analyst recommendation score. Fail-open:
+           renders nothing when FINVIZ has no data on the ticker. #}
+        <div class="pos-state-finviz">
+            <span class="pos-state-finviz-icon">📈</span>
+            <span class="pos-state-finviz-label">FINVIZ target</span>
+            {% if state.finviz.target_price %}
+                <span class="pos-state-finviz-value num">${{ "{:,.0f}".format(state.finviz.target_price) }}</span>
+                {% if state.finviz.target_upside_pct is not none %}
+                    <span class="pos-state-finviz-upside num" style="color: {{ 'var(--color-positive)' if state.finviz.target_upside_pct > 0 else 'var(--color-danger)' }}">
+                        ({{ "{:+.1f}%".format(state.finviz.target_upside_pct) }})
+                    </span>
+                {% endif %}
+            {% endif %}
+            {% if state.finviz.analyst_recommendation is not none %}
+                <span class="pos-state-finviz-recom">
+                    🅰 {{ "{:.1f}".format(state.finviz.analyst_recommendation) }}/5
+                    {% if state.finviz.analyst_label %}<span class="muted">— {{ state.finviz.analyst_label }}</span>{% endif %}
+                </span>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% if state.rationale %}
+        <div class="pos-state-rationale">
+            <span class="pos-state-rationale-label">Rationale</span>
+            {{ state.rationale | inline_md }}
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
+{# ─── Technical analysis card (task #7) ───
+   Infographic-style deep read (BB · MACD · ATR · SMA · 52w range · S/R ·
+   ST/LT verdicts) from technicals.json[ticker].deep. When the deep read
+   is missing this renders an explicit "chart data unavailable" skeleton
+   (hard rule #19), never fabricated indicators. #}
+{% if tech %}
+<section id="technical-analysis">
+    <h2>Technical analysis</h2>
+    <div class="tc-solo">{{ tech_card(tech) }}</div>
+</section>
+{% endif %}
+
+{% if latest_equity %}
+<section>
+    <h2>Current position</h2>
+    <div class="dash-grid">
+        <div class="metric-card">
+            <h4>Shares</h4>
+            <div class="value num">{{ "{:,.0f}".format(latest_equity.qty) if latest_equity.qty else "—" }}</div>
+            <div class="sub">Account <code>{{ latest_equity.accountDesc or "—" }}</code></div>
+        </div>
+        <div class="metric-card">
+            <h4>Price</h4>
+            <div class="value num">${{ "{:,.2f}".format(latest_equity.price) if latest_equity.price else "—" }}</div>
+            <div class="sub">Market value <span class="num">${{ "{:,.0f}".format(latest_equity.marketValue) if latest_equity.marketValue else "—" }}</span></div>
+        </div>
+        <div class="metric-card">
+            <h4>Cost basis</h4>
+            <div class="value num">${{ "{:,.2f}".format(latest_equity.costBasis) if latest_equity.costBasis else "—" }}</div>
+            <div class="sub">
+                P/L
+                <span class="num" style="color: {{ 'var(--color-positive)' if latest_equity.totalGainPct and latest_equity.totalGainPct > 0 else 'var(--color-danger)' }}">
+                    {{ "{:+.1f}%".format(latest_equity.totalGainPct) if latest_equity.totalGainPct else "—" }}
+                </span>
+            </div>
+        </div>
+    </div>
+</section>
+{% endif %}
+
+{# ─── Two-column: left = charts, right = data tables ─── #}
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.25rem; align-items: start;">
+    <div>
+        <section>
+            <h2>30-day price</h2>
+            <div class="chart-card">
+                <div class="chart-target sparkline-mini"
+                     data-chart-url="/charts/sparkline/{{ ticker }}.json?days=30"
+                     style="min-height: 220px;"></div>
+            </div>
+        </section>
+
+        <section>
+            <h2>Parkev rating timeline</h2>
+            <div class="chart-card">
+                <div class="chart-target"
+                     data-chart-url="/charts/parkev/{{ ticker }}.json"
+                     style="min-height: 280px;"></div>
+            </div>
+            <p class="muted" style="margin-top: .35rem; font-size: 12px;">
+                <a href="/parkev/{{ ticker }}">Full rating history →</a>
+            </p>
+        </section>
+    </div>
+
+    <div>
+        <section>
+            <h2>Position history</h2>
+            {% if history %}
+            <div style="max-height: 480px; overflow: auto;">
+                <table class="compact sortable">
+                    <thead>
+                        <tr>
+                            <th data-sort="date">Date</th>
+                            <th>Symbol</th>
+                            <th data-sort="str">Type</th>
+                            <th data-sort="num" class="num">Qty</th>
+                            <th data-sort="num" class="num">Price</th>
+                            <th data-sort="num" class="num">Strike</th>
+                            <th data-sort="date">Expiry</th>
+                            <th data-sort="num" class="num">Market value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for h in history %}
+                        <tr>
+                            <td class="num">{{ h.date }}</td>
+                            <td>{{ h.symbol | pretty_contract }}</td>
+                            <td>{{ h.opt_type or h.assetType }}</td>
+                            <td class="num">{{ "{:.0f}".format(h.qty) if h.qty else "—" }}</td>
+                            <td class="num">${{ "{:,.2f}".format(h.price) if h.price else "—" }}</td>
+                            <td class="num">${{ "{:.2f}".format(h.strike) if h.strike else "—" }}</td>
+                            <td class="num muted">{{ h.expiration or "—" }}</td>
+                            <td class="num">${{ "{:,.0f}".format(h.market_value) if h.market_value else "—" }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty">No history found for {{ ticker }} across any snapshot.</div>
+            {% endif %}
+        </section>
+
+        <section>
+            <h2>Briefing mentions ({{ mentions|length }})</h2>
+            {% if mentions %}
+            <div style="max-height: 360px; overflow: auto;">
+                <table class="compact sortable">
+                    <thead>
+                        <tr>
+                            <th data-sort="date">Date</th>
+                            <th data-sort="str">Source</th>
+                            <th data-sort="str">Rec</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for m in mentions %}
+                        <tr>
+                            <td class="num"><a href="/briefing/{{ m.date }}">{{ m.date }}</a></td>
+                            <td class="muted">{{ m.source }}</td>
+                            <td class="rec-{{ m.recommendation }}">{{ m.recommendation or "—" }}</td>
+                            <td>{{ m.detail | inline_md }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty">No briefing has mentioned {{ ticker }} yet.</div>
+            {% endif %}
+        </section>
+    </div>
+</div>
+
+<style>
+    @media (max-width: 1024px) {
+        /* Stack columns on narrow viewports */
+        div[style*="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)"] {
+            grid-template-columns: 1fr !important;
+        }
+    }
+</style>
+{% endblock %}

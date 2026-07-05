@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Parkev — {{ ticker }}{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>{{ ticker }} — Parkev rating timeline</h1>
+    <p class="muted">
+        {{ history|length }} snapshots observed ·
+        <a href="/positions/{{ ticker }}">Back to position →</a>
+    </p>
+</hgroup>
+
+<section>
+    <div class="chart-card">
+        <div class="chart-target" data-chart-url="/charts/parkev/{{ ticker }}.json"></div>
+    </div>
+</section>
+
+{% if history %}
+<section>
+    <h2>Full history</h2>
+    <table class="compact sortable">
+        <thead>
+            <tr>
+                <th data-sort="date">Observed</th>
+                <th data-sort="str">Raw rating</th>
+                <th data-sort="num" class="num">Tier</th>
+                <th data-sort="str">Conviction</th>
+                <th data-sort="num" class="num">Sheet age</th>
+                <th data-sort="date">Date updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for h in history|reverse %}
+            <tr>
+                <td class="num">{{ h.date }}</td>
+                <td>{{ h.raw_recommendation or h.recommendation or "—" }}</td>
+                <td class="num">{{ h.rating_tier if h.rating_tier is not none else "—" }}</td>
+                <td>{{ h.conviction or "—" }}</td>
+                <td class="num">{{ h.age_days if h.age_days is not none else "—" }}d</td>
+                <td class="num muted">{{ h.date_updated or "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% else %}
+<div class="empty">No Parkev observations for {{ ticker }}. Parkev's sheet may not rate this name.</div>
+{% endif %}
+{% endblock %}

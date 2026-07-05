@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Portfolio Briefing{% endblock %}
+
+{% block content %}
+{% if not briefing %}
+    <article class="alert alert-red">
+        <strong>No briefings loaded yet.</strong>
+        Expected to find <code>briefing_*.json</code> under <code>{{ delivery_dir }}</code>.
+        Run the pipeline (<code>uv run python skills/daily-portfolio-briefing/scripts/run_briefing.py</code>) to generate one.
+    </article>
+{% else %}
+    <hgroup>
+        <h1>{{ briefing.date.isoformat() }} &mdash; Morning Briefing</h1>
+        <p class="muted">
+            {% if briefing.regime %}Regime <strong>{{ briefing.regime }}</strong> · {% endif %}
+            {{ briefing.actionable_count() }} actionable items ·
+            {{ briefing.equity_reviews|length }} equity positions reviewed ·
+            {{ briefing.options_reviews|length }} option positions reviewed
+        </p>
+    </hgroup>
+
+    {# ─── RED FLAGS BANNER (UX critique #2 + #8 partial) ───
+       Surfaces stress coverage / cash floor / expiration bucket
+       concentration alerts at the very top of the dashboard so the most
+       important risk signal is impossible to miss. Pulls from
+       red_flags.compute_red_flags() in the route. #}
+    {% if red_flags %}
+    <section class="red-flags-banner" id="red-flags">
+        <header class="red-flags-banner-head">
+            <strong>Red Flags & Priorities</strong>
+            <span class="muted">
+                {% if red_flag_counts.critical %}🚨 {{ red_flag_counts.critical }} critical{% endif %}
+                {% if red_flag_counts.critical and red_flag_counts.warning %} · {% endif %}
+                {% if red_flag_counts.warning %}📊 {{ red_flag_counts.warning }} warnings{% endif %}
+            </span>
+        </header>
+        <ul class="red-flags-list">
+            {% for f in red_flags %}
+            <li class="red-flag red-flag-{{ f.tone }}">
+                <span class="red-flag-icon">{{ f.icon }}</span>
+                <div class="red-flag-body">
+                    <strong>{{ f.title }}</strong>
+                    <span class="red-flag-detail">{{ f.detail }}</span>
+                </div>
+                {% if f.jump_to %}
+                <a href="{{ f.jump_to }}" class="red-flag-jump" title="Jump to source">→</a>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+
+    {# ─── Hero metric row ─── #}
+    <section class="dash-grid">
+        <div class="metric-card metric-hero-card">
+            <h4>NLV</h4>
+            <div class="value">${{ "{:,.0f}".format(briefing.nlv) if briefing.nlv else "n/a" }}</div>
+            <div class="sub">
+                Cash ${{ "{:,.0f}".format(briefing.cash) if briefing.cash else "—" }}
+                ({{ "{:.1f}%".format(briefing.cash_pct * 100) if briefing.cash_pct is not none else "—" }})
+            </div>
+        </div>
+
+        <div class="metric-card metric-hero-card">
+            <h4>Cash %</h4>
+            <div class="value">{{ "{:.1f}%".format(briefing.cash_pct * 100) if briefing.cash_pct is not none else "—" }}</div>
+            <div class="sub">
+                {% if briefing.cash_pct is not none and briefing.cash_pct < 0.05 %}
+                    <span style="color: var(--color-danger)">⛔ Below 5% floor</span>
+                {% elif briefing.cash_pct is not none and briefing.cash_pct < 0.10 %}
+                    <span style="color: var(--color-warning)">⚠ Thin defensive room</span>
+                {% else %}
+                    Room to deploy
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="metric-card metric-hero-card">
+            <h4>Stress coverage</h4>
+            {% if coverage is not none %}
+                {% set ring_value = (coverage / 0.5 * 100) | round(0) if coverage < 0.5 else (100 if coverage >= 1.0 else (coverage / 1.0 * 100) | round(0)) %}
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <sl-progress-ring
+                        value="{{ ring_value }}"
+                        style="--size: 64px; --track-width: 6px; --indicator-width: 6px;
+                               --indicator-color: {{ 'var(--color-danger)' if coverage < 0.5 else ('var(--color-warning)' if coverage < 0.7 else 'var(--color-positive)') }};
+                               --track-color: var(--color-border-subtle);">
+                        <span class="num" style="font-size: 14px; font-weight: 600;">{{ "{:.2f}×".format(coverage) }}</span>
+                    </sl-progress-ring>
+                    <div class="sub" style="margin-top: 0;">
+                        {% if coverage < 0.5 %}
+                            <span style="color: var(--color-danger)">⛔ Below 0.50× floor — new CSPs blocked</span>
+                        {% elif coverage < 0.7 %}
+                            <span style="color: var(--color-warning)">⚠ Rebuilding toward 0.70×</span>
+                        {% else %}
+                            <span style="color: var(--color-positive)">✓ Clear</span>
+                        {% endif %}
+                    </div>
+                </div>
+            {% else %}
+                <div class="value">—</div>
+                <div class="sub">no short puts</div>
+            {% endif %}
+        </div>
+
+        <div class="metric-card metric-hero-card">
+            <h4>Action queue</h4>
+            <div class="value">{{ briefing.actions|length }}</div>
+            <div class="sub">
+                {% set stalled_n = briefing.actions | selectattr("days_flagged") | rejectattr("days_flagged", "lt", 6) | list | length %}
+                {% if stalled_n %}
+                    <span style="color: var(--color-danger)">⏳ {{ stalled_n }} stalled ≥6 sessions</span>
+                {% else %}
+                    no stalled items
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2>Top 5 holdings</h2>
+        {% set top = briefing.top_holdings(5) %}
+        {% if top %}
+            <table class="compact sortable">
+                <thead>
+                    <tr>
+                        <th data-sort="str">Ticker</th>
+                        <th data-sort="str">Rec</th>
+                        <th data-sort="num" class="num">Price</th>
+                        <th data-sort="num" class="num">Qty</th>
+                        <th data-sort="num" class="num">Market value</th>
+                        <th data-sort="num" class="num">Weight</th>
+                        <th>Parkev</th>
+                        <th>Tier</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in top %}
+                    <tr>
+                        <td><a href="/positions/{{ r.ticker }}"><strong>{{ r.ticker }}</strong></a></td>
+                        <td class="rec-{{ r.recommendation }}">{{ r.recommendation or "—" }}</td>
+                        <td class="num">${{ "{:,.2f}".format(r.price) if r.price else "—" }}</td>
+                        <td class="num">{{ "{:,.0f}".format(r.qty) if r.qty else "—" }}</td>
+                        <td class="num">${{ "{:,.0f}".format(r.market_value) if r.market_value else "—" }}</td>
+                        <td class="num">{{ "{:.1%}".format(r.weight) if r.weight else "—" }}</td>
+                        <td>{{ parkev_chip(r.ticker) | safe }}</td>
+                        <td>{{ tier_badge(r.ticker) | safe }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">No equity positions reviewed in this briefing.</div>
+        {% endif %}
+    </section>
+
+    {% if briefing.actions %}
+    <section>
+        <h2>Today's action queue ({{ briefing.actions|length }})</h2>
+        {% for a in briefing.actions[:10] %}
+            <div class="action-row">
+                <div class="age {{ 'stalled' if a.days_flagged and a.days_flagged >= 6 else '' }}">
+                    {% if a.days_flagged and a.days_flagged >= 6 %}⏳ {{ a.days_flagged }}d
+                    {% elif a.days_flagged %}{{ a.days_flagged }}d
+                    {% else %}◔ NEW{% endif %}
+                </div>
+                <div class="summary">
+                    <strong class="rec-{{ a.kind }}" title="{{ a.kind }}"><span class="action-icon">{{ a.kind | action_icon }}</span> {{ a.kind }}</strong>
+                    · {{ a.ident | pretty_contract }}
+                    <div class="muted" style="font-size: 12px; margin-top: .15rem;">{{ a.summary | summary_html(a.kind, a.ident) }}</div>
+                </div>
+            </div>
+        {% endfor %}
+        {% if briefing.actions|length > 10 %}
+            <p class="muted" style="margin-top: 1rem;">
+                <a href="/briefing/{{ briefing.date.isoformat() }}#actions">View all {{ briefing.actions|length }} actions →</a>
+            </p>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    <section>
+        <div class="eyebrow">Quick navigation</div>
+        <div class="dash-grid">
+            <div class="metric-card">
+                <h4>Full briefing</h4>
+                <div class="value" style="font-size: 16px;"><a href="/briefing/{{ briefing.date.isoformat() }}">View →</a></div>
+                <div class="sub">Reviews, action list, opportunities</div>
+            </div>
+            <div class="metric-card">
+                <h4>Time-series charts</h4>
+                <div class="value" style="font-size: 16px;"><a href="/history">View →</a></div>
+                <div class="sub">NLV / coverage / expiration ladder</div>
+            </div>
+            <div class="metric-card">
+                <h4>Positions table</h4>
+                <div class="value" style="font-size: 16px;"><a href="/positions">View →</a></div>
+                <div class="sub">All current equity + option positions, sortable</div>
+            </div>
+        </div>
+    </section>
+{% endif %}
+{% endblock %}

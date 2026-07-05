@@ -43,6 +43,58 @@ def test_aaoi_independent_setup_rsi50_iv76():
     assert any("no third-party rec" in r for r in reasons)
 
 
+# ─── Task #59: Parkev HOLD gets a precise badge, not a misleading one ─────
+
+
+def test_hold_rec_gets_precise_badge_not_no_rec():
+    """AMAT case (2026-07-03): Parkev has HOLD, RSI/IV qualify for independent
+    setup. Badge must say "Parkev HOLD (not a BUY catalyst)" not "no third-party
+    rec" — the latter falsely implies Parkev doesn't cover the name."""
+    verdict, reasons, want_csp = _v(
+        {"rsi_14": 54, "iv_rank": 79, "drawdown_pct": 17,
+         "spot": 603.0, "sma_200": 550.0},
+        rec="HOLD",
+    )
+    assert verdict == "CSP ENTRY (independent setup)"
+    assert want_csp is True
+    # Must NOT say "no third-party rec" — that's the AMAT bug
+    assert not any("no third-party rec" in r for r in reasons), (
+        f"HOLD-rec case must not say 'no third-party rec' — got: {reasons}"
+    )
+    # Must say something honest about Parkev's HOLD
+    assert any("HOLD" in r and "BUY catalyst" in r for r in reasons), (
+        f"HOLD-rec case must mention 'HOLD' and 'BUY catalyst' — got: {reasons}"
+    )
+
+
+def test_no_rec_still_says_no_rec_precisely():
+    """The other side of the fix: when there's truly no rec, the badge
+    should still say "no third-party rec" — don't break the working case."""
+    verdict, reasons, want_csp = _v(
+        {"rsi_14": 50, "iv_rank": 76, "drawdown_pct": 22,
+         "spot": 174.0, "sma_200": 75.0},
+        rec=None,
+    )
+    assert verdict == "CSP ENTRY (independent setup)"
+    assert any("no third-party rec" in r for r in reasons)
+
+
+def test_hold_rec_watch_fallthrough_mentions_hold():
+    """When RSI/IV don't qualify AND Parkev has HOLD, the WATCH fallthrough
+    reason must mention the HOLD (not say 'no third-party catalyst'). Same
+    honesty rule as the CSP branch."""
+    verdict, reasons, _ = _v(
+        {"rsi_14": 30, "iv_rank": 40, "drawdown_pct": 5,
+         "spot": 100.0, "sma_200": 90.0},
+        rec="HOLD",
+    )
+    # Under normal thresholds this should NOT be independent setup
+    assert verdict == "WATCH"
+    assert any("HOLD" in r for r in reasons)
+    # And must NOT say "no third-party catalyst" — that's misleading when HOLD exists
+    assert not any(r.strip() == "no third-party catalyst" for r in reasons)
+
+
 def test_aa_oversold_high_iv_qualifies():
     """AA: RSI 40 (lower band), IV 99, dd 25%."""
     verdict, _, want_csp = _v({

@@ -1,0 +1,80 @@
+{
+  "date": "2026-05-10",
+  "regime": "RISK_ON",
+  "nlv": 950000.00,
+  "cash": 75000.00,
+  "snapshot_dir": "tests/fixtures/snapshots/2026-05-10",
+  "directives_active_count": 2,
+  "directives_expired_count": 1,
+  "equity_reviews": [
+    {
+      "ticker": "NVDA",
+      "price": 180.0,
+      "qty": 500.0,
+      "market_value": 90000.0,
+      "weight": 0.0947,
+      "pl_pct": 0.10,
+      "thesis_status": "ACTIVE",
+      "technical_status": "UPTREND",
+      "recommendation": "HOLD",
+      "rationale": "Thesis intact, technical sound.",
+      "third_party_rec": "TOP 12",
+      "matrix_cell_id": "STUB_HOLD"
+    },
+    {
+      "ticker": "AMZN",
+      "price": 220.0,
+      "qty": 100.0,
+      "market_value": 22000.0,
+      "weight": 0.0232,
+      "pl_pct": 0.08,
+      "thesis_status": "ACTIVE",
+      "technical_status": "UPTREND",
+      "recommendation": "HOLD",
+      "rationale": "Fundamentals strong.",
+      "third_party_rec": "BUY",
+      "matrix_cell_id": "STUB_HOLD"
+    }
+  ],
+  "options_reviews": [
+    {
+      "underlying": "NVDA",
+      "contract": "NVDA_PUT_170_20260918",
+      "type": "PUT",
+      "qty": -1.0,
+      "strike": 170.0,
+      "expiration": "2026-09-18",
+      "current_mid": 5.20,
+      "entry_price": 6.00,
+      "days_to_expiry": 131,
+      "iv_rank": 45.0,
+      "recommendation": "HOLD",
+      "rationale": "Theta working as planned.",
+      "matrix_cell_id": "STUB_HOLD",
+      "roll_target": null,
+      "roll_candidates": [],
+      "warnings": []
+    }
+  ],
+  "new_ideas": [],
+  "long_term_opportunities": [
+    {
+      "kind": "ADD",
+      "ticker": "GOOG",
+      "trigger_reasons": ["RSI 42"],
+      "concrete_trade": "BUY GOOG ~$5K starter",
+      "rationale": "Pullback at support.",
+      "yield_or_cost": "n/a",
+      "source": "long-term-opportunity-advisor"
+    }
+  ],
+  "strategy_upgrades": [],
+  "consistency_report": {
+    "total_positions": 3,
+    "recommendations_unchanged": 3,
+    "recommendations_changed": 0,
+    "changes_with_trigger": 0,
+    "inconsistencies_found": 0,
+    "note": "Test V1 briefing fixture (no actions array)."
+  }
+}

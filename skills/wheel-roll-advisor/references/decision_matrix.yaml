@@ -33,9 +33,9 @@ cells:
     dte_band: [MID_DTE, LONG_DTE]
     outlook: [BULLISH, NEUTRAL]
     regime: NORMAL
-    profit_min: 0.50
+    profit_min: 0.60      # was 0.50 — raised to match wheel-strategy 50-65% sweet spot (task #49)
     decision: CLOSE_FOR_PROFIT
-    rationale: "DEEP OTM in mid/long DTE. Secure 50%+ profit."
+    rationale: "DEEP OTM in mid/long DTE. Secure 60%+ profit — the wheel sweet spot."
 
   # SHORT PUT - NORMAL regime - MODERATE OTM
   - id: "PUT_NORMAL_MOD_OTM_TAKEPROFIT"
@@ -43,10 +43,10 @@ cells:
     dte_band: [MID_DTE, LONG_DTE]
     outlook: [NEUTRAL, BULLISH]
     regime: NORMAL
-    profit_min: 0.50
-    profit_max: 0.75
+    profit_min: 0.65          # task #49: raised from 0.50 to hold for more theta
+    profit_max: 0.85          # widen ceiling
     decision: CLOSE_FOR_PROFIT
-    rationale: "Standard wheel sweet spot. Take 50-75% profit."
+    rationale: "Wheel sweet spot moved higher — take 65-85% profit. Beyond 85% the remaining premium isn't worth the gamma risk."
 
   - id: "PUT_NORMAL_MOD_OTM_GTC"
     moneyness: MODERATE_OTM
@@ -73,9 +73,9 @@ cells:
     dte_band: SHORT_DTE
     outlook: [NEUTRAL, BULLISH]
     regime: NORMAL
-    profit_min: 0.40
+    profit_min: 0.55          # was 0.40 — task #49; matches wheel sweet spot
     decision: CLOSE_FOR_PROFIT
-    rationale: "SHORT DTE approaching. Close at 40%+ profit."
+    rationale: "SHORT DTE approaching. Close at 55%+ profit (wheel sweet spot)."
 
   # SHORT PUT - NORMAL regime - NEAR ATM
   - id: "PUT_NORMAL_NEAR_ATM_ROLL_OUT"

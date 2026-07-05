@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} — {{ title }}{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>{{ code }} {{ title }}</h1>
+    <p class="muted">{{ message }}</p>
+</hgroup>
+
+<p><sl-button variant="primary" outline href="/">← Back to dashboard</sl-button></p>
+{% endblock %}

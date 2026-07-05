@@ -1,0 +1,259 @@
+{# Body fragment for the diff page — also returned by /fragment/diff/<a>/<b> for HTMX swaps. #}
+
+{# ─── TL;DR summary (UX critique #6) ───
+   One-sentence answer to "should I bother reading the rest?" — surfaces
+   NLV delta + position changes + action changes in a single line so the
+   user can decide in 2 seconds. #}
+{% set s = diff.scalars %}
+{% set added = diff.positions.added|length if diff.positions and diff.positions.added else 0 %}
+{% set removed = diff.positions.removed|length if diff.positions and diff.positions.removed else 0 %}
+{% set qty_changed = diff.positions.qty_changed|length if diff.positions and diff.positions.qty_changed else 0 %}
+{% set actions_new = diff.actions.new|length if diff.actions and diff.actions.new else 0 %}
+{% set actions_done = diff.actions.completed|length if diff.actions and diff.actions.completed else 0 %}
+{% set actions_pending = diff.actions.still_pending|length if diff.actions and diff.actions.still_pending else 0 %}
+{% set regime_changed = s and s.regime and s.regime.changed %}
+<section class="diff-tldr">
+    <strong>{{ diff.dates.a }} → {{ diff.dates.b }}:</strong>
+    {% if s and s.nlv.delta is not none %}
+        NLV
+        <span class="diff-tldr-num" style="color: {{ 'var(--color-positive)' if s.nlv.delta >= 0 else 'var(--color-danger)' }}">{{ "{:+,.0f}".format(s.nlv.delta) }}</span>
+        {% if s.nlv.pct is not none %}({{ "{:+.1%}".format(s.nlv.pct) }}){% endif %}
+        ·
+    {% endif %}
+    {% if added or removed or qty_changed %}
+        <span class="diff-tldr-pos">
+            {% if added %}{{ added }} added{% endif %}{% if added and (removed or qty_changed) %}, {% endif %}{% if removed %}{{ removed }} removed{% endif %}{% if removed and qty_changed %}, {% endif %}{% if qty_changed %}{{ qty_changed }} resized{% endif %}
+        </span>
+        ·
+    {% endif %}
+    {% if actions_new or actions_done or actions_pending %}
+        <span class="diff-tldr-actions">
+            {% if actions_new %}🆕 {{ actions_new }} new{% endif %}{% if actions_new and actions_done %}, {% endif %}{% if actions_done %}✓ {{ actions_done }} done{% endif %}{% if (actions_new or actions_done) and actions_pending %}, {% endif %}{% if actions_pending %}🔁 {{ actions_pending }} pending{% endif %}
+        </span>
+    {% endif %}
+    {% if regime_changed %}
+        · <strong style="color: var(--color-warning);">⚠ regime changed</strong>
+    {% endif %}
+    {% if not actions_new and not actions_done and not added and not removed and not qty_changed and not regime_changed %}
+        no material changes since {{ diff.dates.a }}.
+    {% endif %}
+</section>
+
+<section class="dash-grid">
+    {% set s = diff.scalars %}
+    <div class="metric-card">
+        <h4>NLV change</h4>
+        <div class="value num">
+            {% if s.nlv.delta is not none %}
+                <span style="color: {{ 'var(--color-positive)' if s.nlv.delta >= 0 else 'var(--color-danger)' }}">
+                    {{ "{:+,.0f}".format(s.nlv.delta) }}
+                </span>
+            {% else %}—{% endif %}
+        </div>
+        <div class="sub">
+            {{ "${:,.0f}".format(s.nlv.a) if s.nlv.a else "—" }} →
+            {{ "${:,.0f}".format(s.nlv.b) if s.nlv.b else "—" }}
+            {% if s.nlv.pct is not none %}({{ "{:+.1%}".format(s.nlv.pct) }}){% endif %}
+        </div>
+    </div>
+    <div class="metric-card">
+        <h4>Cash change</h4>
+        <div class="value num">
+            {% if s.cash.delta is not none %}
+                {{ "{:+,.0f}".format(s.cash.delta) }}
+            {% else %}—{% endif %}
+        </div>
+        <div class="sub">
+            {{ "${:,.0f}".format(s.cash.a) if s.cash.a else "—" }} →
+            {{ "${:,.0f}".format(s.cash.b) if s.cash.b else "—" }}
+        </div>
+    </div>
+    <div class="metric-card">
+        <h4>Cash % change</h4>
+        <div class="value num">
+            {% if s.cash_pct.delta is not none %}{{ "{:+.1f}".format(s.cash_pct.delta * 100) }}pp{% else %}—{% endif %}
+        </div>
+        <div class="sub">
+            {{ "{:.1%}".format(s.cash_pct.a) if s.cash_pct.a is not none else "—" }} →
+            {{ "{:.1%}".format(s.cash_pct.b) if s.cash_pct.b is not none else "—" }}
+        </div>
+    </div>
+    <div class="metric-card">
+        <h4>Regime</h4>
+        <div class="value" style="font-size: 1.4rem;">
+            {% if s.regime.changed %}
+                <span class="muted">{{ s.regime.a or "—" }}</span> →
+                <span style="color: var(--color-warning);">{{ s.regime.b or "—" }}</span>
+            {% else %}
+                {{ s.regime.b or "—" }}
+            {% endif %}
+        </div>
+        <div class="sub">{% if s.regime.changed %}⚠ changed{% else %}unchanged{% endif %}</div>
+    </div>
+</section>
+
+<section>
+    <h2>Action queue diff ({{ diff.actions.new|length }} new, {{ diff.actions.completed|length }} completed, {{ diff.actions.still_pending|length }} still pending)</h2>
+    {% if diff.actions.new %}
+    <h3 style="color: var(--color-warning);">🆕 New since {{ diff.dates.a }} ({{ diff.actions.new|length }})</h3>
+    <table class="compact">
+        <thead><tr><th>Kind</th><th>Identifier</th><th>Summary</th><th class="num">Days</th></tr></thead>
+        <tbody>
+            {% for a in diff.actions.new %}
+            <tr>
+                <td class="rec-{{ a.kind }}" title="{{ a.kind }}"><span class="action-icon">{{ a.kind | action_icon }}</span> <strong>{{ a.kind }}</strong></td>
+                <td>{{ a.ident | pretty_contract }}</td>
+                <td>{{ a.summary | summary_html(a.kind, a.ident) }}</td>
+                <td class="num">{{ a.days_flagged or "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if diff.actions.completed %}
+    <h3 style="color: var(--color-positive);">✓ Completed or dropped ({{ diff.actions.completed|length }})</h3>
+    <p class="muted">In {{ diff.dates.a }}, no longer in {{ diff.dates.b }} — likely executed or position closed.</p>
+    <table class="compact">
+        <thead><tr><th>Kind</th><th>Identifier</th><th>Summary</th></tr></thead>
+        <tbody>
+            {% for a in diff.actions.completed %}
+            <tr>
+                <td class="rec-{{ a.kind }}" title="{{ a.kind }}"><span class="action-icon">{{ a.kind | action_icon }}</span> <strong>{{ a.kind }}</strong></td>
+                <td>{{ a.ident | pretty_contract }}</td>
+                <td class="muted">{{ a.summary }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if diff.actions.still_pending %}
+    <h3 style="color: var(--color-text-tertiary);">🔁 Still pending ({{ diff.actions.still_pending|length }})</h3>
+    <table class="compact">
+        <thead><tr><th>Kind</th><th>Identifier</th><th>Summary</th><th class="num">Days flagged</th></tr></thead>
+        <tbody>
+            {% for a in diff.actions.still_pending %}
+            <tr>
+                <td class="rec-{{ a.kind }}" title="{{ a.kind }}"><span class="action-icon">{{ a.kind | action_icon }}</span> <strong>{{ a.kind }}</strong></td>
+                <td>{{ a.ident | pretty_contract }}</td>
+                <td class="muted">{{ a.summary }}</td>
+                <td class="num {{ 'stalled' if a.days_flagged and a.days_flagged >= 6 else '' }}">
+                    {{ a.days_flagged or "—" }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% if not (diff.actions.new or diff.actions.completed or diff.actions.still_pending) %}
+    <div class="empty">No action items in either snapshot.</div>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Position diff ({{ diff.positions.added|length }} added, {{ diff.positions.removed|length }} removed, {{ diff.positions.changed|length }} qty-changed)</h2>
+    {% if diff.positions.added %}
+    <h3 style="color: var(--color-positive);">+ Added ({{ diff.positions.added|length }})</h3>
+    <table class="compact">
+        <thead><tr><th>Symbol</th><th>Type</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th></tr></thead>
+        <tbody>
+            {% for p in diff.positions.added %}
+            <tr>
+                <td><a href="/positions/{{ p.underlying }}"><strong>{{ p.symbol }}</strong></a></td>
+                <td>{{ p.assetType }}</td>
+                <td class="num">{{ "{:,.0f}".format(p.qty) if p.qty else "—" }}</td>
+                <td class="num">${{ "{:,.2f}".format(p.price) if p.price else "—" }}</td>
+                <td class="num">${{ "{:,.0f}".format(p.market_value) if p.market_value else "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if diff.positions.removed %}
+    <h3 style="color: var(--color-danger);">– Removed ({{ diff.positions.removed|length }})</h3>
+    <table class="compact">
+        <thead><tr><th>Symbol</th><th>Type</th><th class="num">Qty (was)</th><th class="num">Price (was)</th></tr></thead>
+        <tbody>
+            {% for p in diff.positions.removed %}
+            <tr>
+                <td><a href="/positions/{{ p.underlying }}"><strong>{{ p.symbol }}</strong></a></td>
+                <td>{{ p.assetType }}</td>
+                <td class="num">{{ "{:,.0f}".format(p.qty) if p.qty else "—" }}</td>
+                <td class="num">${{ "{:,.2f}".format(p.price) if p.price else "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if diff.positions.changed %}
+    <h3 style="color: var(--color-warning);">~ Quantity changed ({{ diff.positions.changed|length }})</h3>
+    <table class="compact">
+        <thead><tr><th>Symbol</th><th>Type</th><th class="num">Qty before</th><th class="num">Qty after</th><th class="num">Delta</th></tr></thead>
+        <tbody>
+            {% for p in diff.positions.changed %}
+            <tr>
+                <td><a href="/positions/{{ p.underlying }}"><strong>{{ p.symbol }}</strong></a></td>
+                <td>{{ p.assetType }}</td>
+                <td class="num">{{ "{:,.0f}".format(p.qty_a) }}</td>
+                <td class="num">{{ "{:,.0f}".format(p.qty_b) }}</td>
+                <td class="num" style="color: {{ 'var(--color-positive)' if p.qty_delta > 0 else 'var(--color-danger)' }}">
+                    {{ "{:+,.0f}".format(p.qty_delta) }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% if not (diff.positions.added or diff.positions.removed or diff.positions.changed) %}
+    <div class="empty">Positions unchanged.</div>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Parkev rating changes ({{ diff.parkev.changed|length }})</h2>
+    {% if diff.parkev.changed %}
+    <table class="compact">
+        <thead>
+            <tr>
+                <th>Ticker</th>
+                <th>Prior rating</th>
+                <th>Prior conviction</th>
+                <th>Current rating</th>
+                <th>Current conviction</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in diff.parkev.changed %}
+            <tr>
+                <td><a href="/parkev/{{ c.ticker }}"><strong>{{ c.ticker }}</strong></a></td>
+                <td class="muted">{{ c.prior.raw or "—" }} (T{{ c.prior.tier if c.prior.tier is not none else "—" }})</td>
+                <td class="muted">{{ c.prior.conviction or "—" }}</td>
+                <td>{{ c.current.raw or "—" }} (T{{ c.current.tier if c.current.tier is not none else "—" }})</td>
+                <td>{{ c.current.conviction or "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No rating changes between {{ diff.dates.a }} and {{ diff.dates.b }}.</div>
+    {% endif %}
+
+    {% if diff.parkev.new_coverage %}
+    <h3 style="color: var(--color-text-tertiary); font-size: .9rem;">+ New coverage ({{ diff.parkev.new_coverage|length }})</h3>
+    <p class="muted" style="font-size: .85rem;">
+        {% for c in diff.parkev.new_coverage[:20] %}<code>{{ c.ticker }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+        {% if diff.parkev.new_coverage|length > 20 %} · ...{% endif %}
+    </p>
+    {% endif %}
+
+    {% if diff.parkev.dropped_coverage %}
+    <h3 style="color: var(--color-text-tertiary); font-size: .9rem;">– Dropped ({{ diff.parkev.dropped_coverage|length }})</h3>
+    <p class="muted" style="font-size: .85rem;">
+        {% for c in diff.parkev.dropped_coverage[:20] %}<code>{{ c.ticker }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+        {% if diff.parkev.dropped_coverage|length > 20 %} · ...{% endif %}
+    </p>
+    {% endif %}
+</section>

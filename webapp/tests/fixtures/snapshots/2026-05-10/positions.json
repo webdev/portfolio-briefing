@@ -1,0 +1,39 @@
+[
+  {
+    "symbol": "NVDA",
+    "assetType": "EQUITY",
+    "qty": 500.0,
+    "price": 180.0,
+    "marketValue": 90000.0,
+    "costBasis": 163.50,
+    "totalGain": 8250.0,
+    "totalGainPct": 10.0,
+    "accountDesc": "INDIVIDUAL"
+  },
+  {
+    "symbol": "AMZN",
+    "assetType": "EQUITY",
+    "qty": 100.0,
+    "price": 220.0,
+    "marketValue": 22000.0,
+    "costBasis": 204.0,
+    "totalGain": 1600.0,
+    "totalGainPct": 7.8,
+    "accountDesc": "INDIVIDUAL"
+  },
+  {
+    "symbol": "NVDA_PUT_170_20260918",
+    "assetType": "OPTION",
+    "underlying": "NVDA",
+    "type": "PUT",
+    "strike": 170.0,
+    "expiration": "2026-09-18",
+    "qty": -1.0,
+    "marketValue": -520.0,
+    "premiumReceived": 6.00,
+    "currentMid": 5.20,
+    "delta": -0.30,
+    "ivPct": 45.0,
+    "accountDesc": "INDIVIDUAL"
+  }
+]

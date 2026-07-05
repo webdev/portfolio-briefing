@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ report_title }} — {{ date }}{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>{{ report_title }} &mdash; {{ date }}</h1>
+    <p class="muted">{{ report_subtitle }}</p>
+</hgroup>
+
+{# ─── Date navigator (matches /briefing/<date> pattern) ─── #}
+<div style="display: flex; align-items: center; gap: 1rem; margin: 1rem 0 1.5rem; flex-wrap: wrap;">
+    <div style="display: flex; align-items: center; gap: .5rem;">
+        {% if neighbor_dates.prev %}
+            <sl-button size="small" variant="default" href="{{ report_base_url }}/{{ neighbor_dates.prev }}">← {{ neighbor_dates.prev }}</sl-button>
+        {% else %}
+            <sl-button size="small" variant="default" disabled>← prev</sl-button>
+        {% endif %}
+        {% if neighbor_dates.next %}
+            <sl-button size="small" variant="default" href="{{ report_base_url }}/{{ neighbor_dates.next }}">{{ neighbor_dates.next }} →</sl-button>
+        {% else %}
+            <sl-button size="small" variant="default" disabled>next →</sl-button>
+        {% endif %}
+    </div>
+    <label style="display: flex; align-items: center; gap: .5rem; font-size: 12px; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: .06em;">
+        Jump to date
+        <sl-input
+            type="date"
+            size="small"
+            value="{{ date }}"
+            onsl-change="if (this.value) window.location.href = '{{ report_base_url }}/' + this.value;"
+            style="width: 11rem;">
+        </sl-input>
+    </label>
+    <a href="/briefing/{{ date }}" class="muted" style="margin-left: auto;">Briefing for {{ date }} →</a>
+</div>
+
+{% if rendered_html %}
+<article class="markdown-rendered">
+    {{ rendered_html | safe }}
+</article>
+
+<footer class="muted" style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--color-border-subtle); font-size: 12px;">
+    Source: <code>{{ source_path }}</code>
+</footer>
+{% else %}
+<article class="alert alert-red">
+    <strong>No {{ report_title|lower }} for {{ date }}.</strong>
+    Expected to find <code>{{ source_path }}</code> on disk.
+    Run the pipeline to generate one.
+</article>
+{% endif %}
+{% endblock %}

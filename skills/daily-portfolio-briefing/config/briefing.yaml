@@ -9,6 +9,47 @@
 account_desc_whitelist:
   - INDIVIDUAL
 
+# LLM second-opinion review of the finished briefing (task #51). Runs AFTER
+# all deterministic rules — the rules stay the source of truth for
+# actionables; the LLM adds cross-section pattern-matching + contradiction
+# spotting. Requires ANTHROPIC_API_KEY in .env. Fail-open: any API error
+# is silently caught, briefing still ships.
+fable_review:
+  enabled: true                        # off by default; opt-in per user
+  model: claude-opus-4-6               # Opus 4.6 for real reasoning.
+                                       # Override to claude-sonnet-4-6
+                                       # or claude-haiku-4-5-20251001 to
+                                       # cut cost. See fable_review.py
+                                       # for cost estimates.
+  max_tokens: 1200                     # keeps reviews under ~350 words
+  timeout_sec: 60                      # opus is slower than haiku
+  max_input_chars: 120000              # cap input; larger briefings truncated
+
+# ── Fable Advisor v2 (task #54) — persona + memory ──────────────────────
+# When enabled, this OVERRIDES fable_review (v1) as the LLM second-opinion
+# pass. v2 is a private-wealth-advisor persona rather than a locked-down
+# critic. Key difference from v1: v2 reads state/fable_advisor_memory.md
+# for continuity — it knows what it flagged yesterday, remembers your
+# standing directives ("deferring SPY hedge until VIX > 22"), and names
+# patterns in your behavior over time.
+#
+# Fallback behavior: if v2 errors OR is disabled, aggregate.py falls
+# through to v1 (fable_review) — never silently omits the review section.
+#
+# Memory file: state/fable_advisor_memory.md (auto-created on first run,
+# in .gitignore, hand-editable — put standing directives in the Notes
+# section at the top).
+#
+# Cost: ~35K input (briefing ~25K + memory ~10K) + ~800 output ≈ $0.60/run
+# at Opus. Marginal delta vs v1's ~$0.43. See fable_advisor.py header.
+fable_advisor:
+  enabled: true                        # takes precedence over fable_review
+  model: claude-opus-4-6               # reasoning matters more than speed
+  max_tokens: 1500                     # advisor voice runs longer than critic
+  timeout_sec: 90                      # larger context = slower response
+  max_input_chars: 200000              # includes briefing + memory
+  keep_reviews: 14                     # rolling window of past reviews in memory
+
 # Brokerage backend for live pulls + chain data. "etrade" (default) or "schwab".
 # Set to "schwab" only on a Schwab-backed instance. When "schwab", also set
 # schwab_account_labels so account_desc_whitelist can match (Schwab exposes
@@ -36,6 +77,86 @@ screeners:
   pair_trade_screener:
     enabled: false
     frequency: monthly
+  # Broad-universe wheel-setup screener (Step 8.7): FMP company-screener
+  # scan (one /stable/ API call) → exclusion of Parkev + Scout names →
+  # yfinance deep-dive → discipline gates (RSI 35-50, IV rank ≥ 60, at
+  # support, no earnings ≤ 21d, optionable, cap > $2B). Writes
+  # daily_screener_<DATE>.md. Requires FMP_API_KEY (same key as intrinsic
+  # value — no FINVIZ Elite subscription); fail-open (never blocks the
+  # briefing). ENABLED 2026-07-03 per user request; FMP swap same day (task #8).
+  broad_universe:
+    enabled: true
+    frequency: every_run
+    # Output cache (task #9): reuse a same-day, same-config screener result
+    # younger than cache_ttl_hours instead of re-running the FMP scan +
+    # yfinance deep-dive (the single most expensive step of the pipeline).
+    # The capacity banner and fair-value notes are re-computed fresh on every
+    # run either way. Date change / config change / corruption / TTL expiry
+    # all invalidate; any cache problem falls back to the full run.
+    cache_enabled: true
+    cache_ttl_hours: 6
+
+# Persistent OHLC cache (task #9) — daily bars cached to disk in front of
+# every yfinance history() pull (snapshot technicals ~200 tickers × 730d,
+# scout ~133 × 300d, broad-screener deep-dive). Warm runs fetch only the
+# missing recent bars (~1 small request per ticker); adjusted-close drift
+# (new dividend/split) or >max_stale_days staleness triggers a full refetch.
+# Fail-open everywhere: corrupt/missing cache → raw yfinance call, never a
+# blocked briefing. Store: parquet when pyarrow/fastparquet is installed,
+# CSV otherwise. Disable with enabled: false to get the exact pre-cache path.
+ohlc_cache:
+  enabled: true
+  dir: state/cache/ohlc
+  max_stale_days: 30
+
+# Benchmark tracking + P/L attribution (task #16). Daily "am I beating
+# SPY?" table + bucketed attribution (realized/unrealized equity, option
+# premium, assignments, hedges, cash drag) rendered after Risk Alerts and
+# written to the briefing JSON as `benchmark_report` (webapp 📊 Benchmark
+# tab). NLV history comes from prior state/briefing_snapshots/<DATE>/
+# balance.json; benchmark closes come through the OHLC cache. Fail-open:
+# any error omits the panel, never blocks the briefing. Windows whose
+# start predates the earliest snapshot render "n/a" (never fabricated).
+benchmark_tracking:
+  enabled: true                # ON by default — this is core to the strategy
+  benchmark_ticker: SPY        # tunable to VOO, VTI, QQQ etc.
+  min_snapshots_for_report: 5  # skip if too little history
+  # windows:                   # optional override of the default windows
+  #   - {name: "30d", days: 30}
+  #   - {name: "90d", days: 90}
+  #   - {name: "6m", days: 182}
+  #   - {name: "YTD", days: null, mode: "ytd"}
+  #   - {name: "1y", days: 365}
+  #   - {name: "inception", days: null, mode: "inception"}
+
+# Thematic scout execution (task #9). parallel: false falls back to a
+# sequential loop with identical per-ticker logic — use it if yfinance
+# starts rate-limiting concurrent fetches.
+thematic_scout:
+  parallel: true
+  max_workers: 8
+
+# Deep technical analysis — the "🎯 Technical Read" section (per-ticker
+# BB(20,2) / MACD(12,26,9) / ATR(14) / SMA slopes / golden-death cross /
+# 52w range / ATH drawdown / returns + short-term (1-4wk) and long-term
+# (3-12mo) verdicts) plus the "📋 Per-Ticker Actions" entry/exit recommender
+# (EXIT_URGENT / TRIM / ENTRY_STRONG / ENTRY_WATCH / AVOID; HOLD is silent).
+# Indicators come from the same 730d yfinance OHLC pull that feeds RSI/S-R —
+# no extra fetch. Fail-closed: a ticker whose OHLC fetch failed renders
+# "chart data unavailable, verify manually" — never fabricated indicators.
+# The recommender respects capacity gates (ENTRY under a closed gate demotes
+# to ENTRY_WATCH), core_positions (EXIT → TRIM override), standing directives
+# in state/fable_advisor_memory.md (TRIM suppressed), and flags Parkev
+# top-pick conflicts without suppressing the call.
+technical_analysis:
+  enabled: true
+  recommender:
+    enabled: true
+    # Band overrides (see analysis/entry_exit_recommender.py DEFAULT_PARAMS):
+    # entry_rsi_max: 40
+    # trim_rsi_min: 70
+    # trim_bb_min: 85
+    # support_near_pct: 3.0
 
 # Risk parameters
 risk:
@@ -226,14 +347,50 @@ position_tiers:
 #                                   60-day window before LTCG threshold
 covered_call_tiers:
   tier_a:
+    # STRICT mode (the original Tier A gate): fires only when the name is
+    # genuinely overbought (RSI ≥ 75). Prevents capping rebounds.
     enabled: false
-    rsi_floor: 999
-    min_otm_pct: 999
-    max_delta: 0.0
-    coverage_cap_pct: 0
-    max_dte: 0
+    rsi_floor: 75
+    min_otm_pct: 20.0
+    max_delta: 0.10
+    coverage_cap_pct: 20        # write against at most 20% of round-lots
+    max_dte: 30
     roll_up_trigger: 0.92
     tax_aware_assignment_block: true
+
+    # Per-name opt-in list — REQUIRED for a specific Tier A name to be
+    # eligible under either strict or engineered mode below.
+    # Example: [MSFT, META] allows conservative CCs on those two names.
+    willing_to_write_cc_on: []
+
+    # ENGINEERED mode (task #47): the "smart middle ground" that fires
+    # even when RSI < 75, provided the strike is REBOUND-PROOF — above
+    # both the 200-SMA target AND the analyst PT so a snapback doesn't
+    # cap the position. Fires only when:
+    #   - RSI ≥ engineered.rsi_floor (default 40 = not oversold)
+    #   - Drawdown ≥ engineered.min_drawdown_pct (rebound premium present)
+    #   - IV rank ≥ engineered.min_iv_rank (rich premium)
+    #   - Strike ≥ max(200-SMA, analyst PT, spot × (1 + min_otm_pct))
+    #   - Delta ≤ engineered.max_delta (low assignment prob)
+    #   - DTE ≤ engineered.max_dte (short-gamma window)
+    #   - Coverage ≤ engineered.coverage_cap_pct (leaves majority uncovered)
+    # Rationale: "smart CC on a Tier A compounder in drawdown — collect
+    # rich premium at zero rebound-cap risk."
+    engineered:
+      enabled: false            # opt in per-user; keeps old behavior as default
+      rsi_floor: 40             # not falling-knife
+      min_drawdown_pct: 10.0    # rebound room exists
+      min_iv_rank: 70           # premium worth the trade
+      min_otm_pct: 13.0         # minimum, actual strike is max() of this + rebound-proof
+      max_delta: 0.15           # ~10-15% assignment prob = real premium
+      max_dte: 21               # short-gamma window
+      coverage_cap_pct: 20      # 80% of position keeps full upside
+      require_rebound_proof: true          # strike MUST sit ≥ 200-SMA (21-day rebound target)
+      # Ultra-conservative extra: require strike ALSO above analyst PT.
+      # In practice this pushes strikes to 30-45% OTM and collapses
+      # premium to pennies. Off by default; the 200-SMA gate + short DTE
+      # already give a rebound-proof strike with real premium.
+      min_strike_above_analyst_pt: false
   tier_b:
     enabled: true
     rsi_floor: 70

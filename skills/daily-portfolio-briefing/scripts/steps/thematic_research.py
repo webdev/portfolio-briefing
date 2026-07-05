@@ -73,6 +73,8 @@ def run_thematic_research(
     existing_short_puts: dict | None = None,
     refresh: bool = False,
     ttl_hours: int = 24,
+    parallel: bool = True,
+    max_workers: int = 8,
 ) -> dict | None:
     """Run the scout and return the results dict. Cache to disk for ttl_hours.
 
@@ -124,21 +126,40 @@ def run_thematic_research(
         for ticker in theme_data.get("anchors", []) or []:
             jobs.append((theme_key, ticker.upper()))
 
-    print(f"  Researching {len(jobs)} thematic tickers...")
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # Parallel by default (thematic_scout.parallel / .max_workers in
+    # briefing.yaml). parallel=False or max_workers<=1 → sequential loop with
+    # IDENTICAL per-ticker logic — a safe fallback if yfinance ever starts
+    # rate-limiting the concurrent fetches.
+    use_parallel = bool(parallel) and int(max_workers) > 1 and len(jobs) > 1
+    mode = f"workers={int(max_workers)}" if use_parallel else "sequential"
+    print(f"  Researching {len(jobs)} thematic tickers ({mode})...")
     results_by_theme: dict[str, list[dict]] = {tk: [] for tk in themes_cfg}
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="scout") as ex:
-        future_to_job = {
-            ex.submit(
-                scout._research_ticker, ticker, theme, verdict_cfg,
-                recs_map, held_weights, existing_short_puts
-            ): (theme, ticker)
-            for (theme, ticker) in jobs
-        }
-        for fut in as_completed(future_to_job):
-            theme, ticker = future_to_job[fut]
+    if use_parallel:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=int(max_workers),
+                                thread_name_prefix="scout") as ex:
+            future_to_job = {
+                ex.submit(
+                    scout._research_ticker, ticker, theme, verdict_cfg,
+                    recs_map, held_weights, existing_short_puts
+                ): (theme, ticker)
+                for (theme, ticker) in jobs
+            }
+            for fut in as_completed(future_to_job):
+                theme, ticker = future_to_job[fut]
+                try:
+                    r = fut.result(timeout=90)
+                except Exception as e:
+                    print(f"    [warn] scout {ticker} ({theme}): {e}", file=sys.stderr)
+                    continue
+                results_by_theme[theme].append(_result_to_dict(r))
+    else:
+        for theme, ticker in jobs:
             try:
-                r = fut.result(timeout=90)
+                r = scout._research_ticker(
+                    ticker, theme, verdict_cfg,
+                    recs_map, held_weights, existing_short_puts,
+                )
             except Exception as e:
                 print(f"    [warn] scout {ticker} ({theme}): {e}", file=sys.stderr)
                 continue

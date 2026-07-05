@@ -24,6 +24,14 @@ import yfinance as yf  # noqa: E402  (already a dependency)
 from .fetch_earnings import fetch_earnings_dates
 from .fetch_ytd_pnl import fetch_ytd_options_pnl_auto
 from analysis import support_resistance as sr_mod
+from analysis import technical_indicators as ti_mod
+
+# Persistent OHLC cache (task #9) — optional import; any failure means the
+# uncached yfinance path below is used, exactly as before. Fail-open.
+try:
+    from analysis import ohlc_cache as _ohlc_cache
+except Exception:  # noqa: BLE001 - never let a cache module block a briefing
+    _ohlc_cache = None
 
 
 WATCHLIST = ["SPY", "QQQ", "^VIX"]
@@ -107,7 +115,14 @@ def _historical_volatility_rank(ticker: str) -> float | None:
 
 
 def _full_technicals(ticker: str) -> dict | None:
-    """Pull 300d history once and compute IV-rank, RSI(14), 200-SMA, drawdown, S/R.
+    """Pull 730d history once and compute IV-rank, RSI(14), 200-SMA, drawdown,
+    S/R, and the deep technical read (BB/MACD/ATR/slopes/verdicts).
+
+    The window was widened from 300d → 730d so the deep read has real 1-year
+    returns + a ~2y drawdown reference (same single fetch — no extra network).
+    Existing fields keep their formulas; the longer window only makes the
+    252-obs metrics (drawdown, IV-rank percentile) use their full documented
+    lookback instead of being truncated at ~205 bars.
 
     Returns dict with keys (any may be None on insufficient data):
       - iv_rank: percentile of 20d realized vol over past 252 obs
@@ -118,13 +133,30 @@ def _full_technicals(ticker: str) -> dict | None:
       - spot: latest close
       - support_resistance: dict from SupportResistance.to_dict() — fail-closed
         when there's insufficient history (kept under one key for downstream wiring)
+      - deep: dict from TechnicalSnapshot.to_dict() (technical_indicators.py) —
+        None when history is insufficient; renderers then surface
+        "chart data unavailable" instead of fabricated indicators
     Returns None on fetch failure.
     """
-    t = _fetch_price_history(ticker, days=300)
-    if t is None:
-        return None
+    # OHLC via the persistent cache when available (task #9). cached_history
+    # is a drop-in for yf.Ticker(...).history(period="730d") and internally
+    # falls back to the raw call on any cache problem. If the cache module
+    # itself is unavailable or errors, use the original uncached path.
+    hist = None
+    if _ohlc_cache is not None:
+        try:
+            hist = _ohlc_cache.cached_history(ticker, days=730)
+        except Exception as e:
+            print(f"    [warn] ohlc cache for {ticker}: {e} — uncached path",
+                  file=sys.stderr)
+            hist = None
+    if hist is None:
+        t = _fetch_price_history(ticker, days=730)
+        if t is None:
+            return None
     try:
-        hist = t.history(period="300d")
+        if hist is None:
+            hist = t.history(period="730d")
         if hist.empty:
             return None
         closes = hist["Close"].dropna()
@@ -133,36 +165,18 @@ def _full_technicals(ticker: str) -> dict | None:
 
         spot = float(closes.iloc[-1])
 
-        # IV rank via 20d realized vol percentile
-        iv_rank: float | None = None
-        rets = closes.pct_change().dropna()
-        if len(rets) >= 21:
-            rolling_vol = (rets.rolling(20).std() * math.sqrt(252)).dropna()
-            if not rolling_vol.empty:
-                cur = float(rolling_vol.iloc[-1])
-                if not math.isnan(cur):
-                    iv_rank = round(
-                        float((rolling_vol <= cur).sum()) / len(rolling_vol) * 100.0, 1
-                    )
+        # IV rank via 20d realized vol percentile — canonical 252-obs window
+        # implementation in analysis/technical_indicators.iv_rank_252 (shared
+        # with the thematic scout and broad-universe screener; Task #12).
+        iv_rank: float | None = ti_mod.iv_rank_252(closes)
 
-        # RSI(14) — Wilder's smoothing
+        # RSI(14) — Wilder's smoothing, canonical implementation in
+        # analysis/technical_indicators.py (identical formula/rounding to the
+        # inline block this replaced; the >= 30 bar guard is kept caller-side
+        # so behavior is byte-identical for every reachable input).
         rsi_14: float | None = None
         if len(closes) >= 30:
-            delta = closes.diff().dropna()
-            gain = delta.clip(lower=0)
-            loss = (-delta.clip(upper=0))
-            # Wilder's exponential smoothing alpha=1/14
-            avg_gain = gain.ewm(alpha=1.0 / 14, adjust=False).mean()
-            avg_loss = loss.ewm(alpha=1.0 / 14, adjust=False).mean()
-            last_gain = float(avg_gain.iloc[-1])
-            last_loss = float(avg_loss.iloc[-1])
-            if last_loss > 0:
-                rs = last_gain / last_loss
-                rsi_14 = round(100.0 - (100.0 / (1.0 + rs)), 1)
-            elif last_gain > 0:
-                rsi_14 = 100.0
-            else:
-                rsi_14 = 50.0
+            rsi_14 = ti_mod.wilder_rsi(closes)
 
         # 50-SMA (used for S/R confluence)
         sma_50: float | None = None
@@ -197,6 +211,19 @@ def _full_technicals(ticker: str) -> dict | None:
         except Exception as e:
             print(f"    [warn] S/R compute for {ticker}: {e}", file=sys.stderr)
 
+        # Deep technical read (BB/MACD/ATR/SMA-slopes/52w/ATH/returns +
+        # short/long-term verdicts) — computed from the SAME OHLC pull, no
+        # extra fetch. Fail-closed: insufficient history → deep=None and the
+        # Technical Read section renders "chart data unavailable, verify
+        # manually" for this ticker (never fabricated indicators).
+        deep_data: dict | None = None
+        try:
+            deep_snap = ti_mod.compute_technicals(ticker, hist, rsi_14=rsi_14)
+            if deep_snap is not None:
+                deep_data = deep_snap.to_dict()
+        except Exception as e:
+            print(f"    [warn] deep technicals for {ticker}: {e}", file=sys.stderr)
+
         return {
             "iv_rank": iv_rank,
             "rsi_14": rsi_14,
@@ -205,6 +232,7 @@ def _full_technicals(ticker: str) -> dict | None:
             "drawdown_pct": drawdown_pct,
             "spot": round(spot, 2),
             "support_resistance": sr_data,
+            "deep": deep_data,
         }
     except Exception as e:
         print(f"    [warn] technicals fetch for {ticker}: {e}", file=sys.stderr)
@@ -431,9 +459,22 @@ def _build_chain_pairs(
     refreshed_positions: list,
     underlyings_with_options: list[str],
 ) -> list[tuple[str, str]]:
-    """Compute (underlying, expiration) pairs to fetch: held + 3 future per name."""
+    """Compute (underlying, expiration) pairs to fetch.
+
+    For HELD underlyings (user already has options open): include each held
+    expiration plus up to 3 future expirations so the wheel-roll-advisor can
+    enumerate roll candidates.
+
+    For UN-HELD underlyings (new candidate tickers — Parkev BUYs, scout
+    candidates): pick a short-term CSP expiration (~30 DTE), a medium-term
+    one (~60-90 DTE for LT_CSP), and a long-dated one (~120+ DTE for patient
+    capital). This is the fix for the UBER case (2026-06-30): TOP CONVICTION
+    candidates that the user doesn't currently hold options on must still
+    have a live chain ticket so they can decide whether to act on the signal.
+    """
     pairs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    from datetime import date as _date
 
     for underlying in underlyings_with_options:
         held_exps = sorted({
@@ -450,6 +491,7 @@ def _build_chain_pairs(
 
         future_exps: list[str] = []
         if available and held_exps:
+            # Held-ticker path: future expirations beyond the latest held one
             latest_held = held_exps[-1]
             future_candidates = [e for e in available if e > latest_held]
             if future_candidates:
@@ -459,6 +501,30 @@ def _build_chain_pairs(
                 if len(future_candidates) >= 2:
                     future_exps.append(future_candidates[-1])
                 future_exps = list(dict.fromkeys(future_exps))[:3]
+        elif available and not held_exps:
+            # Un-held-ticker path: pick short-term (~30 DTE) + medium (~60-90 DTE)
+            # + long-dated (~120+ DTE) so candidate_research and
+            # long_term_opportunities can render real CSP tickets.
+            today = _date.today()
+            def _days(exp: str) -> int:
+                try:
+                    return (_date.fromisoformat(exp) - today).days
+                except (ValueError, TypeError):
+                    return -1
+            with_dte = sorted([(e, _days(e)) for e in available if _days(e) > 0],
+                              key=lambda x: x[1])
+            if with_dte:
+                target_dtes = (30, 75, 120)  # short / medium / long
+                chosen: list[str] = []
+                for tgt in target_dtes:
+                    # Pick the expiration closest to the target DTE that hasn't
+                    # already been selected. Falls back gracefully when fewer
+                    # expirations are available than targets.
+                    best = min(with_dte, key=lambda x: (abs(x[1] - tgt),
+                                                         1 if x[0] in chosen else 0))
+                    if best[0] not in chosen:
+                        chosen.append(best[0])
+                future_exps = chosen[:3]
 
         for expiration in held_exps + future_exps:
             key = (underlying, expiration)
@@ -475,6 +541,7 @@ def snapshot_inputs(
     snapshot_dir: Path,
     etrade_fixture: str = None,
     etrade_live: bool = False,
+    extra_chain_underlyings: list[str] | None = None,
 ) -> dict:
     """Snapshot all inputs with live yfinance refresh.
 
@@ -483,6 +550,14 @@ def snapshot_inputs(
     inputs are always live yfinance.
     """
     snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    # Apply briefing.yaml → ohlc_cache overrides (enabled/dir/max_stale_days).
+    # Fail-open: a bad config block just leaves the module defaults in place.
+    if _ohlc_cache is not None:
+        try:
+            _ohlc_cache.configure(config.get("ohlc_cache"))
+        except Exception as e:
+            print(f"    [warn] ohlc_cache configure failed: {e}", file=sys.stderr)
 
     accounts: list = []
     positions: list = []
@@ -572,7 +647,11 @@ def snapshot_inputs(
     # pool. Empirically, 22 underlyings drops from ~60s sequential to ~3-6s.
     # ------------------------------------------------------------------
     quote_symbols = sorted({s for s in (underlyings | set(WATCHLIST)) if s})
-    technical_symbols = sorted({s for s in underlyings if s})
+    # Technicals cover held underlyings PLUS candidate underlyings
+    # (extra_chain_underlyings — Parkev BUYs, scout candidates) so the
+    # Technical Read section can render a deep card for every candidate too.
+    _extra_tech = {str(u).upper() for u in (extra_chain_underlyings or []) if u}
+    technical_symbols = sorted({s for s in (underlyings | _extra_tech) if s})
     earnings_symbols = sorted({s for s in underlyings if s})
 
     print(
@@ -655,15 +734,32 @@ def snapshot_inputs(
 
     # Live option chains: held expirations + up to 3 future expirations per
     # underlying so the wheel-roll-advisor can enumerate roll candidates with
-    # real chain data. All (underlying, expiration) pairs fetched in parallel.
-    underlyings_with_options = sorted({
+    # real chain data. Plus: extra_chain_underlyings (typically Parkev BUY+
+    # tickers + scout candidates) get default 30/75/120 DTE expirations so
+    # un-held candidate tickers (e.g., UBER, AAOI) also have live CSP tickets.
+    # Without this, TOP CONVICTION candidates show "E*TRADE chain unavailable"
+    # — the user can't make an override decision without complete data
+    # (CLAUDE.md rules #19 fail-closed + #24 never hide opportunities).
+    held_underlyings = sorted({
         p.get("underlying") for p in refreshed_positions
         if p.get("assetType") == "OPTION" and p.get("underlying")
     })
-    chain_pairs = _build_chain_pairs(refreshed_positions, underlyings_with_options)
+    extra_set = {u.upper() for u in (extra_chain_underlyings or []) if u}
+    held_set = set(held_underlyings)
+    new_candidates = sorted(extra_set - held_set)
+    all_underlyings = sorted(held_set | extra_set)
+
+    chain_pairs = _build_chain_pairs(refreshed_positions, all_underlyings)
+    if new_candidates:
+        print(
+            f"  Chain coverage: {len(held_underlyings)} held + "
+            f"{len(new_candidates)} candidate underlyings "
+            f"(new: {', '.join(new_candidates[:8])}"
+            f"{', ...' if len(new_candidates) > 8 else ''})"
+        )
     print(
         f"  Fetching {len(chain_pairs)} option chains in parallel "
-        f"(held + future, workers={_PARALLEL_FETCH_WORKERS})..."
+        f"(held + future + candidates, workers={_PARALLEL_FETCH_WORKERS})..."
     )
     chains = _parallel_chain_fetch(chain_pairs)
 
@@ -717,7 +813,7 @@ def snapshot_inputs(
         "chains": {"source": "etrade_live" if etrade_live else "yfinance",
                    "fetched_at": now_iso, "fresh": True},
         "iv_ranks": {"source": "yfinance_252d", "fetched_at": now_iso, "fresh": True},
-        "technicals": {"source": "yfinance_300d", "fetched_at": now_iso, "fresh": True},
+        "technicals": {"source": "yfinance_730d", "fetched_at": now_iso, "fresh": True},
         "earnings_calendar": {"source": "yfinance",
                               "fetched_at": now_iso, "fresh": True},
         "broker_positions": {
