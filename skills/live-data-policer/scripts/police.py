@@ -248,6 +248,30 @@ def police_data_freshness(
             severity="advisory",
         ))
 
+    # Wholesale E*TRADE routing fallback (2026-08-06): when routing was
+    # attempted but ZERO chains/quotes came from E*TRADE, the snapshot
+    # records the reason — render it loudly in the Live-Data section.
+    # Silent wholesale fallback is the bug class this line eliminates:
+    # the run LOOKS routed (config says etrade) while every tradeable
+    # price is yfinance. Advisory (fail-open philosophy) but always
+    # visible.
+    for _src_name in ("chains", "quotes"):
+        _meta = provenance.get(_src_name, {}) or {}
+        _reason = _meta.get("wholesale_fallback_reason")
+        if _meta.get("routing_attempted") and _reason:
+            stale.append(StaleSource(
+                source=f"{_src_name}_routing",
+                age_minutes=0,
+                max_allowed_minutes=0,
+                actual_source=_meta.get("source", "yfinance"),
+                issue=(
+                    f"⚠ E*TRADE routing fell back wholesale: {_reason} — "
+                    f"every {_src_name[:-1]} this cycle is yfinance-labeled; "
+                    f"verify tradeable prices at the broker"
+                ),
+                severity="advisory",
+            ))
+
     # NLV reconciliation (2026-08-04): the snapshot's computed NLV
     # (cash + long MV + signed option marks) vs the broker's own
     # totalAccountValue. A >1% divergence is a data-integrity signal — the

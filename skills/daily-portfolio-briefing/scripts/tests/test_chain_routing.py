@@ -303,7 +303,8 @@ def test_split_line_format():
     assert line == "chains: 112 etrade · 38 yfinance-fallback"
 
 
-def _run_snapshot(tmp_path, monkeypatch, config, etrade_quotes, routed_chains):
+def _run_snapshot(tmp_path, monkeypatch, config, etrade_quotes, routed_chains,
+                  extra_chain_underlyings=None, quote_capture=None):
     """Run snapshot_inputs end-to-end with all network mocked."""
     fixture_path = tmp_path / "portfolio.json"
     fixture_path.write_text(json.dumps({
@@ -317,20 +318,25 @@ def _run_snapshot(tmp_path, monkeypatch, config, etrade_quotes, routed_chains):
                       "dayChangePct": 0.0101} for s in quote_syms}
         return quotes, {}, {}, {}
 
+    def fake_quotes_etrade(syms, **k):
+        if quote_capture is not None:
+            quote_capture.extend(syms)
+        return dict(etrade_quotes)
+
     monkeypatch.setattr(si, "_parallel_market_data_fetch", fake_market_fetch)
     monkeypatch.setattr(si, "_build_chain_pairs",
                         lambda *a, **k: _pairs())
     monkeypatch.setattr(si, "_parallel_chain_fetch",
                         lambda pairs: _yf_fetch_many(pairs))
-    monkeypatch.setattr(cr, "fetch_quotes_etrade",
-                        lambda syms, **k: dict(etrade_quotes))
+    monkeypatch.setattr(cr, "fetch_quotes_etrade", fake_quotes_etrade)
     monkeypatch.setattr(cr, "make_expiration_lister", lambda **k: None)
     monkeypatch.setattr(cr, "fetch_chains_routed",
                         lambda plan, spots, yf_fetch_many, **k: dict(routed_chains))
 
     snap_dir = tmp_path / "snap"
     return si.snapshot_inputs(config, snap_dir,
-                              etrade_fixture=str(fixture_path))
+                              etrade_fixture=str(fixture_path),
+                              extra_chain_underlyings=extra_chain_underlyings)
 
 
 def test_provenance_reports_honest_per_item_split(tmp_path, monkeypatch):
@@ -423,3 +429,144 @@ def test_dry_run_script_runs_offline_and_prints_plan(capsys, monkeypatch):
     assert "yfinance-fallback" in out
     assert "throttle" in out
     assert "no network calls" in out.lower()
+
+
+# --------------------------------------------------------------------------
+# 8. 2026-08-06 regression — routing engagement + silent wholesale fallback
+# --------------------------------------------------------------------------
+
+_CANDIDATES = ["ABNB", "ACHR", "TXN", "IBM", "TWLO"]
+
+
+def test_routed_quote_universe_includes_candidate_names(tmp_path, monkeypatch):
+    """2026-08-06 live run: vintage footer said '111 name(s) had no live
+    quote this cycle' even though routing engaged — quote_symbols was still
+    held ∪ WATCHLIST (~23 names), so the E*TRADE batch-quote router was
+    never ASKED for the candidate/technicals universe. With routing on,
+    the requested quote set MUST include extra_chain_underlyings."""
+    captured: list = []
+    _run_snapshot(tmp_path, monkeypatch,
+                  {"chains": {"source": "etrade"},
+                   "chain_iv": {"enabled": False}},
+                  {}, {},
+                  extra_chain_underlyings=_CANDIDATES,
+                  quote_capture=captured)
+    for sym in _CANDIDATES:
+        assert sym in captured, f"{sym} missing from routed quote request"
+
+
+def test_unrouted_quote_universe_stays_narrow(tmp_path, monkeypatch):
+    """Without routing, yfinance can't absorb ~130 quote calls (the original
+    throttle gap) — the legacy narrow set (held ∪ WATCHLIST) is preserved."""
+    data = _run_snapshot(tmp_path, monkeypatch,
+                         {"chain_iv": {"enabled": False}}, {}, {},
+                         extra_chain_underlyings=_CANDIDATES)
+    prov = data["data_provenance"]
+    assert prov["quotes"]["routing_attempted"] is False
+    for sym in _CANDIDATES:
+        assert sym not in data["quotes"]
+
+
+def test_engagement_condition_config_source_etrade(tmp_path, monkeypatch):
+    """Engagement pin: config chains.source=etrade (no live flag) → routing
+    attempted, recorded in provenance for both chains and quotes."""
+    data = _run_snapshot(tmp_path, monkeypatch,
+                         {"chains": {"source": "etrade"},
+                          "chain_iv": {"enabled": False}}, {}, {})
+    prov = data["data_provenance"]
+    assert prov["chains"]["routing_attempted"] is True
+    assert prov["quotes"]["routing_attempted"] is True
+
+
+def test_wholesale_fallback_is_loud_never_silent(tmp_path, monkeypatch, capsys):
+    """Silent wholesale fallback is the bug class: routing attempted but
+    ZERO items came from E*TRADE → provenance must carry
+    wholesale_fallback_reason AND a loud stderr line must print."""
+    routed_chains = {
+        "NVDA_2026-08-21": {"underlying": "NVDA", "expiration": "2026-08-21",
+                            "calls": [], "puts": [], "source": "yfinance"},
+    }
+    data = _run_snapshot(tmp_path, monkeypatch,
+                         {"chains": {"source": "etrade"},
+                          "chain_iv": {"enabled": False}},
+                         {}, routed_chains)
+    prov = data["data_provenance"]
+    assert prov["chains"].get("wholesale_fallback_reason")
+    assert prov["quotes"].get("wholesale_fallback_reason")
+    err = capsys.readouterr().err
+    assert "E*TRADE routing fell back wholesale (chains)" in err
+    assert "E*TRADE routing fell back wholesale (quotes)" in err
+
+
+def test_mixed_cycle_has_no_wholesale_flag(tmp_path, monkeypatch):
+    """A cycle with ANY measured etrade items is not a wholesale fallback."""
+    etrade_quotes = {"NVDA": {"last": 101.0, "previousClose": 100.0,
+                              "dayChangePct": 0.01, "source": "etrade"}}
+    routed_chains = {
+        "NVDA_2026-08-21": {"underlying": "NVDA", "expiration": "2026-08-21",
+                            "calls": [], "puts": [], "source": "etrade"},
+    }
+    data = _run_snapshot(tmp_path, monkeypatch,
+                         {"chains": {"source": "etrade"},
+                          "chain_iv": {"enabled": False}},
+                         etrade_quotes, routed_chains)
+    prov = data["data_provenance"]
+    assert "wholesale_fallback_reason" not in prov["chains"]
+    assert "wholesale_fallback_reason" not in prov["quotes"]
+
+
+def test_router_report_reason_on_missing_fetcher(monkeypatch):
+    """fetch_chains_routed with no fetcher fills report['fallback_reason']."""
+    monkeypatch.setattr(cr, "_load_chain_fetcher", lambda: (None, None))
+    plan = cr.build_chain_plan(_pairs(), _positions(),
+                               today=date(2026, 8, 6))
+    report: dict = {}
+    chains = cr.fetch_chains_routed(
+        plan, {}, yf_fetch_many=_yf_fetch_many,
+        limiter=_fast_limiter(), report=report)
+    assert all(c.get("source") == "yfinance" for c in chains.values())
+    assert "unavailable" in report.get("fallback_reason", "")
+
+
+def test_quote_router_report_reason_on_missing_adapter(monkeypatch):
+    monkeypatch.setattr(cr, "_load_quote_fn", lambda: None)
+    report: dict = {}
+    out = cr.fetch_quotes_etrade(["NVDA"], limiter=_fast_limiter(),
+                                 report=report)
+    assert out == {}
+    assert "unavailable" in report.get("fallback_reason", "")
+
+
+def test_manifest_renders_measured_split_line():
+    """The split must be briefing-visible on every routed run — not just
+    console stdout (the 2026-08-06 'provenance line appears NOWHERE' bug)."""
+    from render.panels import render_manifest
+    prov = {"chains": {"etrade": 150, "yfinance": 270,
+                       "routing_attempted": True},
+            "quotes": {"etrade": 22, "yfinance": 1,
+                       "routing_attempted": True}}
+    lines = render_manifest("/tmp/snap", prov)
+    joined = "\n".join(lines)
+    assert "chains 150 etrade · 270 yfinance-fallback" in joined
+    assert "quotes 22 etrade · 1 yfinance-fallback" in joined
+
+
+def test_manifest_renders_wholesale_reason():
+    from render.panels import render_manifest
+    prov = {"chains": {"etrade": 0, "yfinance": 420,
+                       "routing_attempted": True,
+                       "wholesale_fallback_reason": "circuit breaker tripped"},
+            "quotes": {"etrade": 0, "yfinance": 23,
+                       "routing_attempted": True}}
+    joined = "\n".join(render_manifest("/tmp/snap", prov))
+    assert "⚠ E*TRADE routing fell back wholesale: circuit breaker tripped" in joined
+
+
+def test_manifest_no_split_line_without_routing():
+    from render.panels import render_manifest
+    joined = "\n".join(render_manifest("/tmp/snap", {
+        "chains": {"etrade": 0, "yfinance": 5, "routing_attempted": False},
+        "quotes": {"etrade": 0, "yfinance": 5, "routing_attempted": False}}))
+    assert "Data routing" not in joined
+    # Legacy no-provenance call still works
+    assert "Snapshot Manifest" in "\n".join(render_manifest("/tmp/snap"))

@@ -22,10 +22,17 @@ dependencies = [
 [project.optional-dependencies]
 # Intrinsic value (FMP DCF + analyst targets) uses only the stdlib (urllib), so
 # no extra runtime dep is required — just the FMP_API_KEY environment variable.
+# Moneyvest fetcher (task #46): authenticated SPA scrape needs Playwright.
+# Install with `uv add playwright && uv run playwright install chromium`.
+# The fetcher degrades gracefully (cache-only mode) when it's absent.
+moneyvest = [
+    "playwright>=1.45",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "playwright>=1.45",  # moneyvest-fetcher (degrades gracefully if missing)
 ]
 
 [tool.ruff.lint]

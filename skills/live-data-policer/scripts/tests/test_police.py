@@ -228,6 +228,53 @@ def test_task36_coverage_line_without_split_counts_still_renders():
     assert "split" not in cov[0]["issue"]
 
 
+def test_wholesale_fallback_renders_loud_line():
+    """2026-08-06: silent wholesale fallback is the bug class — when
+    routing was attempted and provenance carries a wholesale reason, the
+    Live-Data panel MUST render '⚠ E*TRADE routing fell back wholesale'."""
+    snapshot = {
+        "data_provenance": {
+            "positions": _provenance("etrade_live", 5),
+            "broker_positions": _provenance("etrade_live", 5),
+            "quotes": _provenance("yfinance", 2),
+            "chains": {**_provenance("yfinance", 10),
+                       "routing_attempted": True,
+                       "etrade": 0, "yfinance": 420,
+                       "wholesale_fallback_reason":
+                           "circuit breaker tripped"},
+            "iv_ranks": _provenance("yfinance_252d", 60),
+            "earnings_calendar": _provenance("yfinance", 60),
+        }
+    }
+    result = police_data_freshness(snapshot)
+    routed = [s for s in result.stale_sources
+              if s["source"] == "chains_routing"]
+    assert routed, "wholesale-fallback line missing from policer"
+    assert "fell back wholesale" in routed[0]["issue"]
+    assert "circuit breaker tripped" in routed[0]["issue"]
+    assert "fell back wholesale" in result.panel_md
+
+
+def test_no_wholesale_line_when_routing_delivered():
+    """A mixed etrade+yfinance cycle (routing worked) renders NO wholesale
+    line — the flag keys off the recorded reason, not the split."""
+    snapshot = {
+        "data_provenance": {
+            "positions": _provenance("etrade_live", 5),
+            "broker_positions": _provenance("etrade_live", 5),
+            "quotes": _provenance("yfinance", 2),
+            "chains": {**_provenance("etrade+yfinance-fallback", 10),
+                       "routing_attempted": True,
+                       "etrade": 150, "yfinance": 270},
+            "iv_ranks": _provenance("yfinance_252d", 60),
+            "earnings_calendar": _provenance("yfinance", 60),
+        }
+    }
+    result = police_data_freshness(snapshot)
+    assert not [s for s in result.stale_sources
+                if s["source"].endswith("_routing")]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

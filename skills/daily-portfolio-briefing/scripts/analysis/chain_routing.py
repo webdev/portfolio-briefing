@@ -367,6 +367,7 @@ def fetch_chains_routed(
     max_workers: int = 4,
     fetcher=None,
     fetcher_cache=None,
+    report: dict | None = None,
 ) -> dict:
     """Execute the plan: E*TRADE first (throttled pool), yfinance fallback.
 
@@ -379,6 +380,10 @@ def fetch_chains_routed(
                (the existing yfinance parallel fetcher). Chains it returns
                must be labeled source="yfinance" by the producer.
         fetcher/fetcher_cache: injectable for tests.
+        report: optional dict the router fills with a wholesale-fallback
+               reason (``report["fallback_reason"]``) when NOTHING routed
+               through E*TRADE — the caller uses it for the loud provenance
+               label (silent wholesale fallback is the bug class this kills).
 
     Returns {f"{underlying}_{expiration}": chain_dict} where every chain
     carries a truthful per-item ``source`` field.
@@ -396,6 +401,10 @@ def fetch_chains_routed(
 
     if fetcher is None:
         # Token absence / adapter missing → everything to yfinance, cleanly.
+        if report is not None:
+            report["fallback_reason"] = (
+                "etrade-chain-fetcher unavailable "
+                "(OAuth tokens or pyetrade adapter missing)")
         yf_pairs = [(i.underlying, i.expiration) for i in plan.items]
     else:
         breaker = _Breaker()
@@ -460,6 +469,11 @@ def fetch_chains_routed(
             print("    [warn] E*TRADE chain circuit breaker tripped "
                   "(no successes) — remaining chains via yfinance fallback",
                   file=sys.stderr)
+            if report is not None:
+                report["fallback_reason"] = (
+                    "circuit breaker tripped — consecutive E*TRADE chain "
+                    "failures with zero successes (auth expiry / rate limit "
+                    "/ API outage)")
 
     if yf_pairs:
         try:
@@ -505,17 +519,24 @@ def fetch_quotes_etrade(
     limiter: RateLimiter | None = None,
     quote_fn=None,
     batch_size: int = QUOTE_BATCH_SIZE,
+    report: dict | None = None,
 ) -> dict:
     """E*TRADE batch quotes for the full symbol set (25/call, throttled).
 
     Returns {sym: {last, previousClose, dayChangePct, asOf, source:"etrade"}}.
     Empty dict on any total failure (no tokens, sandbox) — the caller sends
-    the misses to yfinance, labeled. Never raises.
+    the misses to yfinance, labeled. Never raises. ``report`` (optional dict)
+    is filled with ``fallback_reason`` when NOTHING came back from E*TRADE,
+    so the caller can label the wholesale fallback loudly.
     """
     limiter = limiter or SHARED_LIMITER
     if quote_fn is None:
         quote_fn = _load_quote_fn()
     if quote_fn is None:
+        if report is not None:
+            report["fallback_reason"] = (
+                "adapters.etrade_market.get_quotes unavailable "
+                "(OAuth tokens or pyetrade adapter missing)")
         return {}
 
     out: dict = {}
@@ -546,6 +567,10 @@ def fetch_quotes_etrade(
                 "source": "etrade",
             }
             out[sym.upper()] = rec
+    if not out and report is not None and "fallback_reason" not in report:
+        report["fallback_reason"] = (
+            "E*TRADE batch quotes returned nothing "
+            "(auth expiry / rate limit / API outage)")
     return out
 
 

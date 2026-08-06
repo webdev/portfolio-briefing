@@ -298,6 +298,17 @@ def aggregate_briefing(
     lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl, gate_state=gate_state, balance=balance))
     lines.extend(render_market_context(regime_data, quotes))
 
+    # Task #46 — Moneyvest sentiment gauge in Market Context. Advisory
+    # only (flags crowded optimism, never predicts direction / changes the
+    # regime). Fail-open: no cache → no line.
+    try:
+        from analysis.moneyvest_chip import index_context_lines
+        lines.extend(index_context_lines(snapshot_data.get("moneyvest")))
+    except Exception as _mv_e:
+        import sys as _sys
+        print(f"[aggregate] moneyvest context failed (non-fatal): {_mv_e}",
+              file=_sys.stderr)
+
     # Task #43 — Vol Surface subsection (true chain-implied vol). The map is
     # computed by snapshot_inputs from this cycle's chains; when aggregate is
     # driven from a re-loaded snapshot, fall back to the persisted
@@ -1164,6 +1175,22 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] tier-badge annotation failed: {_e}", file=_sys.stderr)
 
+    # ── Moneyvest chip annotation (task #46) ─────────────────────────────
+    # Append ` · 💰 FV $152 · LB $196 · M 4.05` to every line already
+    # carrying a 🅿️ Parkev chip (same targeting discipline as tier badges),
+    # plus the FV-divergence warning when MV fair value and the FMP DCF on
+    # the same line diverge > 40% relative. n/a-safe, ETFs index-only,
+    # fail-open.
+    try:
+        from analysis.moneyvest_chip import annotate_mv_chips
+        md_text = "\n".join(lines)
+        md_text = annotate_mv_chips(md_text, snapshot_data.get("moneyvest"))
+        lines = md_text.split("\n")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] moneyvest-chip annotation failed: {_e}",
+              file=_sys.stderr)
+
     # ── True-IV label annotation (task #43) ───────────────────────────────
     # Every legacy "IV rank N" token in the briefing IS the 252d realized-vol
     # proxy — backward-looking, gap-inflatable (the AMZN "IV rank 100 / 4%
@@ -1353,7 +1380,8 @@ def aggregate_briefing(
         print(f"[aggregate] money plan failed (non-fatal): {_mp_e}",
               file=_sys.stderr)
 
-    lines.extend(render_manifest(str(snapshot_dir)))
+    lines.extend(render_manifest(str(snapshot_dir),
+                                 snapshot_data.get("data_provenance")))
 
     briefing_markdown = "\n".join(lines)
 

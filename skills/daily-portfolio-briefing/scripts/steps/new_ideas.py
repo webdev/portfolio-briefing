@@ -82,18 +82,27 @@ def _next_monthly_expiration(available: list[date]) -> date | None:
     return candidates[0][0]
 
 
-def _pick_csp_strike(put_rows: list, spot: float, target_delta: float = TARGET_PUT_DELTA) -> dict | None:
+def _pick_csp_strike(put_rows: list, spot: float,
+                     target_delta: float = TARGET_PUT_DELTA,
+                     mv_ladder: dict | None = None) -> dict | None:
     """Pick a cash-secured put strike with adequate liquidity.
 
     Args:
         put_rows: list of OptionChainRow objects from pyetrade (with real delta)
         spot: current stock price
         target_delta: absolute value of delta to target (e.g. 0.30)
+        mv_ladder: optional Moneyvest shopping-list row (task #46). When the
+            Light Buy price sits below spot, prefer the liquid strike
+            at/just-below it — PROVIDED that strike still lands inside the
+            discipline envelope (measured |delta| 0.15-0.35, or OTM 3-15%
+            when the chain has no Greeks). Anchor selection only; never
+            loosens liquidity/RSI/chase/earnings gates.
 
     Strategy:
     1. Filter by liquidity (OI >= MIN_OPEN_INTEREST, spread <= MAX_SPREAD_PCT)
-    2. E*TRADE returns real delta, so pick matching target_delta within tolerance
-    3. Fallback: if no delta rows match, pick by OTM% (rare with E*TRADE)
+    2. Moneyvest Light-Buy anchor when it fits the discipline envelope
+    3. E*TRADE returns real delta, so pick matching target_delta within tolerance
+    4. Fallback: if no delta rows match, pick by OTM% (rare with E*TRADE)
     """
     if not put_rows or spot <= 0:
         return None
@@ -152,6 +161,31 @@ def _pick_csp_strike(put_rows: list, spot: float, target_delta: float = TARGET_P
     if not rows:
         return None
 
+    # Moneyvest Light-Buy anchor (task #46): among liquidity-passing rows,
+    # take the HIGHEST strike at/just-below the Light Buy price — but only
+    # when that strike still sits inside the discipline envelope
+    # (|delta| 0.15-0.35 measured, or OTM 3-15% when no Greeks). This is
+    # anchor SELECTION only — every gate upstream/downstream is untouched.
+    if mv_ladder:
+        try:
+            _lb = float(mv_ladder.get("light_buy") or 0)
+        except (TypeError, ValueError):
+            _lb = 0.0
+        if _lb > 0:
+            anchored = [r for r in rows if r["strike"] <= _lb]
+            anchored.sort(key=lambda r: -r["strike"])
+            for r in anchored:
+                in_env = (
+                    (r["abs_delta"] is not None
+                     and 0.15 <= r["abs_delta"] <= 0.35)
+                    or (r["abs_delta"] is None
+                        and 0.03 <= r["otm_pct"] <= 0.15)
+                )
+                if in_env:
+                    r = dict(r)
+                    r["mv_anchor"] = f"💰 Light Buy ${_lb:,.0f}"
+                    return r
+
     # Prefer rows with real delta (E*TRADE always provides it)
     rows_with_delta = [r for r in rows if r["abs_delta"] is not None]
     if rows_with_delta:
@@ -201,7 +235,8 @@ def _fetch_chain_with_timeout(target_underlying: str, timeout_s: float) -> tuple
     return (expirations, exp_date, put_rows)
 
 
-def _build_concrete_idea(rec: dict, spot: float, target_underlying: str) -> dict | None:
+def _build_concrete_idea(rec: dict, spot: float, target_underlying: str,
+                         mv_ladder: dict | None = None) -> dict | None:
     """Fetch the chain for the recommendation's ticker and pick a concrete CSP.
 
     Returns:
@@ -215,7 +250,7 @@ def _build_concrete_idea(rec: dict, spot: float, target_underlying: str) -> dict
         return None  # error; skip this candidate
 
     expirations, exp_date, put_rows = fetched
-    pick = _pick_csp_strike(put_rows, spot=spot)
+    pick = _pick_csp_strike(put_rows, spot=spot, mv_ladder=mv_ladder)
     if not pick:
         return None  # no strike matched filters
 
@@ -276,7 +311,10 @@ def _build_concrete_idea(rec: dict, spot: float, target_underlying: str) -> dict
             f"{rec.get('raw_recommendation', '')}, sell ${strike:.0f}P "
             f"({otm_pct*100:.1f}% OTM, delta {delta_str}) for ${mid:.2f} → "
             f"{period_yield*100:.2f}% yield over {dte}d = {annualized*100:.1f}% annualized"
+            + (f". Strike anchored to {pick['mv_anchor']}"
+               if pick.get("mv_anchor") else "")
         ),
+        **({"mv_anchor": pick["mv_anchor"]} if pick.get("mv_anchor") else {}),
     }
 
 
@@ -357,6 +395,14 @@ def generate_new_ideas(
     rsi_th = rsi_discipline.load_thresholds(config)
     rsi_gate_on = rsi_th.get("enabled", True)
 
+    # Task #46 — Moneyvest buy-ladder anchors (fail-open: {} → legacy path).
+    _mv_ladders: dict = {}
+    try:
+        from analysis.moneyvest_chip import mv_by_ticker
+        _mv_ladders = mv_by_ticker(snapshot_data.get("moneyvest"))
+    except Exception:
+        _mv_ladders = {}
+
     for rec in ranked:
         if candidate_count >= MAX_CONCRETE_IDEAS:
             break
@@ -380,9 +426,11 @@ def generate_new_ideas(
         if spot is None or spot <= 0:
             continue
 
-        # Fetch chain and build concrete idea
+        # Fetch chain and build concrete idea (Moneyvest ladder = anchor
+        # candidate only — task #46; gates below are untouched)
         ticker_start = _time.monotonic()
-        idea = _build_concrete_idea(rec, spot, ticker)
+        idea = _build_concrete_idea(rec, spot, ticker,
+                                    mv_ladder=_mv_ladders.get(ticker))
         ticker_elapsed = _time.monotonic() - ticker_start
 
         # Look up RSI(14) for this underlying once and route through the central

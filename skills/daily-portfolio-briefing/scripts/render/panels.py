@@ -4827,11 +4827,36 @@ def render_inconsistencies(flagged: list) -> list:
     return lines
 
 
-def render_manifest(snapshot_dir_path: str) -> list:
-    """Render snapshot manifest panel."""
-    return [
+def render_manifest(snapshot_dir_path: str, data_provenance: dict | None = None) -> list:
+    """Render snapshot manifest panel.
+
+    When the snapshot's data_provenance carries the task-#36 routing counts,
+    render the measured chain/quote source split on EVERY briefing — the
+    2026-08-06 lesson: the split lived only in console stdout and the
+    (conditionally-rendered) policer panel, so a healthy-looking run gave no
+    briefing-visible evidence that E*TRADE routing engaged at all.
+    """
+    lines = [
         "## Appendix: Snapshot Manifest",
         "",
         f"Snapshot directory: `{snapshot_dir_path}/`",
         "",
     ]
+    prov = data_provenance or {}
+    _ch = prov.get("chains") or {}
+    _q = prov.get("quotes") or {}
+    if _ch.get("routing_attempted") or _q.get("routing_attempted"):
+        lines.insert(3, (
+            f"Data routing (measured this cycle): "
+            f"chains {_ch.get('etrade', 0)} etrade · "
+            f"{_ch.get('yfinance', 0)} yfinance-fallback — "
+            f"quotes {_q.get('etrade', 0)} etrade · "
+            f"{_q.get('yfinance', 0)} yfinance-fallback"
+            + (" — ⚠ E*TRADE routing fell back wholesale: "
+               + str(_ch.get("wholesale_fallback_reason")
+                     or _q.get("wholesale_fallback_reason"))
+               if (_ch.get("wholesale_fallback_reason")
+                   or _q.get("wholesale_fallback_reason")) else "")
+        ))
+        lines.insert(4, "")
+    return lines

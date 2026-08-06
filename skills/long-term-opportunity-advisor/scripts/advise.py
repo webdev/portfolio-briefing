@@ -133,6 +133,7 @@ def evaluate_options_idea(
     third_party_rec: Optional[str],
     has_cash: bool = True,
     sr_levels: Optional[list] = None,
+    mv_ladder: Optional[dict] = None,
 ) -> Optional[LongTermOpportunity]:
     """Evaluate longer-dated option ideas: LEAP / long-dated CSP / diagonal / dividend.
 
@@ -141,6 +142,14 @@ def evaluate_options_idea(
     under ``supports`` + ``resistances``). When provided, LT_CSP strike
     selection snaps to a real support cluster within the 7-13% OTM band
     instead of the legacy "spot × 0.90, round to $5" heuristic.
+
+    ``mv_ladder`` (task #46) is an optional Moneyvest shopping-list row
+    ({"light_buy": 196.0, "heavy_buy": ..., "no_brainer": ...}). When a
+    ladder price falls inside the same 7-13% OTM discipline band, the CSP
+    strike anchors at/just-below it (Light Buy preferred) and the rationale
+    renders "strike anchored to 💰 Light Buy $196". Anchor selection ONLY —
+    it never widens the band and never overrides RSI/chase/earnings gates
+    (those run in the calling pipeline).
     """
     rec = (third_party_rec or "").upper()
 
@@ -169,11 +178,39 @@ def evaluate_options_idea(
         # Default: 10% OTM, rounded to nearest $5 (the legacy heuristic).
         csp_strike = round(spot * 0.90 / 5) * 5
         strike_anchor_note = ""
+        # Moneyvest buy-ladder anchoring (task #46): when a ladder price
+        # falls inside the 7-13% OTM discipline band, anchor the strike
+        # at/just-below it — assignment then happens at a level the
+        # valuation model already calls a buy. Light Buy preferred, then
+        # Heavy Buy, then No-Brainer. Takes precedence over the S/R anchor
+        # (a valuation-model level beats a chart cluster for PATIENT
+        # capital); never widens the band.
+        mv_anchored = False
+        if mv_ladder:
+            band_lo = spot * 0.87
+            band_hi = spot * 0.93
+            for _mv_field, _mv_label in (("light_buy", "Light Buy"),
+                                         ("heavy_buy", "Heavy Buy"),
+                                         ("no_brainer", "No-Brainer Buy")):
+                _mv_price = mv_ladder.get(_mv_field)
+                try:
+                    _mv_price = float(_mv_price) if _mv_price else None
+                except (TypeError, ValueError):
+                    _mv_price = None
+                if _mv_price and band_lo <= _mv_price <= band_hi:
+                    # At/just-below the ladder price ($5 strike granularity).
+                    import math as _math
+                    csp_strike = int(_math.floor(_mv_price / 5) * 5)
+                    strike_anchor_note = (
+                        f" Strike anchored to 💰 {_mv_label} "
+                        f"${_mv_price:,.0f}.")
+                    mv_anchored = True
+                    break
         # S/R-aware refinement (hard rule #20): when a real support cluster
         # sits within the 7-13% OTM band, snap the strike to it. Assignment
         # then puts you at a chart-relevant level rather than a round-number
         # spot * 0.90 estimate.
-        if sr_levels:
+        if sr_levels and not mv_anchored:
             band_lo = spot * 0.87
             band_hi = spot * 0.93
             in_band = [
@@ -224,6 +261,7 @@ def generate_long_term_opportunities(
     target_weights: dict,        # {ticker: ideal % NLV}
     has_cash: bool = True,
     sr_by_ticker: Optional[dict] = None,
+    mv_ladders: Optional[dict] = None,
 ) -> list:
     """
     Run the advisor across the universe (held + recommended-but-not-held tickers).
@@ -233,10 +271,15 @@ def generate_long_term_opportunities(
     anchors to a real support cluster rather than the spot×0.90 heuristic
     (hard rule #20 — S/R discipline).
 
+    ``mv_ladders`` (task #46) optionally maps uppercase ticker → Moneyvest
+    shopping-list row; LT_CSP strikes anchor at/just-below the Light Buy
+    price when it falls in the discipline band.
+
     Returns a list of LongTermOpportunity objects, sorted by priority.
     """
     opportunities = []
     sr_by_ticker = sr_by_ticker or {}
+    mv_ladders = mv_ladders or {}
 
     def _sr_levels_for(t: str) -> Optional[list]:
         """Concatenate supports + resistances into one list for the option
@@ -274,6 +317,7 @@ def generate_long_term_opportunities(
             rsi=rsi, iv_rank=iv, sma_200=sma200,
             third_party_rec=rec, has_cash=has_cash,
             sr_levels=_sr_levels_for(ticker),
+            mv_ladder=mv_ladders.get((ticker or "").upper()),
         )
         if opt_idea:
             opportunities.append(opt_idea)

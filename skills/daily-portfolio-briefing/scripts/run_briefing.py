@@ -198,6 +198,39 @@ def main():
         except Exception as _cpe:
             print(f"[Step 1.8] Claude-portfolio fetch failed (non-fatal): {_cpe}")
 
+        # Step 1.9: Moneyvest morning scan (task #46). Shopping list (fair
+        # value + Light/Heavy/No-Brainer buy ladder), sentiment index, and
+        # M-Scores for a bounded set (held via accounts.json peek + Parkev
+        # tier-4+ candidates). Config-gated (moneyvest.enabled); 20h cache;
+        # fail-open — the briefing never blocks on Moneyvest.
+        print("[Step 1.9] Moneyvest morning scan...")
+        moneyvest_data: dict = {}
+        try:
+            from steps.fetch_moneyvest import fetch_moneyvest_step
+            _mv_tickers: set[str] = set()
+            for r in (recommendations_list or []):
+                if (r.get("rating_tier") or 0) >= 4 and r.get("ticker"):
+                    _mv_tickers.add(str(r["ticker"]).upper())
+            _mv_accounts_p = snapshot_dir / "accounts.json"
+            if _mv_accounts_p.exists():
+                import json as _json
+                try:
+                    _mv_accts = _json.loads(
+                        _mv_accounts_p.read_text(encoding="utf-8"))
+                    for _acct in (_mv_accts if isinstance(_mv_accts, list)
+                                  else _mv_accts.get("accounts", [])):
+                        for _pos in _acct.get("positions", []) or []:
+                            _tk = (_pos.get("symbol")
+                                   or _pos.get("underlying") or "").upper()
+                            if _tk and "_" not in _tk:
+                                _mv_tickers.add(_tk)
+                except Exception:
+                    pass
+            moneyvest_data = fetch_moneyvest_step(
+                config, m_score_tickers=sorted(_mv_tickers))
+        except Exception as _mve:
+            print(f"[Step 1.9] Moneyvest scan failed (non-fatal): {_mve}")
+
         # Step 2: Snapshot inputs
         print("[Step 2] Snapshotting inputs...")
         # Build candidate chain-fetch list from Parkev BUY+ tickers so every
@@ -249,10 +282,23 @@ def main():
         # Task #45 — Claude/Autopilot portfolio rides along for the CP chip
         # (parkev_chip) and the playbook agreement bonus (rotation_playbook).
         snapshot_data["claude_portfolio"] = claude_portfolio
+        # Task #46 — Moneyvest payload rides along for the 💰 chip, buy-
+        # ladder strike anchoring, index context, and FV-divergence flag.
+        snapshot_data["moneyvest"] = moneyvest_data
 
         # Step 3: Classify regime
         print("[Step 3] Classifying regime...")
         regime_data = classify_regime(snapshot_dir, snapshot_data)
+        # Task #46 — Moneyvest sentiment rides the regime output as an
+        # ADVISORY note only (no regime changes yet; config-gated future
+        # escalation). OPTIMISTIC/GREED = contrarian caution.
+        try:
+            from analysis.moneyvest_chip import regime_advisory
+            _mv_note = regime_advisory(moneyvest_data)
+            if _mv_note:
+                regime_data.setdefault("advisory_notes", []).append(_mv_note)
+        except Exception:
+            pass
 
         # Step 4: Review equities
         print("[Step 4] Reviewing equity positions...")

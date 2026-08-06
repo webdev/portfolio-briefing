@@ -789,7 +789,6 @@ def snapshot_inputs(
     # earnings. Each ticker fetch is independent so we run them in a thread
     # pool. Empirically, 22 underlyings drops from ~60s sequential to ~3-6s.
     # ------------------------------------------------------------------
-    quote_symbols = sorted({s for s in (underlyings | set(WATCHLIST)) if s})
     # Technicals cover held underlyings PLUS candidate underlyings
     # (extra_chain_underlyings — Parkev BUYs, scout candidates) so the
     # Technical Read section can render a deep card for every candidate too.
@@ -806,6 +805,21 @@ def snapshot_inputs(
     chains_cfg = (config.get("chains") or {}) if isinstance(config, dict) else {}
     etrade_routing = bool(etrade_live) or (
         str(chains_cfg.get("source", "")).lower() == "etrade")
+
+    # Quote universe (2026-08-06 regression): when routing is ON, quotes
+    # cover the FULL technicals/candidate universe — the E*TRADE batch API
+    # handles ~130 symbols in ~6 throttled calls, and this is what actually
+    # erases the "111 name(s) had no live quote this cycle" vintage-guard
+    # gap. The 2026-08-05 build routed quotes but left the requested set at
+    # held ∪ WATCHLIST (~23 names), so the 111 candidate names were never
+    # ASKED for — routing "engaged" while the coverage goal silently failed.
+    # Without routing, keep the legacy narrow set (yfinance can't absorb
+    # 130 quote calls without throttling — that was the original gap).
+    if etrade_routing:
+        quote_symbols = sorted(
+            {s for s in (underlyings | set(WATCHLIST) | _extra_tech) if s})
+    else:
+        quote_symbols = sorted({s for s in (underlyings | set(WATCHLIST)) if s})
     _routing = None
     if etrade_routing:
         try:
@@ -819,13 +833,16 @@ def snapshot_inputs(
     # erases the yfinance-throttle quote gap (111/134 missing, 2026-07-30).
     # yfinance covers only the E*TRADE misses (index symbols, failures).
     etrade_quotes: dict = {}
+    _quote_report: dict = {}
     if _routing is not None:
         try:
-            etrade_quotes = _routing.fetch_quotes_etrade(quote_symbols)
+            etrade_quotes = _routing.fetch_quotes_etrade(
+                quote_symbols, report=_quote_report)
         except Exception as e:
             print(f"    [warn] E*TRADE batch quotes failed: {e} — "
                   f"yfinance fallback for all symbols", file=sys.stderr)
             etrade_quotes = {}
+            _quote_report.setdefault("fallback_reason", f"router raised: {e}")
     yf_quote_symbols = [s for s in quote_symbols if s not in etrade_quotes]
 
     print(
@@ -966,6 +983,7 @@ def snapshot_inputs(
             f"(new: {', '.join(new_candidates[:8])}"
             f"{', ...' if len(new_candidates) > 8 else ''})"
         )
+    _chain_report: dict = {}
     if _routing is not None:
         # Task #36: priority-tiered E*TRADE fetch (held + near-expiry first),
         # per-run budget cap, ≤4 req/s throttle, labeled yfinance fallback.
@@ -985,7 +1003,8 @@ def snapshot_inputs(
               f"{_routing.ETRADE_RATE_PER_SEC:.0f} req/s, "
               f"yfinance fallback labeled)...")
         chains = _routing.fetch_chains_routed(
-            _plan, _spots, yf_fetch_many=_parallel_chain_fetch)
+            _plan, _spots, yf_fetch_many=_parallel_chain_fetch,
+            report=_chain_report)
         print("  " + _routing.split_line(
             "chains", _routing.chain_source_counts(chains)))
     else:
@@ -1110,6 +1129,29 @@ def snapshot_inputs(
         _quote_counts = {}
         _chains_label = "yfinance"
         _quotes_label = "yfinance"
+
+    # 2026-08-06 — silent wholesale fallback is a bug class, not a mode.
+    # When routing was ATTEMPTED but zero items came from E*TRADE, print a
+    # loud one-line reason to stderr AND record it in provenance so the
+    # live-data policer renders "⚠ E*TRADE routing fell back wholesale" in
+    # the briefing. The reason comes from the router's report dict; a
+    # missing reason still gets a generic label — never silence.
+    _chain_wholesale = None
+    _quote_wholesale = None
+    if etrade_routing:
+        if not _chain_counts.get("etrade", 0):
+            _chain_wholesale = (_chain_report.get("fallback_reason")
+                                or "all E*TRADE chain fetches failed or "
+                                   "router unavailable (unlabeled)")
+            print(f"    [warn] ⚠ E*TRADE routing fell back wholesale "
+                  f"(chains): {_chain_wholesale}", file=sys.stderr)
+        if not _quote_counts.get("etrade", 0):
+            _quote_wholesale = (_quote_report.get("fallback_reason")
+                                or "all E*TRADE quote batches failed or "
+                                   "router unavailable (unlabeled)")
+            print(f"    [warn] ⚠ E*TRADE routing fell back wholesale "
+                  f"(quotes): {_quote_wholesale}", file=sys.stderr)
+
     data_provenance = {
         "positions": {
             "source": positions_source,
@@ -1123,11 +1165,17 @@ def snapshot_inputs(
         "quotes": {"source": _quotes_label, "fetched_at": now_iso, "fresh": True,
                    "requested": len(quote_symbols), "fetched": len(quotes),
                    "etrade": _quote_counts.get("etrade", 0),
-                   "yfinance": _quote_counts.get("yfinance", 0)},
+                   "yfinance": _quote_counts.get("yfinance", 0),
+                   "routing_attempted": etrade_routing,
+                   **({"wholesale_fallback_reason": _quote_wholesale}
+                      if _quote_wholesale else {})},
         "chains": {"source": _chains_label,
                    "fetched_at": now_iso, "fresh": True,
                    "etrade": _chain_counts.get("etrade", 0),
-                   "yfinance": _chain_counts.get("yfinance", 0)},
+                   "yfinance": _chain_counts.get("yfinance", 0),
+                   "routing_attempted": etrade_routing,
+                   **({"wholesale_fallback_reason": _chain_wholesale}
+                      if _chain_wholesale else {})},
         "iv_ranks": {"source": "yfinance_252d", "fetched_at": now_iso, "fresh": True},
         # Task #43: true implied vol measured from this cycle's chains
         # (ATM 30d IV, 25Δ skew, term slope + rank vs rolling history).

@@ -364,6 +364,15 @@ def generate_long_term_opportunities_step(
         if isinstance(sr, dict):
             sr_by_ticker[str(sym).upper()] = sr
 
+    # Task #46 — Moneyvest buy-ladder anchors for LT_CSP strike selection.
+    # Fail-open: no cache → empty map → legacy behavior byte-identical.
+    mv_ladders: dict = {}
+    try:
+        from analysis.moneyvest_chip import mv_by_ticker
+        mv_ladders = mv_by_ticker(snapshot_data.get("moneyvest"))
+    except Exception:
+        mv_ladders = {}
+
     try:
         opportunities = generate_long_term_opportunities(
             positions_by_ticker=positions_by_ticker,
@@ -375,6 +384,7 @@ def generate_long_term_opportunities_step(
             target_weights=target_weights,
             has_cash=has_cash,
             sr_by_ticker=sr_by_ticker,
+            mv_ladders=mv_ladders,
         )
     except Exception as e:
         print(f"  [warn] long-term-advisor failed: {e}", file=sys.stderr)
