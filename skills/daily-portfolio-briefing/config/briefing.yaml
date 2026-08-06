@@ -97,6 +97,17 @@ moneyvest:
 render:
   compact: true
   max_lto_cards: 8
+  # 2026-08-06 two-document split — "the document should be pretty quickly
+  # readable by a person." digest: true (default) writes:
+  #   - briefing_full_DATE.md — the ENTIRE render (verifiers + webapp target)
+  #   - briefing_DATE.md + latest.md — a <=250-line digest (health, Money
+  #     Plan, Action List, Red Flags, Since Yesterday, top-N candidate
+  #     tickets, Capital Plan, Benchmark, pointers, Fable review)
+  # digest: false → briefing_DATE.md is the full render, exactly as before.
+  digest: true
+  # How many Candidate Trades entry tickets the digest keeps (rest collapse
+  # to one computed "…and N more" line).
+  digest_max_candidates: 5
 
 enabled_strategies:
   - wheel              # covered calls + cash-secured puts

@@ -659,6 +659,25 @@ def main():
         with open(actual_output_path, "w") as f:
             f.write(briefing_markdown)
 
+        # Two-document split (2026-08-06 — "the document should be pretty
+        # quickly readable by a person"): the FULL render is preserved as
+        # briefing_full_<date>.md (verifiers already ran against it above;
+        # the webapp parses it), while briefing_<date>.md becomes a <=250
+        # line digest built just before delivery (after the companion
+        # reports exist, so the pointers block only lists files actually
+        # written this run). render.digest: false → legacy single-file path.
+        from render.digest import build_digest, digest_enabled
+        _digest_on = digest_enabled(config)
+        full_output_path = None
+        companion_report_names: list = []
+        if _digest_on:
+            full_output_path = (output_path.parent
+                                / f"briefing_full_{today_date_str}{suffix}.md")
+            with open(full_output_path, "w") as f:
+                f.write(briefing_markdown)
+            companion_report_names.append(full_output_path.name)
+            print(f"Full briefing (verifier/webapp copy): {full_output_path}")
+
         json_output_path = actual_output_path.with_suffix(".json")
         with open(json_output_path, "w") as f:
             json.dump(briefing_json, f, indent=2, default=json_default)
@@ -748,6 +767,7 @@ def main():
                 print(f"  WARNING: chain-IV annotation on candidate report failed: {_cie}", file=sys.stderr)
             _cand_path = output_path.parent / f"candidates_{today_date_str}.md"
             _cand_path.write_text(_cand_md)
+            companion_report_names.append(_cand_path.name)
             print(f"Candidate research: {_cand_path}")
             if not args.no_delivery and not is_draft:
                 _deliv = (Path(args.delivery_dir).expanduser() if args.delivery_dir
@@ -811,6 +831,7 @@ def main():
             if _wte_md:
                 _wte_path = output_path.parent / f"when_to_enter_{today_date_str}.md"
                 _wte_path.write_text(_wte_md)
+                companion_report_names.append(_wte_path.name)
                 print(f"When-to-enter report: {_wte_path}")
                 if not args.no_delivery and not is_draft:
                     _deliv_w = (Path(args.delivery_dir).expanduser() if args.delivery_dir
@@ -867,6 +888,7 @@ def main():
                 )
                 _bu_out = output_path.parent / f"daily_screener_{today_date_str}.md"
                 _bu_out.write_text(_bu_md)
+                companion_report_names.append(_bu_out.name)
                 print(f"Broad-universe screener: {_bu_out} "
                       f"({len(_bu_result.hits)} setups)")
                 if not args.no_delivery and not is_draft:
@@ -881,6 +903,30 @@ def main():
         if is_draft:
             print(f"\nWARNING: Briefing marked as DRAFT due to quality gate issues.")
 
+        # Step 10.5: Digest — rewrite briefing_<date>.md as the readable
+        # <=250-line digest (the full render stays in briefing_full_<date>.md,
+        # written above BEFORE the companion reports so every verifier and
+        # the webapp see the complete document). Fail-open: any digest
+        # failure leaves the full render in place as briefing_<date>.md.
+        if _digest_on:
+            try:
+                digest_md = build_digest(
+                    briefing_markdown,
+                    config=config,
+                    extras={
+                        "date": today_date_str,
+                        "companion_files": companion_report_names,
+                    },
+                )
+                actual_output_path.write_text(digest_md)
+                print(f"[Step 10.5] Digest written to {actual_output_path} "
+                      f"({len(digest_md.splitlines())} lines; full render "
+                      f"{len(briefing_markdown.splitlines())} lines)")
+            except Exception as _de:
+                print(f"  WARNING: digest build failed — delivering the full "
+                      f"render as briefing_{today_date_str}.md: {_de}",
+                      file=sys.stderr)
+
         # Step 11: Delivery — copy released briefing to ~/Documents/briefings/
         if not args.no_delivery and not is_draft:
             print("[Step 11] Delivering briefing...")
@@ -888,6 +934,7 @@ def main():
                 actual_output_path,
                 json_path=json_output_path,
                 delivery_dir=args.delivery_dir,
+                full_path=full_output_path,
             )
             if delivery_result.get("error"):
                 print(f"  WARNING: delivery failed: {delivery_result['error']}", file=sys.stderr)

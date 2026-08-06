@@ -745,8 +745,10 @@ def load_previous_actions(today_iso: str, reports_dir: Path,
                         "summary": a.get("summary", ""),
                     })
             return acts, d
-        # Markdown fallbacks
-        for mpath in (Path(reports_dir) / f"briefing_{d}.md",
+        # Markdown fallbacks (two-document split: prefer the full render;
+        # the digest keeps the Action List verbatim so it stays correct)
+        for mpath in (Path(reports_dir) / f"briefing_full_{d}.md",
+                      Path(reports_dir) / f"briefing_{d}.md",
                       Path(snapshot_root) / d / "briefing.md"):
             if mpath.exists():
                 try:

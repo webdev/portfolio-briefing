@@ -61,7 +61,7 @@ from .charts import (
     build_program_edge_figure,
     build_ticker_sparkline,
 )
-from .config import briefings_delivery
+from .config import briefings_delivery, briefing_md_path
 from .models import load_briefing
 
 
@@ -381,7 +381,9 @@ def _wire_routes(app: FastAPI) -> None:
         Read top-to-bottom like a memo. Zero context-switching.
         """
         from pathlib import Path
-        md_path = briefings_delivery() / f"briefing_{date}.md"
+        # Two-document split: render the FULL document (briefing_full_<date>.md
+        # when present; briefing_<date>.md for pre-split history).
+        md_path = briefing_md_path(date)
         if not md_path.exists():
             raise HTTPException(
                 status_code=404,
@@ -430,7 +432,7 @@ def _wire_routes(app: FastAPI) -> None:
     async def briefing_markdown_raw(date: str) -> PlainTextResponse:
         """Serve the raw markdown as text/plain — for users who want
         to copy-paste into their own tools, or for `curl | less`."""
-        md_path = briefings_delivery() / f"briefing_{date}.md"
+        md_path = briefing_md_path(date)
         if not md_path.exists():
             raise HTTPException(status_code=404, detail=f"No briefing markdown for {date}")
         try:

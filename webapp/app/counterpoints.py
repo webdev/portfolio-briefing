@@ -27,7 +27,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from .config import briefings_delivery
+from .config import briefing_md_path
 
 
 # Numbered action header: "1. **CLOSE** AMD_PUT_420_20261218 — ..."
@@ -80,7 +80,8 @@ def counterpoints_for_date(date: str) -> dict[str, str]:
     """
     if not date:
         return {}
-    path = briefings_delivery() / f"briefing_{date}.md"
+    # Two-document split: the Counterpoints panel lives in the FULL render.
+    path = briefing_md_path(date)
     if not path.exists():
         return {}
     try:

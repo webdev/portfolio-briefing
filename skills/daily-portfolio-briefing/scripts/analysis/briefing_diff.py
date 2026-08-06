@@ -92,10 +92,15 @@ def load_yesterday_briefing(today_iso: str, snapshots_root: Path) -> Optional[st
         md_path = cand_dir / "briefing.md"
         if md_path.exists():
             return md_path.read_text()
-        # Fallback: reports/daily/briefing_YYYY-MM-DD.md
-        report = Path("reports/daily") / f"briefing_{candidate.isoformat()}.md"
-        if report.exists():
-            return report.read_text()
+        # Fallback: reports/daily/. Two-document split (2026-08-06) —
+        # prefer the FULL render (briefing_full_<date>.md); the digest at
+        # briefing_<date>.md keeps the Action List verbatim, so it remains
+        # a correct diff source for pre-split history.
+        for name in (f"briefing_full_{candidate.isoformat()}.md",
+                     f"briefing_{candidate.isoformat()}.md"):
+            report = Path("reports/daily") / name
+            if report.exists():
+                return report.read_text()
     return None
 
 

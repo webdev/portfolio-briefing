@@ -54,6 +54,21 @@ def briefings_delivery() -> Path:
     )).expanduser()
 
 
+def briefing_md_path(date: str) -> Path:
+    """Path of the briefing markdown to PARSE/RENDER for a date.
+
+    Two-document split (2026-08-06): the pipeline now delivers
+    ``briefing_full_<date>.md`` (complete render — what the webapp should
+    read) alongside ``briefing_<date>.md`` (the human digest). Prefer the
+    full render; fall back to ``briefing_<date>.md`` for historical dates
+    that predate the split (where that file IS the full render).
+    """
+    full = briefings_delivery() / f"briefing_full_{date}.md"
+    if full.exists():
+        return full
+    return briefings_delivery() / f"briefing_{date}.md"
+
+
 def snapshots_root() -> Path:
     """Directory containing one subdir per snapshot date. Env override:
     PORTFOLIO_BRIEFING_SNAPSHOTS_DIR."""

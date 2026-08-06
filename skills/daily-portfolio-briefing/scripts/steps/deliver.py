@@ -5,11 +5,12 @@ Once the briefing has been written to reports/daily/, copy it to a stable
 delivery location so the user has one path that always points at the latest
 briefing. Default destination is ~/Documents/briefings/.
 
-Two files are written each day:
-  - briefing_YYYY-MM-DD.md   (dated copy — never overwritten)
-  - latest.md                (rolling pointer to the most recent briefing)
+Files written each day (two-document split, 2026-08-06):
+  - briefing_YYYY-MM-DD.md        (dated copy of the DIGEST — never overwritten)
+  - latest.md                     (rolling pointer — same digest body)
+  - briefing_full_YYYY-MM-DD.md   (complete render, when the digest is enabled)
 
-Both files include the same body. The dated copy is also kept in
+briefing_<date>.md and latest.md share the same body. The dated copy is also kept in
 reports/daily/ inside the repo, but ~/Documents/briefings/ is more user-
 discoverable for a daily 8am file-write workflow.
 
@@ -39,8 +40,14 @@ def deliver_briefing(
     briefing_path: Path | str,
     json_path: Path | str | None = None,
     delivery_dir: str | None = None,
+    full_path: Path | str | None = None,
 ) -> dict:
     """Copy the released briefing to the delivery location.
+
+    Two-document split (2026-08-06): ``briefing_path`` is the digest (it
+    becomes briefing_<date>.md AND latest.md — what the Telegram bot sends),
+    and ``full_path``, when given, is the complete render delivered alongside
+    as briefing_full_<date>.md (what the webapp parses).
 
     Returns {"delivery_dir": str, "dated": str, "latest": str, "json": str|None}.
     Failures are caught and reported in the dict's "error" key — delivery is
@@ -77,6 +84,17 @@ def deliver_briefing(
         # Dated copy already succeeded — surface the latest.md error but
         # don't tear down the whole delivery.
         result["latest_error"] = f"latest.md copy failed: {e}"
+
+    # Optional full-render sidecar (briefing_full_<date>.md)
+    if full_path is not None:
+        full_path = Path(full_path)
+        if full_path.exists():
+            full_dest = dest_dir / full_path.name.replace(".DRAFT", "")
+            try:
+                shutil.copy2(full_path, full_dest)
+                result["full"] = str(full_dest)
+            except Exception as e:
+                result["full_error"] = f"Full-render copy failed: {e}"
 
     # Optional JSON sidecar
     if json_path is not None:

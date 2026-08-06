@@ -23,7 +23,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .config import briefings_delivery
+from .config import briefing_md_path
 from . import ingest
 
 
@@ -164,8 +164,9 @@ def load_review_for_date(date: str) -> dict[str, Any]:
           "metadata": {...} | None,  # model / usage / elapsed_ms / status
         }
     """
-    delivery = briefings_delivery()
-    md_path = delivery / f"briefing_{date}.md"
+    # Two-document split: the Fable section is in BOTH documents, but parse
+    # the full render (canonical; falls back for pre-split history).
+    md_path = briefing_md_path(date)
     md = None
     if md_path.exists():
         try:
