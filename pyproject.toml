@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.0",# load .env (E*TRADE consumer creds + FMP_API_KEY) into the environment
     "beautifulsoup4>=4.12",  # HTML parsing (finviz-target-fetcher, canslim-screener)
     "lxml>=5.0",             # faster BeautifulSoup backend; falls back to html.parser if missing
+    "playwright>=1.62.0",
 ]
 
 [project.optional-dependencies]

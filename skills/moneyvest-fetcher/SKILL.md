@@ -48,32 +48,72 @@ Moneyvest.
 
 ## Auth
 
-Playwright storage-state persisted at
-`~/.config/portfolio-briefing/moneyvest_state.json` (chmod 0600). When the
-state is missing/expired the login flow runs with `MONEYVEST_EMAIL` /
-`MONEYVEST_PASSWORD` read from the environment (put them in `.env`; the
-pipeline loads it via python-dotenv). The code only calls `os.getenv` —
-never reads `.env` directly and NEVER logs credentials.
+Login state is detected FIRST, before any data selector waits (the
+2026-08-06 probe failure was a login wall masquerading as a selector
+timeout): after loading `/shopping-list` the fetcher reads the rendered
+header — "Sign Out" (+ user name) means logged in; "Sign In"/"Sign Up" or
+a redirect to a landing/login route means logged out. Then:
+
+1. **Logged out + creds in env** → scripted login with `MONEYVEST_EMAIL` /
+   `MONEYVEST_PASSWORD` (from `.env`; the code only calls `os.getenv` —
+   never reads `.env` directly and NEVER logs credentials), verified by
+   re-loading `/shopping-list`.
+2. **Logged out + no creds + `--headed`** → the visible browser waits up
+   to 4 min for a MANUAL login; on success the session is saved so creds
+   stay optional for all future headless runs.
+3. **Logged out + no creds + headless** → explicit failure: "not logged in
+   and MONEYVEST_EMAIL/MONEYVEST_PASSWORD not set in .env — add
+   credentials or run --headed to log in manually once (session
+   persists)".
+
+Playwright storage-state persists at
+`~/.config/portfolio-briefing/moneyvest_state.json` (chmod 0600) and is
+refreshed on every successful fetch.
 
 ## Scrape notes (SPA discipline)
 
-- The site is a React SPA with heavy ad scripts. Use generous timeouts and
-  `wait_for_selector("table tr td")` on the shopping list — NOT
-  `networkidle`, which never settles.
+- The site is a React SPA with heavy ad scripts. NEVER wait on
+  `networkidle` (never settles) or on `<table>` markup (the layout can
+  render as a div-grid) — the fetcher polls the rendered DOM for TEXT
+  landmarks: "Fair Value" / "Light Buy" / "Heavy Buy" / "No Brainer".
 - Data rides Firebase/WebSockets — scrape the RENDERED DOM
   (`page.content()` / `inner_text`), not network responses.
-- Parsing is column-name-fuzzy (`_map_columns`) so cosmetic header edits
-  don't break the fetch; rows without a recognizable ticker are skipped,
-  never fabricated.
+- Parsing is layout-generic: the column-header row is located by its text
+  landmarks, then row-like siblings are walked extracting ticker + numeric
+  cells in column order — works for BOTH real `<table>`s and div-grids.
+  Sections come from heading tags or interleaved single-cell section rows
+  (e.g. "MAG7"). Column mapping is name-fuzzy (`_map_columns`) so cosmetic
+  header edits don't break the fetch; rows without a recognizable ticker
+  are skipped, never fabricated.
+- The probe prints each stage: `loaded /shopping-list → login state:
+  LOGGED IN as <name> → found headers: [...] → parsed N rows (sections:
+  [...]) → index: 3.82 OPTIMISTIC → M-Scores: N fetched`.
+
+## Debug artifacts (on ANY fetch failure)
+
+Every failed fetch dumps `page.html` (rendered DOM), `screenshot.png`,
+and `console.log` (probe-stage log + browser console) under
+`state/moneyvest_debug/<timestamp>/` — last 3 dumps kept — and prints
+"debug dump: <path> — send this to Claude to fix selectors". Send that
+directory when a probe fails and the selectors can be fixed from the
+captured DOM without another live session.
 
 ## Runbook (first run)
 
 ```bash
 uv add playwright && uv run playwright install chromium
-# add to .env:  MONEYVEST_EMAIL=...  MONEYVEST_PASSWORD=...
+
+# Option A (no stored creds): log in manually ONCE in a visible browser —
+# the session persists at ~/.config/portfolio-briefing/moneyvest_state.json
+uv run skills/moneyvest-fetcher/scripts/fetch_moneyvest.py --probe --headed
+
+# Option B: add to .env:  MONEYVEST_EMAIL=...  MONEYVEST_PASSWORD=...
 uv run skills/moneyvest-fetcher/scripts/fetch_moneyvest.py --probe
-# expect: "moneyvest: N shopping-list rows · index S&P 3.82 OPTIMISTIC ..."
-# first login may need:  --headed   (visible browser to clear any challenge)
+
+# expect: "[moneyvest] loaded /shopping-list → login state: LOGGED IN ..."
+#         "moneyvest: N shopping-list rows · index S&P 3.82 OPTIMISTIC ..."
+# on failure: "debug dump: state/moneyvest_debug/<ts> — send this to
+#              Claude to fix selectors"
 ```
 
 Daily use is automatic: `run_briefing.py` Step 1.9 calls the fetcher on
@@ -100,5 +140,7 @@ cache short-circuits the network fetch).
 ## Tests
 
 `scripts/tests/test_moneyvest_fetcher.py` — parse tests run on constructed
-DOM fixtures matching the observed column structure (never live), plus
-cache/staleness and the degraded-no-playwright path.
+DOM fixtures matching the observed column structure in BOTH `<table>` and
+div-grid renderings (never live), plus login-state detection, debug-dump
+artifacts (write + prune-to-3), cache/staleness, and the
+degraded-no-playwright path.
