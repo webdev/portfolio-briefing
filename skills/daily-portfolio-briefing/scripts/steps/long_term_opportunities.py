@@ -1333,12 +1333,271 @@ def _third_friday_of_month(target: "date") -> str:  # noqa: F821
     return third_friday.isoformat()
 
 
-def render_long_term_opportunities(opportunities: list) -> list[str]:
+# ── Compact rendering (2026-08-06 length diet) ─────────────────────────────
+# User: "it seems like it became really long. I just have to scroll and
+# scroll" — the LTO section alone was 842 lines on 2026-08-06. Compact mode
+# renders FULL cards only for actionable, un-gated opportunity kinds (capped
+# at render.max_lto_cards); everything demoted — beyond-cap actionables,
+# capacity-gated, rsi_wait, reference-demoted, SKIPPED_* — collapses to ONE
+# table row each WITH its reason (rule #24: demoted, never hidden). Legacy
+# rendering is byte-identical when render.compact is false / config absent.
+
+_LTO_ACTIONABLE_KINDS = {"LONG_DATED_CSP", "ADD", "LT_ADD", "BUY",
+                         "PULLBACK_CSP", "LEAP_CALL", "DIAGONAL", "DIVIDEND"}
+# Position management is never demoted (trade-validator asymmetry): EXIT /
+# TRIM / HOLD cards always render in full and don't count against the cap.
+_LTO_MGMT_KINDS = {"EXIT", "TRIM", "HOLD"}
+_CAPACITY_GATE_MARK = "Deferred (capacity gated)"
+
+_RSI_IN_TEXT_RE = None  # compiled lazily (module keeps import surface small)
+
+
+def _is_capacity_gated(op: dict) -> bool:
+    """True when the op carries the rule-#41 capacity-deferred tag."""
+    return any(_CAPACITY_GATE_MARK in str(t)
+               for t in (op.get("trigger_reasons") or []))
+
+
+def actionable_ungated_tickers(opportunities: list | None) -> set:
+    """Tickers whose LTO rec is genuinely actionable this cycle (actionable
+    kind, not capacity-gated, not rsi_wait / reference-demoted / skipped).
+    Used by the compact Technical Read to decide which names keep a full
+    per-ticker card."""
+    out: set = set()
+    for op in opportunities or []:
+        if not isinstance(op, dict):
+            continue
+        kind = (op.get("kind") or "").upper()
+        if kind not in _LTO_ACTIONABLE_KINDS:
+            continue
+        if op.get("rsi_wait") or op.get("reference_demoted"):
+            continue
+        if _is_capacity_gated(op):
+            continue
+        t = (op.get("ticker") or "").upper()
+        if t:
+            out.add(t)
+    return out
+
+
+def _lto_rsi_phrase(op: dict) -> str:
+    """Measured 'RSI 52' pulled from the op's own trigger/reason text, or
+    'RSI n/a' (never fabricated). Every compact table row carries this so
+    the RSI-coverage audit finds a read inside its window."""
+    global _RSI_IN_TEXT_RE
+    import re as _re
+    if _RSI_IN_TEXT_RE is None:
+        _RSI_IN_TEXT_RE = _re.compile(r"\bRSI\s+(\d{1,3})\b")
+    hay = " ".join(
+        [str(t) for t in (op.get("trigger_reasons") or [])]
+        + [str(op.get("rsi_wait_reason") or ""),
+           str(op.get("reference_reason") or ""),
+           " ".join(str(n) for n in (op.get("quality_notes") or [])),
+           str(op.get("skip_reason") or "")])
+    m = _RSI_IN_TEXT_RE.search(hay)
+    return f"RSI {m.group(1)}" if m else "RSI n/a"
+
+
+def _lto_cell(text: str, limit: int) -> str:
+    """Sanitize free text for a markdown table cell: strip bold marks,
+    escape pipes, collapse newlines, truncate with an ellipsis."""
+    s = str(text or "").replace("**", "").replace("|", "/").replace("\n", " ")
+    s = " ".join(s.split())
+    return (s[: limit - 1].rstrip() + "…") if len(s) > limit else s
+
+
+def _lto_kind_label(op: dict) -> str:
+    kind = (op.get("kind_when_skipped") or op.get("kind") or "?").upper()
+    kind = kind.replace("LONG_DATED_CSP", "LT CSP")
+    if (op.get("kind") or "") == "DEFERRED_ADD_HAS_CSP":
+        return "ADD (deferred: held CSP)"
+    return kind.replace("_", " ")
+
+
+def _lto_gate_phrase(op: dict) -> str:
+    """The measured capacity-gate reason from the op's own deferred tag
+    (e.g. '⏸ Deferred (capacity gated) — stress coverage 0.22× < 0.50×
+    floor') — the tag text is generated from the CURRENT run's gate state."""
+    for t in op.get("trigger_reasons") or []:
+        s = str(t)
+        if _CAPACITY_GATE_MARK in s:
+            return "⏸ " + s.split(";")[0].lstrip("⏸ ").strip()
+    return "⏸ Deferred (capacity gated)"
+
+
+def _lto_skip_phrase(op: dict) -> str:
+    notes = "; ".join(str(n) for n in (op.get("quality_notes") or []))
+    return notes or str(op.get("skip_reason")
+                        or "duplicate or overlapping exposure")
+
+
+def _lto_card_lines(op: dict, n: int, format_opportunity_md,
+                    LongTermOpportunity) -> list[str]:
+    """One full numbered card — the advisor's own renderer when available,
+    else the minimal fallback (extracted verbatim from the legacy loop so
+    both paths render identically)."""
+    if format_opportunity_md and LongTermOpportunity:
+        try:
+            obj = LongTermOpportunity(**op)
+            return list(format_opportunity_md(obj, n))
+        except Exception:
+            pass
+    lines: list[str] = []
+    emoji = {
+        "ADD": "📈", "TRIM": "✂️", "EXIT": "🚪", "HOLD": "🤝",
+        "LEAP_CALL": "🎯", "LONG_DATED_CSP": "💎",
+        "DIAGONAL": "📐", "DIVIDEND": "💵",
+    }.get(op.get("kind", ""), "•")
+    lines.append(
+        f"### {emoji} {n}. {op.get('kind', '?').replace('_', ' ')} · `{op.get('ticker', '?')}`"
+    )
+    lines.append("")
+    if op.get("concrete_trade"):
+        lines.append(f"**Trade:** {op['concrete_trade']}")
+        lines.append("")
+    if op.get("trigger_reasons"):
+        lines.append(f"- **Triggers:** {'; '.join(op['trigger_reasons'])}")
+    if op.get("rationale"):
+        lines.append(f"- **Rationale:** {op['rationale']}")
+    if op.get("yield_or_cost"):
+        lines.append(f"- **Yield/Cost:** {op['yield_or_cost']}")
+    if op.get("source"):
+        lines.append(f"- **Source:** {op['source']}")
+    lines.append("")
+    return lines
+
+
+def _render_lto_compact(opportunities: list, render_cfg: dict) -> list[str]:
+    """Compact LTO section: numbered FULL cards for management (EXIT/TRIM)
+    plus the top ``max_lto_cards`` actionable un-gated opportunities; every
+    other opportunity is ONE table row with its reason (rule #24)."""
+    lt = _load_lt_module()
+    format_opportunity_md = getattr(lt, "format_opportunity_md", None) if lt else None
+    LongTermOpportunity = getattr(lt, "LongTermOpportunity", None) if lt else None
+    try:
+        max_cards = int(render_cfg.get("max_lto_cards", 8) or 8)
+    except (TypeError, ValueError):
+        max_cards = 8
+
+    funding_hint = None
+    cleaned: list = []
+    for op in opportunities:
+        if (op.get("kind") or "") == "_FUNDING_HINT":
+            funding_hint = op.get("funding")
+            continue
+        cleaned.append(op)
+
+    def _is_skipped(op):
+        return ((op.get("kind") or "").startswith("SKIPPED")
+                or (op.get("kind") or "") == "DEFERRED_ADD_HAS_CSP")
+
+    skipped = [op for op in cleaned if _is_skipped(op)]
+    active = [op for op in cleaned if not _is_skipped(op)]
+    rsi_wait_ops = [op for op in active if op.get("rsi_wait")]
+    active = [op for op in active if not op.get("rsi_wait")]
+    reference_ops = [op for op in active if op.get("reference_demoted")]
+    active = [op for op in active if not op.get("reference_demoted")]
+
+    mgmt = [op for op in active
+            if (op.get("kind") or "").upper() in _LTO_MGMT_KINDS]
+    pool = [op for op in active
+            if (op.get("kind") or "").upper() not in _LTO_MGMT_KINDS]
+    ungated = [op for op in pool if not _is_capacity_gated(op)]
+    gated = [op for op in pool if _is_capacity_gated(op)]
+    full_cards = ungated[:max_cards]
+    overflow = ungated[max_cards:]
+
+    lines = [
+        "## 🔭 Long-Term Opportunities (3-12mo horizon)",
+        "",
+        f"_{len(active)} signal(s) — third-party recs × RSI × drawdown × "
+        f"IV rank × 200-SMA. Compact view: {len(mgmt)} management + "
+        f"{len(full_cards)} actionable card(s) in full; every other "
+        f"opportunity is one row below with its gate — demoted, never "
+        f"hidden (rule #24)._",
+        "",
+    ]
+
+    n = 0
+    for op in mgmt + full_cards:
+        n += 1
+        lines.extend(_lto_card_lines(op, n, format_opportunity_md,
+                                     LongTermOpportunity))
+
+    demoted: list[tuple[dict, str]] = []
+    for op in overflow:
+        demoted.append((op, "actionable — beyond the "
+                            f"top-{max_cards} card cap (render.max_lto_cards)"))
+    for op in gated:
+        demoted.append((op, _lto_gate_phrase(op)))
+    for op in rsi_wait_ops:
+        demoted.append((op, "⏸ " + str(
+            op.get("rsi_wait_reason")
+            or "RSI 60-70 extended — wait for a pullback").lstrip("⏸ ")))
+    for op in reference_ops:
+        demoted.append((op, "📎 reference only — " + str(
+            op.get("reference_reason") or "hard disqualifiers (see JSON)")))
+    for op in skipped:
+        demoted.append((op, "⏸ skipped — " + _lto_skip_phrase(op)))
+
+    if demoted:
+        lines.append(f"### ⏸ Deferred / skipped / reference — compact view "
+                     f"({len(demoted)})")
+        lines.append("")
+        lines.append("_One row per demoted opportunity with its gate "
+                     "(rule #24). Full cards: `render.compact: false` in "
+                     "briefing.yaml, or the briefing JSON's "
+                     "`long_term_opportunities`._")
+        lines.append("")
+        lines.append("| Ticker | Kind | RSI | Trade | Status / why held |")
+        lines.append("|---|---|---|---|---|")
+        for op, status in demoted:
+            lines.append(
+                f"| `{op.get('ticker', '?')}` | {_lto_kind_label(op)} | "
+                f"{_lto_rsi_phrase(op)} | "
+                f"{_lto_cell(op.get('concrete_trade') or '—', 70)} | "
+                f"{_lto_cell(status, 110)} |")
+        lines.append("")
+
+    if funding_hint and (funding_hint.get("total_freed_cash", 0) > 0 or
+                         funding_hint.get("total_locked_profit", 0) > 0):
+        total_cash = funding_hint["total_freed_cash"]
+        total_profit = funding_hint["total_locked_profit"]
+        cnt = funding_hint["count"]
+        lines.append(f"**💰 How to fund deployment:** Closing your {cnt} short put(s) at ≥30% capture "
+                     f"would free **${total_cash:,.0f}** of collateral and lock **${total_profit:,.0f}** "
+                     f"of theta. Top contributors:")
+        for c in funding_hint.get("top3", []):
+            lines.append(f"  - `{c['symbol']}` — frees ${c['freed_cash']:,.0f} + locks ${c['locked_profit']:,.0f} "
+                         f"({c['capture_pct']*100:.0f}% captured)")
+        lines.append("")
+
+    return lines
+
+
+def render_long_term_opportunities(opportunities: list,
+                                   config: dict | None = None) -> list[str]:
     """Render the LONG-TERM OPPORTUNITIES section of the briefing.
 
     Uses the advisor's own format_opportunity_md() if available, otherwise
     falls back to a minimal renderer.
+
+    ``config`` (2026-08-06 length diet): when provided and
+    ``render.compact`` is true (the default once a config is passed), the
+    compact decision-document view renders instead — full cards only for
+    management + the top ``render.max_lto_cards`` actionable un-gated
+    opportunities, one table row (with reason) for everything else.
+    Callers that pass no config keep the legacy rendering byte-identical.
     """
+    render_cfg = ((config or {}).get("render") or {}) if isinstance(config, dict) else {}
+    if opportunities and config is not None and render_cfg.get("compact", True):
+        return _render_lto_compact(opportunities, render_cfg)
+    return _render_lto_legacy(opportunities)
+
+
+def _render_lto_legacy(opportunities: list) -> list[str]:
+    """Legacy (pre-compact) rendering — byte-identical full cards for every
+    opportunity."""
     if not opportunities:
         return [
             "## 🔭 Long-Term Opportunities (3-12mo horizon)",

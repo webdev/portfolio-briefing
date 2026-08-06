@@ -81,6 +81,23 @@ moneyvest:
   # cache_path: /custom/path/moneyvest.json   # default: state/cache/moneyvest.json (repo root)
   # ttl_hours: 20
 
+# 2026-08-06 length diet — the main briefing is the DECISION document; full
+# research detail lives in the companion reports (candidates_DATE.md,
+# when_to_enter_DATE.md). compact: true (default) renders:
+#   - Long-Term Opportunities: full cards only for management + the top
+#     max_lto_cards actionable un-gated recs; every other opportunity is one
+#     table row WITH its gate/reason (rule #24 — demoted, never hidden)
+#   - Candidate Trades: full condensed cards only for candidates with a live
+#     CSP ticket; ticketless BUY-style candidates one table row each
+#   - Technical Read: full per-ticker card only for names with an action in
+#     this cycle's briefing; other holdings one measured line each
+#   - Watch panel: HOLD-family option positions one summary line; positions
+#     whose advisor recommends an action keep the full block + ROLL ANALYSIS
+# compact: false restores the legacy full rendering byte-identical.
+render:
+  compact: true
+  max_lto_cards: 8
+
 enabled_strategies:
   - wheel              # covered calls + cash-secured puts
   - dividend_growth    # pullback entry on dividend growers (optional)

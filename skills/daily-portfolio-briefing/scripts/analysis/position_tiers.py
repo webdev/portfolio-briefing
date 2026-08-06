@@ -577,6 +577,13 @@ def annotate_tier_badges(md: str, config: dict | None) -> str:
         if line_exclusions.label_of(line) in line_exclusions.EXCLUDED_LABELS:
             out_lines.append(line)
             continue
+        # Italic transparency footers / legends (e.g. the one-line source
+        # legend, which literally shows the 🅿️ mark) are prose, not ticker
+        # headers — never badge them (2026-08-06: the legend rendered with
+        # a spurious `· 🔵 Tier C` via the "CP" bare-token fallback).
+        if stripped.startswith("_"):
+            out_lines.append(line)
+            continue
         # Must have a Parkev chip already AND not already have a tier badge.
         if _PARKEV_MARK in line and not _TIER_BADGE_RE.search(line):
             if indented:

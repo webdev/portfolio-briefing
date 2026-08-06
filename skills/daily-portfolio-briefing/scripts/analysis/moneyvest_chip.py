@@ -7,18 +7,31 @@ Step 1.9 on a 20h TTL. Everything here is fail-open and n/a-safe: no cache
 / no entry for a ticker → no chip, never a fabricated number (hard rule
 #19).
 
+Attribution decoration (2026-08-06, user: "it's unclear what is Moneyvest
+information and what is not — decorate it so it's clear"): ONE chip grammar
+everywhere, from THIS module only —
+
+    💰 MV: FV $152 · LB $196 · HB $160 · M 4.05
+
+Missing fields are omitted (fail-closed, rule #19 — never a placeholder).
+Any block that is WHOLLY Moneyvest-sourced (index sentiment line, regime
+advisory) starts with ``💰 Moneyvest — ``. Strike-anchor notes route
+through ``format_mv_anchor`` (``💰 MV Light Buy $182``). The one-line
+source legend for the briefing header is ``source_legend_lines``.
+
 Surfaces:
   - ``format_mv_chip`` / ``annotate_mv_chips`` — parkev_chip-pattern
-    post-pass appending ``💰 FV $152 · LB $196 · M 4.05`` to every line
-    already carrying the 🅿️ marker. ETF shopping-list rows get index-only
-    treatment (no per-stock chip — an ETF has no company fair value).
+    post-pass appending ``💰 MV: FV $152 · LB $196 · HB $160 · M 4.05``
+    to every line already carrying the 🅿️ marker. ETF shopping-list rows
+    get index-only treatment (no per-stock chip — an ETF has no company
+    fair value).
   - FV divergence (hard-rule-#12 companion): when MV fair value and the
     FMP DCF on the SAME line diverge > 40% relative, append
     "⚠ models diverge (MV $152 vs DCF $242) — trust neither blindly".
-  - ``index_context_lines`` — "Moneyvest sentiment: 3.82 OPTIMISTIC (S&P)"
-    for the Market Context section, plus a contrarian-caution advisory on
-    OPTIMISTIC/GREED/EUPHORIA readings. ADVISORY only — never a regime
-    change.
+  - ``index_context_lines`` — "💰 Moneyvest — sentiment: 3.82 OPTIMISTIC
+    (S&P)" for the Market Context section, plus a contrarian-caution
+    advisory on OPTIMISTIC/GREED/EUPHORIA readings. ADVISORY only —
+    never a regime change.
 """
 
 from __future__ import annotations
@@ -67,10 +80,15 @@ def _is_etf_row(row: dict | None) -> bool:
 
 
 def format_mv_chip(row: dict | None, m_score: float | None = None) -> str:
-    """``💰 FV $152 · LB $196 · M 4.05`` — n/a-safe, only measured parts.
+    """``💰 MV: FV $152 · LB $196 · HB $160 · M 4.05`` — the ONE Moneyvest
+    chip grammar (2026-08-06 attribution decoration). n/a-safe, only
+    measured parts; missing fields are omitted, never placeholder-filled
+    (rule #19).
 
     Returns "" when there is nothing real to show (no chip beats a chip of
     fabricated values). ETF rows return "" — index-only treatment.
+    ``NB`` (No-Brainer) renders only when neither LB nor HB is present
+    (deepest ladder rung as last resort, keeps the chip short).
     """
     if _is_etf_row(row):
         return ""
@@ -84,15 +102,35 @@ def format_mv_chip(row: dict | None, m_score: float | None = None) -> str:
             bits.append(f"FV ${fv:,.0f}")
         if lb:
             bits.append(f"LB ${lb:,.0f}")
-        elif hb:
+        if hb:
             bits.append(f"HB ${hb:,.0f}")
-        elif nb:
+        if nb and not (lb or hb):
             bits.append(f"NB ${nb:,.0f}")
     if m_score is not None:
         bits.append(f"M {m_score:.2f}")
     if not bits:
         return ""
-    return f"{MV_MARK} " + " · ".join(bits)
+    return f"{MV_MARK} MV: " + " · ".join(bits)
+
+
+def format_mv_anchor(label: str, price: float) -> str:
+    """``💰 MV Light Buy $182`` — the ONE grammar for strike-anchor notes
+    ("Strike anchored to …"). Single source of truth so every surface
+    (new_ideas CSP composer, LT-opportunity advisor) decorates Moneyvest
+    ladder anchors identically."""
+    return f"{MV_MARK} MV {label} ${price:,.0f}"
+
+
+def source_legend_lines() -> list[str]:
+    """One-line source legend, rendered ONCE near the top of the briefing
+    (Market Context). Explains every attribution mark so Moneyvest data is
+    never confused with Parkev / FMP / Claude-portfolio data."""
+    return [
+        "_Sources: 🅿️ Parkev rec · 🤖 CP-held = Claude Portfolio · "
+        "💰 MV = Moneyvest (FV fair value · LB/HB light/heavy buy · "
+        "M M-Score) · 💵 FV = FMP DCF + analyst target_",
+        "",
+    ]
 
 
 def divergence_note(mv_fair_value: float | None,
@@ -136,6 +174,11 @@ def annotate_mv_chips(md: str, payload: dict | None) -> str:
     out: list[str] = []
     for line in md.splitlines():
         if PARKEV_MARK not in line or MV_MARK in line:
+            out.append(line)
+            continue
+        # Italic transparency footers / the source legend are prose, not
+        # ticker headers — never chip them (mirrors the tier-badge guard).
+        if line.lstrip().startswith("_"):
             out.append(line)
             continue
         ticker = _extract_ticker(line)
@@ -188,7 +231,9 @@ def index_context_lines(payload: dict | None) -> list[str]:
     if (payload or {}).get("provenance") == "stale_cache":
         sh = (payload or {}).get("stale_hours")
         stale = f" _(stale cache{f' {sh:.0f}h' if sh else ''})_"
-    lines = [f"- Moneyvest sentiment: **{' · '.join(bits)}**{stale}"]
+    # Wholly-Moneyvest block → starts with the "💰 Moneyvest — " marker
+    # (2026-08-06 attribution decoration).
+    lines = [f"- {MV_MARK} Moneyvest — sentiment: **{' · '.join(bits)}**{stale}"]
     if labels & _CONTRARIAN_LABELS:
         lines.append(
             "  - ⚠ advisory: OPTIMISTIC/GREED readings are contrarian "
@@ -206,7 +251,8 @@ def regime_advisory(payload: dict | None) -> str | None:
         return None
     val = sp.get("value")
     val_txt = f"{val:.2f} " if isinstance(val, (int, float)) else ""
-    note = f"Moneyvest sentiment {val_txt}{label} (S&P) — advisory only"
+    note = (f"{MV_MARK} Moneyvest — sentiment {val_txt}{label} (S&P) — "
+            f"advisory only")
     if label in _CONTRARIAN_LABELS:
         note += "; contrarian caution on new short-put opens"
     return note

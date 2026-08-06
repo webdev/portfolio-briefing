@@ -12,7 +12,7 @@ from analysis import pre_trade_validator as ptv  # noqa: E402
 
 def _csp(**kw) -> ptv.PreTradeContext:
     """Default healthy CSP context — tests override the parts they care about."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     defaults = dict(
         ticker="CRM",
         strike=175.0,
@@ -60,7 +60,7 @@ def test_healthy_csp_passes_all_checks():
 
 def test_earnings_inside_window_blocks():
     """The MU $960P case: earnings 9d out, expiration 67d out → BLOCK."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     ctx = _csp(
         ticker="MU",
         strike=960.0,
@@ -77,7 +77,7 @@ def test_earnings_inside_window_blocks():
 
 def test_earnings_after_expiration_does_not_block():
     """Earnings AFTER expiration is fine — no binary risk inside the contract."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     ctx = _csp(
         expiration=today + timedelta(days=35),
         earnings_date=today + timedelta(days=60),
@@ -141,7 +141,7 @@ def test_cash_floor_above_threshold_passes():
 
 def test_bucket_critical_blocks():
     """Aug 21 bucket currently $260K + new MU $96K → $356K = 35% NLV → CRITICAL."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     aug21 = today + timedelta(days=67)
     ctx = _csp(
         ticker="MU",
@@ -158,7 +158,7 @@ def test_bucket_critical_blocks():
 
 def test_bucket_warning_warns():
     """Bucket landing between 20-30% NLV after adding → WARN (not BLOCK)."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     jul17 = today + timedelta(days=32)
     ctx = _csp(
         ticker="AVGO",
@@ -186,7 +186,7 @@ def test_bucket_warning_warns():
 
 def test_bucket_clean_passes():
     """Small bucket addition passes both thresholds."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     sep18 = today + timedelta(days=95)
     ctx = _csp(
         ticker="SOFI",
@@ -347,7 +347,7 @@ def test_strike_single_touch_anchor_warns_with_level_named():
 def test_mu_960p_aug21_scenario_blocks_with_multiple_reasons():
     """The actual MU $960P Aug 21 case the user surfaced — should block on
     MULTIPLE rules: earnings window + entry gates + roll-from-safer."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     aug21 = today + timedelta(days=67)
     ctx = _csp(
         ticker="MU",
@@ -561,7 +561,7 @@ _TIER_CFG = {
 
 def _cc(**kw):
     """Default healthy CC context — tests override the parts they care about."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     defaults = dict(
         ticker="VRT",
         strike=140.0,
@@ -747,7 +747,7 @@ def test_bucket_gate_uses_projected_map_when_provided():
     """The bucket gate reads the PROJECTED per-date obligation map — a bucket
     the Phase-1 closes empty no longer blocks; a missing map silences the
     gate rather than re-blocking on the pre-close book."""
-    today = date(2026, 6, 15)
+    today = date.today()  # was pinned date(2026, 6, 15); production uses date.today() — pinned fixtures went stale (observed 2026-08-06: EARNINGS_WINDOW never fired because the fixture's earnings date was already in the past)
     exp = today + timedelta(days=35)
     ctx = _csp(expiration=exp,
                obligation_by_expiration={exp: 340_000.0})   # 34% + new → crit

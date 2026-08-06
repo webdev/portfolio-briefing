@@ -162,6 +162,14 @@ def aggregate_briefing(
     # Make config visible to render layer (used for core_positions/ltcg_rate/etc.)
     snapshot_data["_config"] = config
 
+    # 2026-08-06 length diet — render.compact (default ON) turns the four
+    # longest surfaces (LTO, Candidate Trades, Technical Read, Watch) into
+    # compact decision-document views. Demoted items ALWAYS stay visible as
+    # one-liners with their reason (rule #24). render.compact: false keeps
+    # every legacy path byte-identical.
+    _render_cfg = (config.get("render") or {}) if isinstance(config, dict) else {}
+    render_compact = bool(_render_cfg.get("compact", True))
+
     # Task #43 — make the true chain-IV map available to every downstream
     # consumer (rotation playbook gate battery, LT-opportunity honesty checks,
     # the Vol Surface panel and the IV-label annotation pass). snapshot_inputs
@@ -297,6 +305,17 @@ def aggregate_briefing(
             print(f"[aggregate] stalled panel failed: {_stall_e}", file=_sys.stderr)
     lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl, gate_state=gate_state, balance=balance))
     lines.extend(render_market_context(regime_data, quotes))
+
+    # 2026-08-06 attribution decoration — ONE source legend, rendered once
+    # near the top so every chip mark (🅿️ / 🤖 / 💰 MV / 💵 FV) is
+    # explained. Fail-open.
+    try:
+        from analysis.moneyvest_chip import source_legend_lines
+        lines.extend(source_legend_lines())
+    except Exception as _leg_e:
+        import sys as _sys
+        print(f"[aggregate] source legend failed (non-fatal): {_leg_e}",
+              file=_sys.stderr)
 
     # Task #46 — Moneyvest sentiment gauge in Market Context. Advisory
     # only (flags crowded optimism, never predicts direction / changes the
@@ -458,7 +477,9 @@ def aggregate_briefing(
     lines.extend(action_list_lines)
     
     # MODIFIED: Use render_watch_with_commentary instead of plain render_watch
-    lines.extend(render_watch_with_commentary(equity_reviews, options_reviews, snapshot_data))
+    lines.extend(render_watch_with_commentary(
+        equity_reviews, options_reviews, snapshot_data,
+        compact=render_compact))
 
     lines.extend(render_opportunities(new_ideas))
 
@@ -518,7 +539,11 @@ def aggregate_briefing(
     # NEW (Wave 22): Long-term opportunities — ADD/TRIM/EXIT/HOLD + LEAPs + long-dated CSPs
     if long_term_opportunities:
         from steps.long_term_opportunities import render_long_term_opportunities
-        lines.extend(render_long_term_opportunities(long_term_opportunities))
+        # config carries render.compact / render.max_lto_cards (2026-08-06
+        # length diet); config=None or render.compact: false → legacy cards.
+        lines.extend(render_long_term_opportunities(
+            long_term_opportunities,
+            config=config if render_compact else None))
 
     # NEW (task #20): CSP Rotations — close a lower-yield held CSP to fund a
     # higher-yield new CSP at same-or-lower total obligation. The open-side
@@ -732,6 +757,7 @@ def aggregate_briefing(
                 snapshot_data=snapshot_data,
                 analytics=analytics,
                 recommendations_list=snapshot_data.get("recommendations_list"),
+                compact=render_compact,
             )
             lines.extend(_cand_section.splitlines())
         except Exception as _cbe:
@@ -748,11 +774,56 @@ def aggregate_briefing(
         _ta_cfg = (config.get("technical_analysis") or {}) if isinstance(config, dict) else {}
         if _ta_cfg.get("enabled", True):
             from steps.technical_read import render_technical_read_sections
+            # 2026-08-06 length diet: in compact mode only names with an
+            # action somewhere in THIS cycle's briefing (action list item,
+            # actionable un-gated LTO, candidate with a live CSP ticket)
+            # keep the full technical card; the rest collapse to one line.
+            # Fail-open: any error → None → full legacy cards.
+            _ta_action_tickers = None
+            if render_compact:
+                try:
+                    _ta_action_tickers = set()
+                    from analysis.rsi_discipline import first_known_ticker as _fkt
+                    _ta_known: set = set()
+                    for _tk_k in (snapshot_data.get("technicals") or {}).keys():
+                        _ta_known.add(str(_tk_k).upper())
+                    for _p_k in (snapshot_data.get("positions") or []):
+                        _sym_k = _p_k.get("underlying") or _p_k.get("symbol")
+                        if _sym_k:
+                            _ta_known.add(str(_sym_k).upper())
+                    _ta_sorted = sorted(_ta_known, key=len, reverse=True)
+                    for _al_line in action_list_lines:
+                        _al_s = _al_line.lstrip()
+                        if _al_s[:1].isdigit() and "." in _al_s[:5]:
+                            _al_tk = _fkt(_al_line, _ta_sorted)
+                            if _al_tk:
+                                _ta_action_tickers.add(_al_tk.upper())
+                    from steps.long_term_opportunities import (
+                        actionable_ungated_tickers as _aut)
+                    _ta_action_tickers |= _aut(long_term_opportunities or [])
+                    # Candidates with a live CSP ticket keep their card.
+                    for _c_results in ((scout_payload or {})
+                                       .get("results_by_theme") or {}).values():
+                        for _c_r in _c_results or []:
+                            if not isinstance(_c_r, dict):
+                                continue
+                            if ((_c_r.get("csp_entry") or {}).get("strike")
+                                    and _c_r.get("ticker")):
+                                _ta_action_tickers.add(
+                                    str(_c_r["ticker"]).upper())
+                except Exception as _ta_e:
+                    import sys as _sys
+                    print(f"[aggregate] compact action-ticker set failed "
+                          f"(fail-open to full cards): {_ta_e}",
+                          file=_sys.stderr)
+                    _ta_action_tickers = None
             lines.extend(render_technical_read_sections(
                 snapshot_data, config,
                 scout_payload=scout_payload,
                 gate_state=gate_state,
                 recommendations_list=snapshot_data.get("recommendations_list"),
+                compact=render_compact,
+                action_tickers=_ta_action_tickers,
             ))
     except Exception as _tre:
         import sys as _sys

@@ -111,7 +111,11 @@ def _fv_note(tk: str, spot, fv: dict | None, etf_set) -> str | None:
 
 
 def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
-                 gate_state=None) -> list[str]:
+                 gate_state=None, compact: bool = False) -> list[str]:
+    """One candidate card. ``compact`` (2026-08-06 length diet) keeps the
+    header, RSI metrics, entry ticket, and earnings line but drops the FV
+    note + Verdict elaboration (both live in the companion
+    candidates_<date>.md report)."""
     tk = (r.get("ticker") or "").upper()
     spot = r.get("spot")
     spot_s = f"${spot:.2f}" if spot else "?"
@@ -218,18 +222,55 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     elif status == "held_rsi" and rv:
         out.append(f"  - _Held back by RSI: {rv.reason}_")
 
-    note = _fv_note(tk, spot, fv_by_ticker.get(tk), etf_set)
-    if note:
-        out.append(f"  - {note}")
+    if not compact:
+        note = _fv_note(tk, spot, fv_by_ticker.get(tk), etf_set)
+        if note:
+            out.append(f"  - {note}")
 
-    if r.get("verdict"):
-        rationale = "; ".join(r.get("rationale") or [])
-        out.append(f"  - Verdict: {r['verdict']}" + (f" — {rationale}" if rationale else ""))
+        if r.get("verdict"):
+            rationale = "; ".join(r.get("rationale") or [])
+            out.append(f"  - Verdict: {r['verdict']}" + (f" — {rationale}" if rationale else ""))
 
     if r.get("days_to_earnings") is not None:
         out.append(f"  - Earnings: {r.get('earnings_date')} ({r['days_to_earnings']}d away)")
 
     return out
+
+
+def _cand_cell(text: str, limit: int) -> str:
+    """Sanitize free text for a markdown table cell (strip bold, escape
+    pipes, collapse whitespace, truncate)."""
+    s = str(text or "").replace("**", "").replace("|", "/").replace("\n", " ")
+    s = " ".join(s.split())
+    return (s[: limit - 1].rstrip() + "…") if len(s) > limit else s
+
+
+def _cand_table_row(r: dict, capacity_blocked: bool, theme: str = "") -> str:
+    """One compact row for a Today's Candidate WITHOUT an options ticket
+    (equity BUY-on-pullback entries). Rule #24: ticker, status, and the
+    measured why stay visible — only the card framing is dropped."""
+    tk = (r.get("ticker") or "?").upper()
+    spot = r.get("spot")
+    spot_s = f"${spot:,.2f}" if spot else "?"
+    rsi_val = r.get("rsi_14")
+    rsi_s = _cand_cell(rsi_discipline.tag(rsi_val), 30) if rsi_val is not None else "RSI n/a"
+    if rsi_val is None:
+        entry = "no ticket — RSI unavailable (fail closed)"
+    elif (r.get("verdict") or "").upper().startswith("BUY"):
+        entry = "BUY on pullback — size per plan"
+    else:
+        entry = "setup qualifies — no live chain ticket; verify"
+    if capacity_blocked:
+        entry = f"⏸ deferred (capacity gated) · {entry}"
+    verdict = _cand_cell(
+        (r.get("verdict") or "") + (
+            " — " + "; ".join(r.get("rationale") or [])
+            if r.get("rationale") else ""), 90)
+    earn = ""
+    if r.get("days_to_earnings") is not None:
+        earn = f" · earnings {r['days_to_earnings']}d"
+    return (f"| `{tk}` | {_cand_cell(theme, 24)} | {spot_s} | {rsi_s} | "
+            f"{_cand_cell(entry, 70)} | {verdict}{earn} |")
 
 
 def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | None,
@@ -527,7 +568,8 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                               gate_state=None,
                               snapshot_data: dict | None = None,
                               analytics: dict | None = None,
-                              recommendations_list: list | None = None) -> str:
+                              recommendations_list: list | None = None,
+                              compact: bool = False) -> str:
     """Focused, action-first briefing built FROM the candidates: only the names
     whose setup qualifies AND passes the RSI gate (full entry cards), with the
     RSI-blocked names listed below as 'on deck'. Condensed market context up top.
@@ -541,7 +583,13 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     _STRIKE_OVERLAP_PCT) is pulled out of the actionable list into an "already
     positioned" note — you can't "newly" sell a contract you're already short.
     A same-name candidate at a different strike is kept but annotated as
-    stacking single-name risk."""
+    stacking single-name risk.
+
+    ``compact`` (2026-08-06 length diet): candidates WITH a live CSP ticket
+    keep a condensed card (header + RSI + ticket + earnings + validator
+    findings); ticketless BUY-style candidates collapse to one table row
+    each (rule #24 — visible with status + reason, never hidden). A pointer
+    to the full companion report (candidates_<date>.md) is appended."""
     _h_top = "## 🎯 Candidate Trades — Across Themes" if as_section else f"# Candidate Trade Briefing — {generated_at}"
     _h_sub = "###" if as_section else "##"
     if not scout_payload:
@@ -647,8 +695,18 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
             from analysis import pre_trade_validator as _ptv
         except ImportError:
             _ptv = None
+        _capacity_blocked = gate_state is not None and not gate_state.open
+        _row_cands: list[tuple[str, dict]] = []
         for tname, r in sorted(cands, key=lambda x: (x[0], x[1].get("ticker", ""))):
-            card = _format_card(r, fv_by_ticker, etf_set, rsi_th, gate_state=gate_state)
+            # Compact (2026-08-06): ticketless candidates (equity BUY-style
+            # entries — no strike/premium to show) collapse to one table
+            # row each below; candidates WITH a live CSP ticket keep the
+            # condensed card so the actionable ticket is never demoted.
+            if compact and not (r.get("csp_entry") or {}).get("strike"):
+                _row_cands.append((tname, r))
+                continue
+            card = _format_card(r, fv_by_ticker, etf_set, rsi_th,
+                                gate_state=gate_state, compact=compact)
             card[0] = f"{card[0]}  · _{tname}_"
             # Same-name (different-strike) stacking note — kept, but flagged.
             tk = (r.get("ticker") or "").upper()
@@ -698,6 +756,18 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                     pass
             lines.extend(card)
             lines.append("")
+        if _row_cands:
+            lines.append(f"**Equity-entry candidates — compact ({len(_row_cands)})**")
+            lines.append("")
+            lines.append("_No options ticket on these (equity BUY entries) — "
+                         "one measured row each; nothing hidden (rule #24). "
+                         f"Full research cards: candidates_{generated_at}.md_")
+            lines.append("")
+            lines.append("| Ticker | Theme | Spot | RSI | Entry | Verdict / why |")
+            lines.append("|---|---|---|---|---|---|")
+            for tname, r in _row_cands:
+                lines.append(_cand_table_row(r, _capacity_blocked, theme=tname))
+            lines.append("")
     else:
         lines.append(f"{_h_sub} 🎯 Today's Candidates (0)")
         lines.append("")
@@ -741,8 +811,12 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 )
         lines.append("")
 
-    lines.append("_Full per-company detail (WATCH/AVOID + every theme) is in the companion "
-                 "candidate research report._")
+    if compact:
+        lines.append(f"_Full research cards: candidates_{generated_at}.md "
+                     "(per-company detail, WATCH/AVOID, every theme)._")
+    else:
+        lines.append("_Full per-company detail (WATCH/AVOID + every theme) is in the companion "
+                     "candidate research report._")
     return "\n".join(lines)
 
 

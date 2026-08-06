@@ -193,6 +193,18 @@ def _load_directive_holds(memory_path: Path | None) -> set[str]:
     return set()
 
 
+def _one_line_read(ticker: str, deep: dict) -> str:
+    """Compact one-liner (2026-08-06 length diet) for tickers with NO action
+    anywhere in this cycle's briefing: `TICKER $spot — RSI NN · LT verdict ·
+    ST verdict`. Every value measured from this cycle's deep read."""
+    spot = deep.get("spot")
+    spot_s = f" ${spot:,.2f}" if spot else ""
+    st = _ST_DISPLAY.get(deep.get("short_term_verdict", ""), deep.get("short_term_verdict", "?"))
+    lt = _LT_DISPLAY.get(deep.get("long_term_verdict", ""), deep.get("long_term_verdict", "?"))
+    return (f"- **{ticker}**{spot_s} — {rsi_discipline.tag(deep.get('rsi_14'))} · "
+            f"{lt} · {st}")
+
+
 def render_technical_read_sections(
     snapshot_data: dict,
     config: dict | None,
@@ -201,6 +213,8 @@ def render_technical_read_sections(
     gate_state=None,
     recommendations_list: list | None = None,
     memory_path: Path | None = None,
+    compact: bool = False,
+    action_tickers: set | None = None,
 ) -> list[str]:
     """Render "## 🎯 Technical Read" (per-ticker depth cards, grouped by role)
     followed by "## 📋 Per-Ticker Actions" (the recommender's calls).
@@ -209,7 +223,15 @@ def render_technical_read_sections(
     data fetched this cycle. Tickers without a deep read get an explicit
     "chart data unavailable" line (positions/candidates) or are skipped with a
     count (theme watchlist).
+
+    ``compact`` + ``action_tickers`` (2026-08-06 length diet): the full
+    per-ticker card renders ONLY for tickers with an action somewhere in
+    this cycle's briefing (action list, actionable LTO, candidate ticket);
+    every other name collapses to one measured line. ``action_tickers is
+    None`` fails open to the full legacy rendering.
     """
+    collapse = compact and action_tickers is not None
+    action_set = {str(t).upper() for t in (action_tickers or set())}
     technicals = (snapshot_data or {}).get("technicals") or {}
     positions = (snapshot_data or {}).get("positions") or []
     equity, puts, calls = _position_states(positions)
@@ -264,18 +286,38 @@ def render_technical_read_sections(
     for title, tickers in groups:
         if not tickers:
             continue
+        if lines and lines[-1] != "":
+            lines.append("")  # separator after a trailing compact one-liner
         lines.append(f"**{title}**")
         lines.append("")
         for tk in tickers:
             tech = technicals.get(tk)
             deep = tech.get("deep") if isinstance(tech, dict) else None
             sr = tech.get("support_resistance") if isinstance(tech, dict) else None
+            if collapse and tk not in action_set and deep:
+                # No action on this name this cycle → one measured line.
+                lines.append(_one_line_read(tk, deep))
+                any_card = True
+                continue  # no blank line between one-liners (list stays tight)
+            # Full card / unavailable heading — needs a blank separator when
+            # the previous line was a compact one-liner.
+            if lines and lines[-1].startswith("- **"):
+                lines.append("")
             if not deep:
                 lines.append(f"### {tk} — chart data unavailable, verify manually")
             else:
                 lines.extend(_fmt_card(tk, deep, sr))
                 any_card = True
             lines.append("")
+    if lines and lines[-1] != "":
+        lines.append("")  # close a trailing compact list before footers
+    if collapse:
+        lines.append(
+            "_Compact view: full technical cards only for names with an "
+            "action in this cycle's briefing; every other holding is one "
+            "measured line (RSI · trend · verdict)._"
+        )
+        lines.append("")
     if theme_skipped > 0:
         lines.append(
             f"_Theme watchlist: deep read fetched only for held + candidate names — "

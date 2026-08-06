@@ -11,6 +11,16 @@ import math
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+# ONE Moneyvest anchor grammar (2026-08-06 attribution decoration) — the
+# single source of truth is moneyvest_chip.format_mv_anchor in the
+# daily-portfolio-briefing skill. This module also runs standalone, so the
+# fallback mirrors that grammar exactly ("💰 MV Light Buy $182").
+try:
+    from analysis.moneyvest_chip import format_mv_anchor as _fmt_mv_anchor
+except ImportError:  # pragma: no cover - standalone runs
+    def _fmt_mv_anchor(label: str, price: float) -> str:
+        return f"💰 MV {label} ${price:,.0f}"
+
 
 def _safe_shares(dollars: float, spot: float | None) -> int:
     """Fail-open share count. Returns 0 when spot is unusable (NaN, None, ≤0).
@@ -202,8 +212,8 @@ def evaluate_options_idea(
                     import math as _math
                     csp_strike = int(_math.floor(_mv_price / 5) * 5)
                     strike_anchor_note = (
-                        f" Strike anchored to 💰 {_mv_label} "
-                        f"${_mv_price:,.0f}.")
+                        f" Strike anchored to "
+                        f"{_fmt_mv_anchor(_mv_label, _mv_price)}.")
                     mv_anchored = True
                     break
         # S/R-aware refinement (hard rule #20): when a real support cluster

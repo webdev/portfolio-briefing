@@ -31,18 +31,24 @@ _PAYLOAD = {
 # ── Chip ──────────────────────────────────────────────────────────────────
 
 def test_chip_renders_compact_format():
+    """2026-08-06 attribution decoration: ONE chip grammar —
+    `💰 MV: FV $X · LB $Y · HB $Z · M N.N` — so Moneyvest data is never
+    confused with FMP FV / Parkev data."""
     row = _PAYLOAD["shopping_list"][0]
     chip = mv.format_mv_chip(row, 4.05)
-    assert chip == "💰 FV $152 · LB $196 · M 4.05"
+    assert chip == "💰 MV: FV $152 · LB $196 · HB $160 · M 4.05"
 
 
 def test_chip_na_safe_partial_data():
     assert mv.format_mv_chip({"ticker": "X", "section": "MAG7",
-                              "fair_value": 100.0}) == "💰 FV $100"
+                              "fair_value": 100.0}) == "💰 MV: FV $100"
     assert mv.format_mv_chip(None) == ""
     assert mv.format_mv_chip({"ticker": "X", "section": "s"}) == ""
     # m_score only (no shopping-list row) still renders
-    assert mv.format_mv_chip(None, 3.2) == "💰 M 3.20"
+    assert mv.format_mv_chip(None, 3.2) == "💰 MV: M 3.20"
+    # No-Brainer only renders when neither LB nor HB is present
+    assert mv.format_mv_chip({"ticker": "X", "section": "MAG7",
+                              "no_brainer": 90.0}) == "💰 MV: NB $90"
 
 
 def test_chip_etf_rows_get_index_only_treatment():
@@ -58,7 +64,7 @@ def test_annotate_appends_chip_to_parkev_lines_only():
           "**`SMH` covered call**  · 🅿️ no rec\n")
     out = mv.annotate_mv_chips(md, _PAYLOAD)
     lines = out.splitlines()
-    assert "💰 FV $152 · LB $196 · M 4.05" in lines[0]
+    assert "💰 MV: FV $152 · LB $196 · HB $160 · M 4.05" in lines[0]
     assert "💰" not in lines[1]      # no 🅿️ marker → untouched
     assert "💰" not in lines[2]      # ETF → index-only, no chip
 
@@ -101,7 +107,7 @@ def test_annotate_appends_divergence_on_dcf_lines():
 
 def test_index_context_lines_and_contrarian_advisory():
     lines = mv.index_context_lines(_PAYLOAD)
-    assert lines[0] == ("- Moneyvest sentiment: **3.82 OPTIMISTIC (S&P) · "
+    assert lines[0] == ("- 💰 Moneyvest — sentiment: **3.82 OPTIMISTIC (S&P) · "
                         "3.10 NEUTRAL (NDX)**")
     assert any("contrarian" in ln for ln in lines[1:])
 
@@ -160,7 +166,7 @@ def test_lt_csp_anchors_to_light_buy_in_band():
                    "no_brainer": 120.0})
     assert op is not None and op.kind == "LONG_DATED_CSP"
     assert "$180P" in op.concrete_trade
-    assert "Strike anchored to 💰 Light Buy $182" in op.rationale
+    assert "Strike anchored to 💰 MV Light Buy $182" in op.rationale
 
 
 def test_lt_csp_ladder_outside_band_keeps_legacy_strike():
@@ -184,7 +190,7 @@ def test_lt_csp_mv_anchor_takes_precedence_over_sr():
         ticker="NVDA", weight_pct=2.0, spot=200.0, rsi=45, iv_rank=60,
         sma_200=180.0, third_party_rec="BUY", has_cash=True,
         sr_levels=sr, mv_ladder={"light_buy": 182.0})
-    assert "💰 Light Buy" in op.rationale
+    assert "💰 MV Light Buy" in op.rationale
     assert "support (" not in op.rationale
 
 
@@ -219,7 +225,7 @@ def test_new_idea_pick_prefers_light_buy_strike_in_envelope():
     pick = _pick_csp_strike(rows, spot=200.0,
                             mv_ladder={"light_buy": 182.0})
     assert pick["strike"] == 180.0
-    assert pick["mv_anchor"] == "💰 Light Buy $182"
+    assert pick["mv_anchor"] == "💰 MV Light Buy $182"
 
 
 def test_new_idea_pick_ignores_ladder_outside_envelope():

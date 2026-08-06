@@ -188,10 +188,58 @@ def generate_commentary(
     return notes
 
 
+# Watch-panel compact mode (2026-08-06 length diet). HOLD-family advisor
+# verdicts — no action recommended — collapse to one summary line; anything
+# that recommends an action (roll/close/urgent/demotion note/credit-window
+# closing) keeps the full block incl. the ROLL ANALYSIS table. No position
+# is ever dropped (a missing position is a data gap — existing rule).
+_WATCH_HOLD_FAMILY = {"HOLD", "WAIT", "LET_EXPIRE", ""}
+
+
+def _watch_needs_full_block(review: dict, commentary: list[str],
+                            snapshot_data: dict | None) -> bool:
+    """True when the position's advisor/verdict recommends an action —
+    those keep the full Watch block (ROLL ANALYSIS table, credit window,
+    demotion notes). HOLD-family verdicts with nothing urgent collapse."""
+    rec = (review.get("recommendation") or "").upper()
+    if rec not in _WATCH_HOLD_FAMILY:
+        return True
+    # Demotion notes: the Watch panel is their ONLY surface — never collapse.
+    if (review.get("_roll_gate_demotion") or review.get("_churn_guard_demotion")
+            or review.get("_debit_cap_demotion")
+            or review.get("_close_floor_demotion")):
+        return True
+    # Advisor's own roll table recommends an actual roll (not A=HOLD).
+    rec_id = review.get("recommended_candidate_id")
+    if review.get("roll_candidates") and rec_id and rec_id != "A":
+        return True
+    # Urgent commentary (earnings + bad capture etc.).
+    if any("🚨" in n for n in commentary or []):
+        return True
+    # Credit window closing / debit-only — "act while a credit remains".
+    try:
+        _cw = (((snapshot_data or {}).get("_credit_windows") or {})
+               .get(review.get("contract")) or {})
+        if _cw.get("state") in ("closing", "debit_only"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _truncate_phrase(text: str, limit: int = 90) -> str:
+    s = " ".join(str(text or "").split())
+    if len(s) <= limit:
+        return s
+    cut = s[:limit].rsplit(" ", 1)[0].rstrip(",;:—-")
+    return cut + "…"
+
+
 def render_watch_with_commentary(
     equity_reviews: list,
     options_reviews: list,
     snapshot_data: dict,
+    compact: bool = False,
 ) -> list[str]:
     """
     Render watch panel with per-option commentary inline.
@@ -199,6 +247,10 @@ def render_watch_with_commentary(
     Args:
         equity_reviews, options_reviews: from briefing steps
         snapshot_data: portfolio snapshot
+        compact: 2026-08-06 length diet — HOLD-family option positions
+            collapse to one summary line (position, P&L, capture %, verdict
+            + one-phrase why); positions whose advisor recommends an action
+            keep the full block. Default False = legacy byte-identical.
 
     Returns:
         markdown lines ready to concatenate
@@ -219,7 +271,9 @@ def render_watch_with_commentary(
             _eq_rsi = rsi_discipline.rsi_for(ticker, technicals)
             _eq_rsi_suffix = f"  · {rsi_discipline.tag(_eq_rsi)}" if _eq_rsi is not None else ""
             lines.append(f"- **{ticker}** @ ${price:.2f} — {weight:.1f}% ({pl_pct:+.1f}%) → **{rec}**{_eq_rsi_suffix}")
-            if third_party:
+            # Compact: the third-party sub-bullet duplicates the 🅿️ chip the
+            # annotation post-pass appends to the header — skip it.
+            if third_party and not compact:
                 lines.append(f"  - {third_party}")
         lines.append("")
 
@@ -269,6 +323,35 @@ def render_watch_with_commentary(
             if opt_rsi is not None:
                 header += f"  · {rsi_discipline.tag(opt_rsi)}"
 
+            # Commentary (computed before the compact branch so the
+            # 🚨-urgent check can inspect it).
+            commentary = generate_commentary(review, snapshot_data, equity_reviews)
+
+            # ── Compact mode (2026-08-06): HOLD-family, nothing urgent →
+            # ONE summary line (position · P&L · capture % · verdict + one-
+            # phrase why). The position is always present — never dropped.
+            if compact and not _watch_needs_full_block(review, commentary,
+                                                       snapshot_data):
+                summary = header
+                if pl_dollars is not None and pl_pct is not None:
+                    pl_s = (f"+${pl_dollars:,.0f}" if pl_dollars > 0
+                            else f"-${abs(pl_dollars):,.0f}")
+                    summary += f" · P&L {pl_s} ({pl_pct:+.0f}% captured)"
+                summary += f" → **{rec or 'HOLD'}**"
+                why = None
+                if commentary:
+                    why = commentary[0]
+                elif review.get("rationale"):
+                    why = review.get("rationale")
+                elif cell:
+                    from render.panels import _humanize_matrix_cell
+                    why = _humanize_matrix_cell(cell)
+                if why:
+                    summary += f" — {_truncate_phrase(why)}"
+                lines.append(summary)
+                lines.append("")
+                continue
+
             lines.append(header)
 
             # P&L line
@@ -282,7 +365,6 @@ def render_watch_with_commentary(
                 lines.append(f"  • {rsi_note}")
 
             # Commentary
-            commentary = generate_commentary(review, snapshot_data, equity_reviews)
             for note in commentary:
                 lines.append(f"  • {note}")
 

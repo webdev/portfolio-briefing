@@ -183,7 +183,13 @@ def _pick_csp_strike(put_rows: list, spot: float,
                 )
                 if in_env:
                     r = dict(r)
-                    r["mv_anchor"] = f"💰 Light Buy ${_lb:,.0f}"
+                    # ONE MV anchor grammar (2026-08-06 attribution
+                    # decoration) — single formatter in moneyvest_chip.
+                    try:
+                        from analysis.moneyvest_chip import format_mv_anchor
+                        r["mv_anchor"] = format_mv_anchor("Light Buy", _lb)
+                    except ImportError:  # pragma: no cover - standalone
+                        r["mv_anchor"] = f"💰 MV Light Buy ${_lb:,.0f}"
                     return r
 
     # Prefer rows with real delta (E*TRADE always provides it)

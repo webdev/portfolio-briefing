@@ -88,7 +88,14 @@ def _make_snapshot():
         "quotes": {
             "SPY": {"last": 600.0},
             "VIX": {"last": 28.0},
-            "GOOG": {"last": 280.0},
+            # 460 > the $450 short-call strike: genuinely ITM, so the
+            # moneyness-based roll gate (hard rule #3 — the Action List
+            # surfaces EXECUTE ROLL only on genuine assignment risk) lets
+            # the $2,300-credit roll through. The old 280 quote left the
+            # call 38% OTM, which rule #3 correctly defers to HOLD — the
+            # fixture predated that discipline (observed 2026-08-06:
+            # "EXECUTE ROLL missing despite $2300 credit roll candidate").
+            "GOOG": {"last": 460.0},
             "NVDA": {"last": 200.0},
             "MSFT": {"last": 420.0},
             "MU": {"last": 95.0},
