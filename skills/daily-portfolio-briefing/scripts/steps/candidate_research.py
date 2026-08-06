@@ -18,6 +18,7 @@ state file (``state/scout_verdicts.yaml``, 12-entry-pipeline-spec §4/§7) that
 from __future__ import annotations
 
 import sys
+from dataclasses import replace as _dc_replace
 from datetime import date
 from pathlib import Path
 
@@ -58,7 +59,17 @@ def _status(r: dict, rsi_th: dict):
     if side is None:
         return ("avoid" if verdict.upper().startswith("AVOID") else "watch"), None
     rv = rsi_discipline.hook(side, r.get("rsi_14"), rsi_th)
-    return ("held_rsi" if rv.removed else "candidate"), rv
+    if rv.removed:
+        return "held_rsi", rv
+    # Extended-band demotion (rule #43): a candidate CSP entry with RSI 60-70
+    # is "extended — wait for a pullback" — routed to the held-by-RSI bucket
+    # with the ⏸ wait reason instead of an actionable entry card. The scout's
+    # BUY-rec override does not resurrect it (asymmetric framework, rule #11).
+    if side == rsi_discipline.PUT:
+        wait = rsi_discipline.put_extended_wait(r.get("rsi_14"), rsi_th)
+        if wait:
+            return "held_rsi", _dc_replace(rv, decision="wait", reason=wait)
+    return "candidate", rv
 
 
 # DCF/FV estimates farther than this from spot trigger the sanity check

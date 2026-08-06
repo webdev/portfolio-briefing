@@ -47,6 +47,7 @@ from steps.aggregate import aggregate_briefing
 from steps.quality_gate import run_quality_gate
 from steps.deliver import deliver_briefing
 from analysis.capacity_gates import evaluate_gates
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 
 
 def main():
@@ -467,6 +468,10 @@ def main():
             _recs_map = {(r.get("ticker") or "").upper(): r
                         for r in (recommendations_list or []) if r.get("ticker")}
             # FMP fair values — best-effort read from the cache
+            # (snap_root = the snapshot ROOT dir, parent of the dated dir —
+            #  regression 2026-08-04: this name was never defined here and
+            #  the whole rotation advisor died with NameError every run.)
+            snap_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
             _fv_by_ticker = {}
             _fv_cache = snap_root / "intrinsic_value_cache.json"
             if _fv_cache.exists():
@@ -538,6 +543,25 @@ def main():
         if isinstance(briefing_json, dict):
             briefing_json["rotation_opportunities"] = rotation_opportunities
 
+        # Step 8.8: CSP rotation recommender (task #20). The computation runs
+        # INSIDE aggregate_briefing (it needs the full analytics dict for
+        # coverage + expiration-bucket math) and lands in
+        # briefing_json["csp_rotations"]. Here we guarantee the key exists for
+        # downstream consumers (webapp Rotations tab) and log the result.
+        # Fail-open: any error leaves csp_rotations = [] and never blocks.
+        try:
+            csp_rotations = []
+            if isinstance(briefing_json, dict):
+                csp_rotations = briefing_json.get("csp_rotations")
+                if not isinstance(csp_rotations, list):
+                    csp_rotations = []
+                briefing_json["csp_rotations"] = csp_rotations
+            print(f"[Step 8.8] CSP rotations: {len(csp_rotations)} "
+                  f"coverage-neutral swap(s) surfaced")
+        except Exception as e:
+            csp_rotations = []
+            print(f"[csp-rotation] failed (non-fatal): {e}", file=sys.stderr)
+
         # Step 9: Quality gate
         print("[Step 9] Running quality gate...")
         quality_issues = run_quality_gate(briefing_markdown)
@@ -576,7 +600,7 @@ def main():
 
         json_output_path = actual_output_path.with_suffix(".json")
         with open(json_output_path, "w") as f:
-            json.dump(briefing_json, f, indent=2)
+            json.dump(briefing_json, f, indent=2, default=json_default)
 
         # Persist the recommendation-aging state (skipped on --dry-run above,
         # so re-renders never double-increment days_flagged).

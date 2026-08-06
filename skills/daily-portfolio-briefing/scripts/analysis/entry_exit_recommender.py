@@ -130,6 +130,12 @@ def directive_hold_tickers(memory_text: str | None) -> set[str]:
     mentioned in past LLM reviews don't become accidental TRIM suppressors.
     A bullet counts when its text signals a hold ("hold", "not ready to
     sell", "don't", "stop").
+
+    NOTE (bug #25): this is the TICKER-level scan (TRIM/EXIT suppression,
+    playbook close-side). CONTRACT-level directives with machine-readable
+    release conditions ("until capture > 55% AND DTE < 90d") live in
+    ``analysis.advisor_directives`` — complementary, not duplicates; see
+    that module's docstring before consolidating.
     """
     if not memory_text:
         return set()
@@ -218,7 +224,13 @@ def recommend(
     ticker = (ticker or "").upper()
     params = load_params(config)
     held_long = position_state == "long_shares"
-    core = {str(t).upper() for t in ((config or {}).get("core_positions") or [])}
+    # 2026-08-04 (PLTR): core = core_positions ∪ Tier A — the EXIT_URGENT →
+    # TRIM override protects Tier A conviction names too.
+    try:
+        from analysis.position_tiers import core_union as _core_union
+        core = _core_union(config or {})
+    except Exception:
+        core = {str(t).upper() for t in ((config or {}).get("core_positions") or [])}
     directive_holds = directive_holds or set()
 
     rsi = _g(tech_snapshot, "rsi_14")

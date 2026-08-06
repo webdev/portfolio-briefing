@@ -77,6 +77,16 @@ cells:
     decision: CLOSE_FOR_PROFIT
     rationale: "SHORT DTE approaching. Close at 55%+ profit (wheel sweet spot)."
 
+  # Task #38 (4c): explicit hold — previously a silent DEFAULT_HOLD.
+  - id: "PUT_NORMAL_MOD_OTM_SHORT_DTE_HOLD"
+    moneyness: MODERATE_OTM
+    dte_band: SHORT_DTE
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_max: 0.55
+    decision: HOLD
+    rationale: "Moderately OTM inside 21 DTE with under 55% captured — let theta finish the job; watch for a strike test."
+
   # SHORT PUT - NORMAL regime - NEAR ATM
   - id: "PUT_NORMAL_NEAR_ATM_ROLL_OUT"
     moneyness: NEAR_ATM
@@ -88,6 +98,49 @@ cells:
     decision: ROLL_OUT
     rationale: "NEAR ATM with moderate profit. Roll out for more time."
 
+  # Task #38 (4b): the MU Jul-22 gap — a TESTED put with low/negative profit
+  # matched NO cell and fell to DEFAULT_HOLD while the credit-roll window was
+  # at its widest. Even with the strike-tested guardrail disabled, this cell
+  # closes the fall-through.
+  # TSM 2026-07-30 fix: the walker's NEAR_ATM band is "within 8% above the
+  # strike" — far wider than a genuine test. delta_min requires a real test
+  # (measured |δ| ≥ 0.40, or — when the chain carried no delta — spot within
+  # 3% of the strike, mirroring the strike-tested guardrail). A 6%-above
+  # δ-0.10 put is theta working, not a test, and must NOT match this cell.
+  - id: "PUT_NORMAL_NEAR_ATM_UNDERWATER_ROLL"
+    moneyness: NEAR_ATM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_max: 0.30
+    delta_min: 0.40
+    delta_fallback_band_pct: 0.03
+    decision: ROLL_OUT_AND_DOWN
+    rationale: "Strike being tested with under 30% captured — roll down-and-out while extrinsic is peak; credit rolls are biggest at the test, debits after."
+
+  # Companion explicit hold: NEAR_ATM band but NOT genuinely tested (spot
+  # >3% above strike with |δ| < 0.40). Fully OTM, 100% extrinsic decaying
+  # in the holder's favor — the correct action is HOLD, not a debit roll.
+  - id: "PUT_NORMAL_NEAR_ATM_UNDERWATER_HOLD"
+    moneyness: NEAR_ATM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_max: 0.30
+    decision: HOLD
+    rationale: "Inside the NEAR_ATM band but the strike is not genuinely tested (|δ| < 0.40, spot >3% above strike) — 100% extrinsic decaying in your favor; hold and re-evaluate on a genuine test."
+
+  # Task #38 (4c): NEAR_ATM with most of max profit banked — take it rather
+  # than hold a tested strike for the last fraction of premium.
+  - id: "PUT_NORMAL_NEAR_ATM_TAKEPROFIT"
+    moneyness: NEAR_ATM
+    dte_band: [MID_DTE, LONG_DTE]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_min: 0.50
+    decision: CLOSE_FOR_PROFIT
+    rationale: "Strike under test with 50%+ already captured — take the win; re-enter lower if the thesis holds."
+
   - id: "PUT_NORMAL_NEAR_ATM_SHORT_DTE_CLOSE"
     moneyness: NEAR_ATM
     dte_band: [SHORT_DTE, EXPIRY_WEEK]
@@ -96,6 +149,18 @@ cells:
     profit_min: 0.25
     decision: CLOSE_FOR_PROFIT
     rationale: "NEAR ATM in expiry week. Close at 25%+ profit."
+
+  # Task #38 (4c): tested near expiry with little/no profit — the gamma-week
+  # decision zone. Never a silent hold; the briefing's forced-decision item
+  # escalates this to roll / close / accept-assignment directive.
+  - id: "PUT_NORMAL_NEAR_ATM_SHORT_DTE_TESTED"
+    moneyness: NEAR_ATM
+    dte_band: [SHORT_DTE, EXPIRY_WEEK]
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    profit_max: 0.25
+    decision: ROLL_OUT_AND_DOWN
+    rationale: "Tested at/near the strike inside 21 DTE with under 25% captured — gamma week approaching: roll down-and-out, close, or file an accept-assignment directive."
 
   # SHORT PUT - NORMAL regime - ITM
   - id: "PUT_NORMAL_ITM_BULLISH_ROLL_DOWN"
@@ -107,13 +172,26 @@ cells:
     decision: ROLL_OUT_AND_DOWN
     rationale: "ITM but BULLISH. Roll down-and-out to defend."
 
+  # Task #38 (4a): decision/rationale aligned with rule #42 — on a short put
+  # the defensive roll is DOWN-and-out (cuts assignment risk and obligation);
+  # same-strike-out only if you actively want the assignment at this basis.
   - id: "PUT_NORMAL_ITM_NEUTRAL_ROLL_OUT"
     moneyness: ITM
     dte_band: [MID_DTE, LONG_DTE]
     outlook: NEUTRAL
     regime: NORMAL
-    decision: ROLL_OUT
-    rationale: "ITM NEUTRAL. Roll out for time, keep strike."
+    decision: ROLL_OUT_AND_DOWN
+    rationale: "ITM — roll down-and-out to cut assignment risk; same-strike-out only if you want the assignment at this basis."
+
+  # Task #38 (4c): ITM inside 21 DTE previously fell to DEFAULT_HOLD —
+  # exactly the window where extrinsic drains fastest and rolls get dearest.
+  - id: "PUT_NORMAL_ITM_SHORT_DTE_TESTED"
+    moneyness: ITM
+    dte_band: SHORT_DTE
+    outlook: [NEUTRAL, BULLISH]
+    regime: NORMAL
+    decision: ROLL_OUT_AND_DOWN
+    rationale: "ITM inside 21 DTE — decide now: roll down-and-out while extrinsic remains, close, or accept assignment; waiting into gamma week only raises the price."
 
   - id: "PUT_NORMAL_ITM_EXPIRY_WEEK"
     moneyness: ITM
@@ -123,6 +201,18 @@ cells:
     profit_min: 0.10
     decision: TAKE_ASSIGNMENT
     rationale: "ITM in expiry week. Take assignment and sell covered call."
+
+  # Task #38 (4c): underwater ITM in expiry week previously fell to
+  # DEFAULT_HOLD. The honest menu is assignment (own at strike − premium) or
+  # buy back; rolling in gamma week costs the most.
+  - id: "PUT_NORMAL_ITM_EXPIRY_WEEK_UNDERWATER"
+    moneyness: ITM
+    dte_band: EXPIRY_WEEK
+    outlook: [BULLISH, NEUTRAL]
+    regime: NORMAL
+    profit_max: 0.10
+    decision: TAKE_ASSIGNMENT
+    rationale: "Underwater ITM in expiry week — accept assignment at your basis (strike − premium) or buy back; a gamma-week roll is the most expensive repair."
 
   # SHORT PUT - CAUTION regime
   - id: "PUT_CAUTION_MOD_OTM"

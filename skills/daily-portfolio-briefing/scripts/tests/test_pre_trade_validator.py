@@ -312,6 +312,34 @@ def test_strike_at_support_no_warn():
     assert "STRIKE_NOT_AT_SUPPORT" not in rules
 
 
+def test_strike_float_warn_says_no_multi_touch_within_5pct():
+    """Task #31 sharpening: the float case names the precise failure —
+    'no ≥2-touch support cluster within 5%', not just 'not anchored'."""
+    ctx = _csp(
+        strike=150.0,
+        spot=190.0,
+        sr_payload={"supports": [{"price": 175.0, "touches": 3}]},
+    )
+    findings = ptv.validate_proposed_trade(ctx)
+    f = next(x for x in findings if x.rule_id == "STRIKE_NOT_AT_SUPPORT")
+    assert "no ≥2-touch support cluster within 5%" in f.reason
+
+
+def test_strike_single_touch_anchor_warns_with_level_named():
+    """Task #31 sharpening: a strike anchored ONLY to a 1-touch level (e.g.
+    the bare 52w-low) now WARNS and names the level — proximity alone is
+    not an anchor (the CRWV $75P-on-$77-single-touch read)."""
+    ctx = _csp(
+        strike=75.0,
+        spot=90.0,
+        sr_payload={"supports": [{"price": 77.0, "touches": 1}]},
+    )
+    findings = ptv.validate_proposed_trade(ctx)
+    f = next(x for x in findings if x.rule_id == "STRIKE_NOT_AT_SUPPORT")
+    assert f.severity == ptv.SEV_WARN
+    assert "anchored only to a 1-touch cluster at $77" in f.reason
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Composite scenarios — pin the actual case-studies
 # ─────────────────────────────────────────────────────────────────────────────
@@ -650,3 +678,87 @@ def test_tier_a_block_is_separate_from_naked_call_block():
     rules = [f.rule_id for f in findings]
     assert "COVERED_CALL_TIER_VIOLATION" in rules
     assert "NAKED_CALL_EXPOSURE" not in rules  # coverage is fine, just policy
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug #23 — projected_state (rotation playbook Phase 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_cash_floor_uses_projected_when_provided():
+    """Bug #23 symptom: 'every candidate hits 🚫 BLOCK (CASH_FLOOR) — 4.6% NLV
+    < 5% floor', but that block is TRUE pre-close and FALSE post-Phase-1.
+    With projected_state, the cash-floor gate reads the PROJECTED cash."""
+    ctx = _csp(nlv=1_000_000.0, cash=46_000.0)   # 4.6% — blocks pre-close
+    assert (ptv.SEV_BLOCK, "CASH_FLOOR") in [
+        (f.severity, f.rule_id) for f in ptv.validate_proposed_trade(ctx)]
+    # Projected post-close: 46K + 184.5K freed = 230.5K = 23% NLV → passes.
+    findings = ptv.validate_proposed_trade(
+        ctx, projected_state={"nlv": 1_000_000.0, "cash": 230_500.0})
+    assert "CASH_FLOOR" not in [f.rule_id for f in findings]
+    # And the projection can also make it WORSE — a bad projected cash blocks
+    # even when the pre-close ctx cash looks fine.
+    ctx2 = _csp(nlv=1_000_000.0, cash=200_000.0)
+    findings2 = ptv.validate_proposed_trade(
+        ctx2, projected_state={"nlv": 1_000_000.0, "cash": 30_000.0})
+    assert (ptv.SEV_BLOCK, "CASH_FLOOR") in [
+        (f.severity, f.rule_id) for f in findings2]
+
+
+def test_entry_gates_use_projected_coverage_when_provided():
+    """Projected coverage above the 0.50× floor reopens the gate that the
+    stale pre-close ratio would have closed."""
+    ctx = _csp(stress_coverage=0.10)              # closed pre-close
+    findings = ptv.validate_proposed_trade(
+        ctx, projected_state={"coverage_ratio": 0.55})
+    assert "ENTRY_GATES_CLOSED" not in [f.rule_id for f in findings]
+    # Missing projected coverage → gate silenced (fail-open), never falls
+    # back to the stale pre-close 0.10×.
+    findings2 = ptv.validate_proposed_trade(ctx, projected_state={})
+    assert "ENTRY_GATES_CLOSED" not in [f.rule_id for f in findings2]
+
+
+def test_earnings_window_ignores_projected_state():
+    """Position-shape gates are NOT sensitive to projected state — earnings
+    inside the contract window blocks no matter how much cash Phase 1 frees."""
+    today = date.today()
+    ctx = _csp(
+        expiration=today + timedelta(days=35),
+        earnings_date=today + timedelta(days=9),
+    )
+    findings = ptv.validate_proposed_trade(
+        ctx,
+        projected_state={"nlv": 1_000_000.0, "cash": 500_000.0,
+                         "coverage_ratio": 2.0},
+    )
+    assert (ptv.SEV_BLOCK, "EARNINGS_WINDOW") in [
+        (f.severity, f.rule_id) for f in findings]
+
+
+def test_projected_state_none_is_byte_identical():
+    """projected_state=None → current behavior, byte-identical findings."""
+    ctx = _csp(nlv=1_000_000.0, cash=20_000.0, stress_coverage=0.11)
+    base = ptv.validate_proposed_trade(ctx)
+    with_kwarg = ptv.validate_proposed_trade(ctx, projected_state=None)
+    assert [(f.severity, f.rule_id, f.reason, f.detail) for f in base] == \
+           [(f.severity, f.rule_id, f.reason, f.detail) for f in with_kwarg]
+
+
+def test_bucket_gate_uses_projected_map_when_provided():
+    """The bucket gate reads the PROJECTED per-date obligation map — a bucket
+    the Phase-1 closes empty no longer blocks; a missing map silences the
+    gate rather than re-blocking on the pre-close book."""
+    today = date(2026, 6, 15)
+    exp = today + timedelta(days=35)
+    ctx = _csp(expiration=exp,
+               obligation_by_expiration={exp: 340_000.0})   # 34% + new → crit
+    assert "EXPIRATION_BUCKET_CRITICAL" in [
+        f.rule_id for f in ptv.validate_proposed_trade(ctx)]
+    # Post-close the bucket is nearly empty → no block.
+    findings = ptv.validate_proposed_trade(
+        ctx, projected_state={"nlv": 1_000_000.0, "cash": 300_000.0,
+                              "obligation_by_expiration": {exp: 40_000.0}})
+    assert "EXPIRATION_BUCKET_CRITICAL" not in [f.rule_id for f in findings]
+    # Projection without a map → bucket gate silent (fail-open).
+    findings2 = ptv.validate_proposed_trade(
+        ctx, projected_state={"nlv": 1_000_000.0, "cash": 300_000.0})
+    assert "EXPIRATION_BUCKET_CRITICAL" not in [f.rule_id for f in findings2]

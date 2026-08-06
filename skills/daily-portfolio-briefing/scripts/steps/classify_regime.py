@@ -12,6 +12,8 @@ wired (v1.1) — they're optional inputs the framework already supports.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 from datetime import datetime
 from pathlib import Path
 
@@ -84,7 +86,7 @@ def classify_regime(snapshot_dir: Path, snapshot_data: dict) -> dict:
             "valid": False,
         }
         with open(snapshot_dir / "regime.json", "w") as f:
-            json.dump(regime_output, f, indent=2)
+            json.dump(regime_output, f, indent=2, default=json_default)
         print(f"  Regime: {regime_output['regime']} (LOW confidence — VIX unavailable)")
         return regime_output
 
@@ -172,7 +174,7 @@ def classify_regime(snapshot_dir: Path, snapshot_data: dict) -> dict:
     }
 
     with open(snapshot_dir / "regime.json", "w") as f:
-        json.dump(regime_output, f, indent=2)
+        json.dump(regime_output, f, indent=2, default=json_default)
 
     print(f"  Regime: {regime_output['regime']} (confidence: {confidence}) — {fired_rule[1]}")
     if sticky_carry:

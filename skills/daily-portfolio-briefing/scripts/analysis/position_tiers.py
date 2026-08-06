@@ -29,6 +29,20 @@ from __future__ import annotations
 
 import re
 
+# Shared rule-#27 exclusion list (same helper as parkev_chip /
+# intrinsic_value): labelled sub-lines and continuation lines never get a
+# badge AND never reset the parent-ticker context.
+try:
+    from analysis import line_exclusions
+except ImportError:  # pragma: no cover - standalone fallback
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    try:
+        from analysis import line_exclusions
+    except ImportError:
+        import line_exclusions  # type: ignore
+
 
 # Tier-name constants — single source of truth so downstream code doesn't
 # scatter raw 'A' / 'B' / 'C' literals around.
@@ -179,6 +193,43 @@ def tier_for(ticker: str, config: dict | None) -> str:
     if tk in _normalize_tier_list(block.get("tier_c_active")):
         return TIER_C
     return _DEFAULT_TIER
+
+
+def core_union(config: dict | None) -> set[str]:
+    """`core_positions` ∪ `position_tiers.tier_a_core` — the single source of
+    "core" conviction (upper-cased ticker set).
+
+    Origin (2026-08-04 briefing audit): PLTR is Tier A in `position_tiers`
+    but was never added to `core_positions`, so the SAME run rendered
+    "CLOSE PLTR_CALL_200 — Loss stop 2.46x" (the core never-close-short-
+    calls override didn't fire) and "TRIM PLTR — 10.6% NLV (over 10% cap)"
+    while Risk Alerts said "GOOG 15.5% — within Tier A bounds (cap 22%)".
+    Tier A IS core conviction — every consumer of `core_positions` (loss-stop
+    CLOSE override, TRIM generators, roll tenor caps, EXIT→TRIM overrides,
+    red-flag core exemptions) must read this union, not the raw list.
+
+    Fail-open: missing/empty config → whatever half is present (possibly the
+    empty set), never an error.
+    """
+    out: set[str] = set()
+    if isinstance(config, dict):
+        raw = config.get("core_positions") or []
+        if isinstance(raw, (list, tuple, set, frozenset)):
+            for t in raw:
+                if isinstance(t, str) and t.strip():
+                    out.add(t.upper().strip())
+        elif isinstance(raw, str) and raw.strip():
+            out.add(raw.upper().strip())
+    out |= _normalize_tier_list(_position_tiers_block(config).get("tier_a_core"))
+    return out
+
+
+def is_core_ticker(ticker: str, config: dict | None) -> bool:
+    """True when the ticker carries core protections — listed in
+    `core_positions` OR classified Tier A. See :func:`core_union`."""
+    if not ticker or not isinstance(ticker, str):
+        return False
+    return ticker.upper().strip() in core_union(config)
 
 
 def cc_settings_for_tier(tier: str, config: dict | None) -> dict:
@@ -338,19 +389,27 @@ def is_cc_enabled_for_tier(tier: str, config: dict | None,
 
     Tier B / C default to True. Ticker override is Tier A only — for
     Tier B/C, the ticker parameter is ignored.
+
+    Rule-#43 fix (2026-07-31): for Tier A, a non-empty
+    `willing_to_write_cc_on` whitelist is REQUIRED regardless of the
+    `enabled` flag. The 2026-07-07 config set `tier_a.enabled: true`
+    intending "opt-in names only", but the old logic short-circuited on
+    `enabled` and green-lit EVERY Tier A name — the observed AMZN
+    "✅ READY TO WRITE" bug. With a whitelist present, membership gates;
+    no ticker context → disabled (fail-closed on the compounder side).
+    Without a whitelist, the `enabled` flag drives it (legacy).
     """
     settings = cc_settings_for_tier(tier, config)
     base_enabled = bool(settings.get("enabled", True))
-    if base_enabled:
-        return True
-    # Tier A opt-in check
-    if tier and tier.upper() == "A" and ticker:
-        whitelist = settings.get("willing_to_write_cc_on") or []
-        if isinstance(whitelist, list):
-            whitelist_upper = {str(t).upper() for t in whitelist}
-            if ticker.upper() in whitelist_upper:
-                return True
-    return False
+    if (tier or "").upper().strip() == TIER_A:
+        whitelist_upper = _normalize_tier_list(
+            settings.get("willing_to_write_cc_on")
+        )
+        if whitelist_upper:
+            # Whitelist present → per-name opt-in is the ONLY way in.
+            return bool(ticker) and str(ticker).upper().strip() in whitelist_upper
+        return base_enabled
+    return base_enabled
 
 
 def concentration_cap_for_tier(tier: str, config: dict | None) -> float:
@@ -425,13 +484,18 @@ _NON_TICKER_TOKENS = frozenset({
     "S", "R", "P", "C", "A", "B", "K", "M", "T",
     # Tier labels — could appear on lines we're trying to annotate
     "TIER",
+    # Briefing vocabulary that leaked as tickers on sub-lines (2026-07-30):
+    # "⚠ LT verdict" → LT, "E*TRADE" → TRADE, "Stock-replacement LEAP" → LEAP,
+    # "TOP STOCK" chip → STOCK, "S/R" → SR.
+    "LT", "LEAP", "TRADE", "STOCK", "SR",
 })
 
 
-def _extract_ticker(line: str) -> str | None:
-    """Find the first plausible ticker on the line, using the same
-    precedence as parkev_chip._extract_ticker (backticks > bold > options-
-    prefix > bare). Returns None if nothing plausible is found."""
+def _extract_ticker_high_confidence(line: str) -> str | None:
+    """Ticker extraction WITHOUT the bare-token fallback — backticks, bold,
+    or options-prefix only. Used for indented continuation lines, where the
+    bare fallback grabs chip vocabulary ("TOP STOCK" → "STOCK") and
+    mis-tiers the line."""
     m = _TICKER_BACKTICK.search(line)
     if m:
         return m.group(1)
@@ -441,6 +505,16 @@ def _extract_ticker(line: str) -> str | None:
     m = _TICKER_OPT.search(line)
     if m and m.group(1) not in _NON_TICKER_TOKENS:
         return m.group(1)
+    return None
+
+
+def _extract_ticker(line: str) -> str | None:
+    """Find the first plausible ticker on the line, using the same
+    precedence as parkev_chip._extract_ticker (backticks > bold > options-
+    prefix > bare). Returns None if nothing plausible is found."""
+    tk = _extract_ticker_high_confidence(line)
+    if tk:
+        return tk
     for tok in _TICKER_BARE.findall(line):
         if tok not in _NON_TICKER_TOKENS and len(tok) >= 2:
             return tok
@@ -473,10 +547,44 @@ def annotate_tier_badges(md: str, config: dict | None) -> str:
     if not _position_tiers_block(config):
         return md
     out_lines = []
+    # Ticker context from the most recent top-level line. Indented chip
+    # continuation lines (e.g. the Watch third-party sub-bullet
+    # "  - 🅿️ TOP STOCK · …") carry NO ticker of their own — the bare-token
+    # fallback used to extract chip vocabulary ("TOP STOCK" → "STOCK") and
+    # tier_for("STOCK") returned the Tier C default, so the SAME card showed
+    # "🟢 Tier A" on the META header and "🔵 Tier C" on the chip line
+    # (2026-07-29 briefing). Continuation lines now inherit the parent
+    # line's ticker so both badges come from the same tier_for() lookup.
+    parent_ticker: str | None = None
     for line in md.splitlines():
+        stripped = line.lstrip()
+        indented = bool(stripped) and line != stripped
+        excluded = line_exclusions.is_excluded_line(line)
+        if not indented:
+            if not stripped or stripped.startswith("#"):
+                parent_ticker = None  # blank line / heading → context boundary
+            elif not excluded:
+                # Excluded label/continuation lines carry no ticker identity —
+                # never let their prose ("LT verdict", "E*TRADE", "LEAP")
+                # poison the parent-ticker context via the bare fallback.
+                t = _extract_ticker(line)
+                if t:
+                    parent_ticker = t
+        # Labelled sub-lines (Triggers:/Rationale:/Yield/Cost:/Source:/...)
+        # never get a badge, even if a chip somehow landed on them — rule #27.
+        # (Indented chip continuation lines, e.g. the Watch third-party
+        # sub-bullet, still inherit the parent ticker below.)
+        if line_exclusions.label_of(line) in line_exclusions.EXCLUDED_LABELS:
+            out_lines.append(line)
+            continue
         # Must have a Parkev chip already AND not already have a tier badge.
         if _PARKEV_MARK in line and not _TIER_BADGE_RE.search(line):
-            tk = _extract_ticker(line)
+            if indented:
+                # High-confidence extraction on the line itself wins; else
+                # inherit the parent ticker; never the bare-token fallback.
+                tk = _extract_ticker_high_confidence(line) or parent_ticker
+            else:
+                tk = _extract_ticker(line)
             if tk:
                 tier = tier_for(tk, config)
                 badge = format_tier_badge(tier)

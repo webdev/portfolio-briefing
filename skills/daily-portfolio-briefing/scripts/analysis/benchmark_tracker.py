@@ -373,17 +373,48 @@ def compute_benchmark(current_nlv: float,
 # I/O wrappers (fail-open)
 # ---------------------------------------------------------------------------
 
-def load_nlv_history(snapshot_root: Path) -> dict[date, float]:
-    """Read {date: NLV} from every dated snapshot dir's balance.json.
+def balance_nlv(bal: dict) -> float | None:
+    """Preferred NLV from a balance.json dict.
 
-    Skips ``.test`` dirs (fixture/dry-run snapshots must never pollute the
-    return series), non-date dirs, and unreadable/zero balances. Never raises.
+    ``accountValue_corrected`` (written by scripts/recompute_nlv_history.py —
+    the option-mark-inclusive recompute) wins over the original
+    ``accountValue``; longMarketValue + cash is the last-resort fallback.
+    Never overwrites anything — the migration stores corrected ALONGSIDE the
+    original, and this reader simply prefers it.
     """
+    try:
+        nlv = bal.get("accountValue_corrected")
+        if nlv is None:
+            nlv = bal.get("accountValue")
+        if nlv is None:
+            nlv = (bal.get("longMarketValue") or 0) + (bal.get("cash") or 0)
+        return float(nlv)
+    except (TypeError, ValueError):
+        return None
+
+
+def balance_option_inclusive(bal: dict) -> bool:
+    """True when this balance's NLV already includes signed option marks —
+    either the broker-true era (optionMarketValue / nlv_reconciliation
+    present, 2026-08-04 onward) or a migrated snapshot
+    (accountValue_corrected present)."""
+    if not isinstance(bal, dict):
+        return False
+    return (bal.get("accountValue_corrected") is not None
+            or bal.get("optionMarketValue") is not None
+            or bool(bal.get("nlv_reconciliation")))
+
+
+def load_nlv_history_meta(snapshot_root: Path) -> tuple[dict[date, float], set]:
+    """Like :func:`load_nlv_history` but also returns the set of dates whose
+    NLV is NOT option-mark-inclusive (old-era snapshots the migration could
+    not correct). Used by the ``nlv_rebase_dates`` belt-and-suspenders."""
     out: dict[date, float] = {}
+    uncorrected: set = set()
     try:
         root = Path(snapshot_root)
         if not root.exists():
-            return out
+            return out, uncorrected
         for child in root.iterdir():
             if not child.is_dir() or not _DATE_DIR_RE.match(child.name):
                 continue
@@ -393,18 +424,57 @@ def load_nlv_history(snapshot_root: Path) -> dict[date, float]:
             bal_path = child / "balance.json"
             try:
                 bal = json.loads(bal_path.read_text(encoding="utf-8"))
-                nlv = bal.get("accountValue")
-                if nlv is None:
-                    nlv = (bal.get("longMarketValue") or 0) + (bal.get("cash") or 0)
-                nlv = float(nlv)
-                if nlv > 0:
+                nlv = balance_nlv(bal)
+                if nlv is not None and nlv > 0:
                     out[d] = nlv
+                    if not balance_option_inclusive(bal):
+                        uncorrected.add(d)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
     except Exception as e:  # noqa: BLE001
         print(f"    [warn] benchmark_tracker: NLV history load failed: {e}",
               file=sys.stderr)
-    return out
+    return out, uncorrected
+
+
+def load_nlv_history(snapshot_root: Path) -> dict[date, float]:
+    """Read {date: NLV} from every dated snapshot dir's balance.json.
+
+    Prefers ``accountValue_corrected`` (option-mark-inclusive recompute) over
+    the original ``accountValue`` — mixing the two conventions poisoned the
+    alpha table and attribution residual (2026-08-05 defect: -$65,345
+    unattributed residual from an inflated pre-correction start NLV).
+    Skips ``.test`` dirs (fixture/dry-run snapshots must never pollute the
+    return series), non-date dirs, and unreadable/zero balances. Never raises.
+    """
+    return load_nlv_history_meta(snapshot_root)[0]
+
+
+def rebase_dates_from_config(cfg: dict | None) -> list[date]:
+    """Parse ``benchmark_tracking.nlv_rebase_dates`` (ISO strings) → dates."""
+    out: list[date] = []
+    for raw in ((cfg or {}).get("nlv_rebase_dates") or []):
+        d = _coerce_date(raw)
+        if d is not None:
+            out.append(d)
+    return sorted(out)
+
+
+def effective_rebase_date(hist: dict, uncorrected: set,
+                          rebase_dates: list) -> date | None:
+    """The rebase date to apply, or None.
+
+    A configured rebase date fires ONLY when the correction could not cover
+    the full history — i.e. some snapshot BEFORE the rebase date is still
+    uncorrected (not option-mark-inclusive). When the migration corrected
+    everything, the series is consistent end-to-end and no rebase is needed.
+    """
+    best: date | None = None
+    for rb in rebase_dates or []:
+        if any(d < rb for d in uncorrected if d in hist):
+            if best is None or rb > best:
+                best = rb
+    return best
 
 
 def fetch_benchmark_closes(ticker: str = DEFAULT_BENCHMARK_TICKER,
@@ -465,13 +535,27 @@ def compute_benchmark_from_root(current_nlv: float, snapshot_root: Path,
         cfg = config or {}
         ticker = str(cfg.get("benchmark_ticker") or DEFAULT_BENCHMARK_TICKER)
         min_snaps = int(cfg.get("min_snapshots_for_report") or DEFAULT_MIN_SNAPSHOTS)
-        hist = load_nlv_history(snapshot_root)
+        hist, uncorrected = load_nlv_history_meta(snapshot_root)
+        # Belt-and-suspenders (nlv_rebase_dates): when the NLV-correction
+        # migration could NOT cover the full history, treat the configured
+        # rebase date as a hard baseline so pre-correction (inflated) NLVs
+        # never mix into the return math. No-op when everything is corrected.
+        rebase_note = ""
+        rb = effective_rebase_date(hist, uncorrected, rebase_dates_from_config(cfg))
+        if rb is not None:
+            dropped = sum(1 for d in hist if d < rb)
+            hist = {d: v for d, v in hist.items() if d >= rb}
+            rebase_note = (f"NLV rebase applied at {rb.isoformat()} — {dropped} "
+                           f"uncorrectable pre-correction snapshot(s) excluded")
         spy = fetch_benchmark_closes(ticker, days=400)
-        return compute_benchmark(
+        report = compute_benchmark(
             current_nlv, hist, spy, as_of=as_of,
             windows=_windows_from_config(cfg),
             min_snapshots=min_snaps, benchmark_ticker=ticker,
         )
+        if rebase_note:
+            report.note = (report.note + "; " if report.note else "") + rebase_note
+        return report
     except Exception as e:  # noqa: BLE001
         return BenchmarkReport(status="unavailable",
                                note=f"benchmark report failed: {e}")

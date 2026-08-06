@@ -6,6 +6,7 @@ Each function returns a list of markdown lines.
 
 from datetime import datetime
 from pathlib import Path
+import re
 import sys
 
 
@@ -45,6 +46,9 @@ def _humanize_matrix_cell(cell_id: str | None) -> str | None:
         # User-set directive override (e.g. DIRECTIVE_SUPPRESS)
         kind = cell.replace("DIRECTIVE_", "").replace("_", " ").lower()
         return f"📌 Directive override ({kind})"
+    if cell == "GUARDRAIL_STRIKE_TESTED":
+        # Task #38: strike-tested pre-matrix guardrail on short puts
+        return "🎯 Strike tested — credit-roll window open; roll down-and-out while extrinsic is peak"
 
     # Parse structured cells: TYPE_REGIME_MONEYNESS_QUAL
     parts = cell.split("_")
@@ -97,6 +101,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adapters"))
 
 from analysis import rsi_discipline  # noqa: E402  (scripts dir on sys.path above)
 from analysis import capacity_gate  # noqa: E402
+from analysis import chase_guard  # noqa: E402
 from analysis import lt_verdict_gate  # noqa: E402
 from analysis import put_overlap_check  # noqa: E402
 
@@ -131,12 +136,19 @@ try:
     from candidate_ranker import rank_candidates  # type: ignore
 except ImportError:
     def rank_candidates(candidates, spot, is_core=False, embedded_tax_dollars=0.0,
-                        min_credit_threshold=1000.0):
-        # Fallback: simple max-credit pick
+                        min_credit_threshold=1000.0, **kwargs):
+        # Fallback: simple max-credit pick (call-side semantics). Side-aware:
+        # never pick a HIGHER strike for a put (deeper ITM = more risk).
+        is_put = (kwargs.get("option_type") or "CALL").upper() == "PUT"
         best = None
         for c in candidates or []:
             if c.get("id") == "A":
                 continue
+            if is_put:
+                cur = float(c.get("current_strike") or 0)
+                new = float(((c.get("instruction") or {}).get("sell_strike")) or 0)
+                if cur and new > cur + 0.01:
+                    continue
             net = c.get("netDollars") or 0
             if net >= min_credit_threshold and (best is None or net > best.get("netDollars", 0)):
                 best = c
@@ -149,12 +161,19 @@ except ImportError:
         return (False, "")
 
 try:
-    from analysis.earnings_guard import check_earnings_conflict, format_earnings_badge  # type: ignore
+    from analysis.earnings_guard import (  # type: ignore
+        check_earnings_conflict,
+        format_earnings_badge,
+        format_new_open_block,
+    )
 except ImportError:
     def check_earnings_conflict(ticker, expiration, earnings_calendar, as_of):
-        return {"conflict": False, "level": "none", "days_to_earnings": None, "message": ""}
+        return {"conflict": False, "level": "none", "days_to_earnings": None,
+                "message": "", "spans_expiration": False, "earnings_date": None}
     def format_earnings_badge(check_result):
         return ""
+    def format_new_open_block(ticker, check_result, expiration):
+        return f"🚫 BLOCK (EARNINGS_WINDOW) — {ticker} contract spans earnings"
 
 try:
     from validate import (  # type: ignore
@@ -190,6 +209,7 @@ def render_header(
     regime_rationale: str = "",
     ytd_pnl: dict = None,
     gate_state=None,
+    balance: dict = None,
 ) -> list:
     """Render header panel with date, regime, portfolio metrics, and YTD P&L if available."""
     cash_pct = (cash / nlv * 100) if nlv else 0
@@ -219,6 +239,19 @@ def render_header(
     if regime_rationale:
         lines.append(f"  - {regime_rationale}")
     lines.append(f"**Portfolio NLV:** ${nlv:,.0f} | **Cash:** ${cash:,.0f} ({cash_pct:.1f}%)")
+    # NLV reconciliation (2026-08-04 bug: rendered $1,149,562 vs the broker's
+    # own $1,082,940.74 — short-option liabilities were dropped from a
+    # reconstructed NLV). When computed and broker NLV diverge > 1%, surface
+    # both numbers right under the figure — never silently ship a
+    # reconstruction that disagrees with broker truth (rules #10/#19).
+    _rec = (balance or {}).get("nlv_reconciliation") or {}
+    if _rec.get("warning"):
+        lines.append(
+            f"🔴 **NLV data-integrity check:** computed NLV "
+            f"${_rec.get('computed_nlv', 0):,.0f} vs broker "
+            f"${_rec.get('broker_nlv', 0):,.0f} — Δ ${_rec.get('delta', 0):+,.0f} "
+            f"({_rec.get('pct', 0):.1f}%); using the broker figure."
+        )
     # Capacity gate banner — printed daily right after the cash line
     # (06-wheel-parameters.md §7A) so the operator never has to compute
     # whether the portfolio has room for new short puts.
@@ -408,6 +441,7 @@ def render_risk_alerts(
     equity_reviews: list, options_reviews: list, regime_data: dict,
     put_buckets: list | None = None,
     config: dict | None = None,
+    credit_window_alerts: list | None = None,
 ) -> list:
     """Real risk alerts — surface anything material from the reviews.
 
@@ -427,6 +461,12 @@ def render_risk_alerts(
     regime = (regime_data or {}).get("regime", "NORMAL")
     if regime in ("CAUTION", "RISK_OFF"):
         alerts.append(f"⚠️ Regime is **{regime}** — new long entries suppressed")
+
+    # Task #38 Part 2: credit-roll window transitions (open→closing /
+    # open→debit_only since the last briefing). Pre-formatted by
+    # analysis.credit_windows.transition_alerts; first-run → empty (fail-open).
+    for cw_alert in (credit_window_alerts or []):
+        alerts.append(cw_alert)
 
     # Put-bucket concentration on a single Friday.
     # Critical (≥30% NLV) gets ⚠️; Warning (≥20% NLV) gets 📊. This is separate
@@ -502,18 +542,50 @@ def render_risk_alerts(
 
     # Options: surface urgent earnings+loss flags AND actionable recommendations
     actionable_decisions = {"CLOSE", "CLOSE_FOR_PROFIT", "ROLL_OUT", "ROLL_OUT_AND_DOWN", "ROLL_OUT_AND_UP", "TAKE_ASSIGNMENT", "LET_EXPIRE"}
+    roll_decisions = {"ROLL_OUT", "ROLL_OUT_AND_DOWN", "ROLL_OUT_AND_UP"}
     for rev in options_reviews:
         rec = rev.get("recommendation", "")
         contract = rev.get("contract", "")
         rationale = rev.get("rationale", "")
 
+        # Task #43 defect 1 (AVGO_PUT_375_20260814, 2026-07-31): the matrix
+        # decision fed this alert unfiltered while the action gate demoted
+        # the SAME roll ("⏸ Roll demoted (nothing to defend) …" in Watch) —
+        # two surfaces contradicting each other on one position. The
+        # demotion notes are computed ONCE in render_action_list (which
+        # runs first and stashes them on the review dicts); the alert
+        # rewrites to reflect the demotion — never hidden (rule #24).
+        # Fail-open: no demotion key (e.g. standalone callers) → the
+        # legacy 🎯 roll alert renders unchanged.
+        _demotion_note = (rev.get("_roll_gate_demotion")
+                          or rev.get("_churn_guard_demotion")
+                          or rev.get("_debit_cap_demotion"))
+
+        # 2026-08-06 defect 2: when the exit-cost verdict CHANGED vs the
+        # prior snapshot (stashed by aggregate's persistence pass), the
+        # alert carries a ⏰ prefix — same convention as the credit-window
+        # transition alerts.
+        _vc_prefix = "⏰ " if rev.get("_verdict_change") else ""
+
         # Check for URGENT earnings+loss flags in the rationale or commentary
         if "🚨 URGENT" in rationale or "earnings" in rationale.lower() and "capture" in rationale.lower() and ("-" in rationale):
-            alerts.insert(0, f"🚨 **URGENT EARNINGS:** {contract} — {rationale[:100]}")
+            alerts.insert(0, f"🚨 **URGENT EARNINGS:** {contract} — {_truncate_at_word(rationale, 100)}")
+        elif rec in roll_decisions and _demotion_note:
+            alerts.append(
+                f"{_vc_prefix}🎯 {contract} → **⏸ ROLL DEMOTED**: "
+                f"{_truncate_at_word(str(_demotion_note), 120)}"
+            )
         elif rec in actionable_decisions:
-            alerts.append(f"🎯 {contract} → **{rec}**: {rationale[:80]}")
+            # Task #43 fix 4 (2026-07-31): word-boundary truncation. Observed
+            # '🎯 PLTR_PUT_130_20270115 → **ROLL_OUT_AND_DOWN**: 🎯 Strike
+            # tested (δ 0.47 ≥ 0.45) with -4% captured and 168 DTE —
+            # credit-roll wind' — the fixed-width [:80] slice cut mid-word
+            # (same class as the task-#40 URGENT-title bug).
+            alerts.append(f"{_vc_prefix}🎯 {contract} → **{rec}**: "
+                          f"{_truncate_at_word(rationale, 80)}")
         elif rec == "ERROR":
-            alerts.append(f"❌ {contract}: advisor error — {rationale[:80]}")
+            alerts.append(f"❌ {contract}: advisor error — "
+                          f"{_truncate_at_word(rationale, 80)}")
 
     if not alerts:
         lines.append("✓ No urgent alerts.")
@@ -525,14 +597,32 @@ def render_risk_alerts(
     return lines
 
 
-def _format_delta_line(delta: float | None, contract_type: str = "") -> str:
-    """Surface the option delta as an assignment-probability proxy."""
+def _format_delta_line(delta: float | None, option_type: str = "",
+                       strike: float | None = None,
+                       spot: float | None = None) -> str:
+    """Surface the option delta as an assignment-probability proxy.
+
+    ITM/OTM is a MONEYNESS fact — strike vs spot for the option type — never
+    a delta-threshold guess (task #37 fix 4b: an $850P with spot $835.83 was
+    labeled "OTM" because |delta| 0.40 < 0.5). The "~N% ITM probability" is
+    |delta|; the ITM/OTM tag only renders when strike AND spot are known —
+    on missing data we omit the tag rather than guess (CLAUDE.md #19).
+    """
     if delta is None:
         return ""
     abs_d = abs(float(delta))
-    direction = "ITM" if abs_d > 0.5 else "OTM"
     prob_pct = abs_d * 100  # rough prob of ITM at expiration
-    return f"Delta {delta:+.2f} (~{prob_pct:.0f}% ITM probability — {direction})"
+    tag = ""
+    try:
+        ot = (option_type or "").upper()
+        s = float(strike or 0)
+        p = float(spot or 0)
+        if s > 0 and p > 0 and ot in ("PUT", "CALL"):
+            itm = (p < s) if ot == "PUT" else (p > s)
+            tag = " — ITM" if itm else " — OTM"
+    except (TypeError, ValueError):
+        tag = ""
+    return f"Delta {delta:+.2f} (~{prob_pct:.0f}% ITM probability{tag})"
 
 
 def _route_account(action_type: str, ticker: str, position_account: str | None,
@@ -694,6 +784,1072 @@ def _strike_from_contract(contract: str, fallback: float | None = None) -> float
     return None
 
 
+def _core_union_safe(config: dict | None) -> set:
+    """core_positions ∪ Tier A (analysis.position_tiers.core_union), with a
+    legacy fallback to the raw core_positions list when the import fails.
+
+    2026-08-04 (PLTR): Tier A conveys core protections everywhere a consumer
+    used to read `core_positions` directly — see position_tiers.core_union.
+    """
+    try:
+        from analysis.position_tiers import core_union
+        return core_union(config or {})
+    except Exception:
+        return set((config or {}).get("core_positions", []) or [])
+
+
+def _tier_b_cap_pct(ticker: str, config: dict | None):
+    """Tier B concentration cap (percent, e.g. 12.0) when the ticker is an
+    EXPLICIT Tier B income name; None otherwise. Tier C (the default for
+    unlisted tickers) keeps the legacy standard cap — the tier framework only
+    loosens caps on an explicit conviction assignment (rule #29)."""
+    try:
+        from analysis.position_tiers import (
+            TIER_B, concentration_cap_for_tier, tier_for,
+        )
+        if tier_for(ticker, config or {}) == TIER_B:
+            # tier_for only returns B on explicit tier_b_income membership.
+            return concentration_cap_for_tier(TIER_B, config or {})
+    except Exception:
+        pass
+    return None
+
+
+def _exit_cost_lines(
+    rev: dict,
+    snapshot_data: dict | None,
+    equity_reviews: list | None = None,
+    date_str: str | None = None,
+    include_near_money: bool = False,
+) -> list[str]:
+    """Exit-cost anatomy sub-bullets for an ITM/underwater SHORT PUT action.
+
+    The 2026-07-29 LITE $700P lesson as pipeline logic: before the user pays
+    a panic ask to close, decompose the buyback into intrinsic / extrinsic /
+    spread and say whether closing, rolling, or assignment is the cheaper
+    exit (analysis/exit_cost.py).
+
+    Gates (all must hold, else no lines):
+      - short PUT (qty < 0) — call anatomy exists in the module but isn't
+        surfaced here;
+      - ITM (spot < strike) OR underwater (mid > premium received);
+      - `exit_cost.enabled` (default true).
+
+    Fail-closed on data (CLAUDE.md #10): no live chain leg for the held
+    contract this cycle → a "verify at broker" note, never fabricated
+    numbers. Fail-open on errors: any exception → no lines, briefing ships.
+    """
+    anatomy, status = _exit_cost_anatomy(rev, snapshot_data,
+                                         equity_reviews, date_str,
+                                         include_near_money=include_near_money)
+    if status == "no_quote":
+        # Fail closed — the anatomy needs a live quote fetched this cycle.
+        return [
+            "   - **Exit cost anatomy:** chain unavailable — verify exit "
+            "cost (intrinsic vs extrinsic vs spread) at the broker before "
+            "paying any ask."
+        ]
+    if anatomy is None:
+        return []
+    try:
+        from analysis import exit_cost as _xc
+        cfg_all = (snapshot_data or {}).get("_config", {}) or {}
+        _vc_und = (rev.get("underlying")
+                   or str(rev.get("contract", "")).split("_")[0])
+        return _xc.format_anatomy_lines(
+            anatomy, config=cfg_all,
+            prior_entry=_prior_verdict_entry(
+                rev.get("contract", ""), snapshot_data),
+            dte=rev.get("days_to_expiry"),
+            iv_rank=((snapshot_data or {}).get("iv_ranks", {}) or {})
+            .get(_vc_und))
+    except Exception:
+        return []  # advisory layer — never break the briefing
+
+
+def _exit_cost_anatomy(
+    rev: dict,
+    snapshot_data: dict | None,
+    equity_reviews: list | None = None,
+    date_str: str | None = None,
+    include_near_money: bool = False,
+):
+    """Compute the exit-cost anatomy for an ITM/underwater SHORT PUT review.
+
+    Returns ``(anatomy | None, status)`` where status is:
+      - "ok"           — anatomy computed from a live chain quote
+      - "no_quote"     — position qualifies but no usable chain leg this cycle
+      - "no_data"      — position qualifies on paper but spot/strike is
+                          unmeasurable this cycle (missing quote) — callers
+                          that surface a CLOSE must fail CLOSED, never silent
+      - "otm"          — only with ``include_near_money``: genuinely OTM
+                          (spot > 1.03 × strike) profitable put — no anatomy
+                          needed, but the card must SAY the buyback is pure
+                          time value (2026-08-05 defect 2)
+      - "not_eligible" — disabled / not a short put / not qualifying /
+                          any error (fail-open; the briefing must still ship)
+
+    ``include_near_money`` (2026-08-05 defect 2, VRT $280P): the take-profit
+    CLOSE path extends eligibility to NEAR-MONEY puts (spot < 1.03 × strike
+    even when barely OTM and profitable). Yesterday the same VRT position was
+    ITM and carried "ROLL, don't close — 89% extrinsic"; today at moneyness
+    1.003 the old itm-or-underwater gate silently dropped the anatomy and the
+    CLOSE card rendered with no verdict at all. Default False keeps every
+    other caller (blocks #3/#4 verdict-drives-action) byte-identical.
+
+    Task #37 fix 1 consumes the anatomy VERDICT in the action builder (the
+    verdict drives the action, rule #14's defer-to-the-advisor pattern);
+    :func:`_exit_cost_lines` consumes it for the rendered sub-bullets.
+    """
+    try:
+        from analysis import exit_cost as _xc
+
+        cfg_all = (snapshot_data or {}).get("_config", {}) or {}
+        xc_cfg = cfg_all.get("exit_cost") or {}
+        if not xc_cfg.get("enabled", True):
+            return None, "not_eligible"
+        if (rev.get("type") or "").upper() != "PUT":
+            return None, "not_eligible"
+        if float(rev.get("qty", 0) or 0) >= 0:
+            return None, "not_eligible"
+        contract = rev.get("contract", "")
+        und = rev.get("underlying") or str(contract).split("_")[0]
+        quotes = (snapshot_data or {}).get("quotes", {}) or {}
+        spot = float((quotes.get(und) or {}).get("last") or 0)
+        strike = float(rev.get("strike") or 0)
+        entry = float(rev.get("entry_price") or 0)
+        mid = float(rev.get("current_mid") or 0)
+        if not (spot and strike):
+            # Spot unmeasurable this cycle — the anatomy CANNOT rule the
+            # position in or out. Callers composing a CLOSE fail closed.
+            return None, "no_data"
+        itm = spot < strike
+        underwater = entry > 0 and mid > entry
+        near_money = strike > 0 and spot < strike * _ROLL_GATE_MONEYNESS
+        if not (itm or underwater):
+            if not include_near_money:
+                return None, "not_eligible"
+            if not near_money:
+                # Genuinely OTM winner (spot > 3% above strike) — buyback is
+                # pure time value; no decomposition needed, but say so.
+                return None, "otm"
+
+        chains = (snapshot_data or {}).get("chains", {}) or {}
+        quote = _xc.chain_quote_for_position(rev, chains)
+        if quote is None:
+            return None, "no_quote"
+
+        anatomy = _xc.analyze_exit_cost(
+            rev, quote, spot,
+            iv_rank=((snapshot_data or {}).get("iv_ranks", {}) or {}).get(und),
+            earnings_date=((snapshot_data or {}).get("earnings_calendar", {})
+                           or {}).get(und),
+            today=date_str,
+            config=cfg_all,
+            loss_stop_fired="GUARDRAIL_LOSS_STOP" in (rev.get("matrix_cell_id") or ""),
+            concentration_ok=_xc.assignment_concentration_ok(
+                rev, snapshot_data, equity_reviews),
+        )
+        if anatomy is None:
+            return None, "not_eligible"
+        return anatomy, "ok"
+    except Exception:
+        return None, "not_eligible"
+
+
+def _prior_verdict_entry(contract: str, snapshot_data: dict | None):
+    """Raw persisted exit-verdict entry (str or rich dict) for this contract
+    from the prior snapshot's exit_verdicts.json, or None."""
+    try:
+        prior = (snapshot_data or {}).get("_prior_exit_verdicts") or {}
+        return (prior.get("verdicts") or {}).get(contract)
+    except Exception:
+        return None
+
+
+def _prior_verdict_bit(contract: str, snapshot_data: dict | None) -> str:
+    """"; yesterday's read was ROLL, don't close" when the prior snapshot
+    persisted a verdict for this contract (exit_verdicts.json), else ""."""
+    try:
+        from analysis.exit_cost import verdict_headline, verdict_of
+        verdict = verdict_of(_prior_verdict_entry(contract, snapshot_data))
+        if not verdict:
+            return ""
+        return f"; yesterday's read was {verdict_headline(verdict)}"
+    except Exception:
+        return ""
+
+
+def _close_anatomy_footer(
+    rev: dict,
+    anatomy,
+    status: str | None,
+    snapshot_data: dict | None,
+    equity_reviews: list | None,
+    date_str: str | None,
+) -> list[str]:
+    """Anatomy footer for a take-profit CLOSE card — NEVER silent (2026-08-05
+    defect 2).
+
+    Observed: the VRT $280P / $270P CLOSE cards rendered with no anatomy or
+    verdict line at all, while YESTERDAY the same positions carried "ROLL,
+    don't close — 89% extrinsic". The old path silently fell through when the
+    anatomy gate ruled the position out (or data was missing). Contract:
+
+      - status "ok"            → the full anatomy + verdict block;
+      - status "no_quote"/"no_data" (ITM-or-near-money short put, anatomy
+        uncomputable this cycle) → fail-closed warning naming what was
+        missing, plus yesterday's persisted verdict when available;
+      - status "otm" (spot > 3% above strike) → "OTM — the buyback is pure
+        time value" one-liner;
+      - short CALL (anatomy module is put-only) → OTM one-liner when
+        measurably OTM, otherwise the fail-closed warning.
+    """
+    opt_type = (rev.get("type") or "").upper()
+    contract = rev.get("contract", "")
+    cfg_all = (snapshot_data or {}).get("_config", {}) or {}
+    if not ((cfg_all.get("exit_cost") or {}).get("enabled", True)):
+        return []
+    try:
+        strike = float(rev.get("strike") or 0)
+        und = rev.get("underlying") or str(contract).split("_")[0]
+        spot = float((((snapshot_data or {}).get("quotes", {}) or {})
+                      .get(und) or {}).get("last") or 0)
+    except (TypeError, ValueError):
+        strike, spot = 0.0, 0.0
+
+    unavailable_line = (
+        "   - _⚠ exit-cost anatomy unavailable this cycle ({why}) — verify "
+        "the buyback's time-value split at the broker before closing"
+        "{prior}._"
+    )
+
+    if opt_type == "PUT":
+        if status is None:
+            anatomy, status = _exit_cost_anatomy(
+                rev, snapshot_data, equity_reviews, date_str,
+                include_near_money=True)
+        if status == "ok" and anatomy is not None:
+            try:
+                from analysis import exit_cost as _xc
+                return _xc.format_anatomy_lines(
+                    anatomy, config=cfg_all,
+                    prior_entry=_prior_verdict_entry(contract, snapshot_data),
+                    dte=rev.get("days_to_expiry"),
+                    iv_rank=((snapshot_data or {}).get("iv_ranks", {}) or {})
+                    .get(und))
+            except Exception:
+                return []
+        if status in ("no_quote", "no_data"):
+            why = ("no chain quote" if status == "no_quote"
+                   else "no live spot quote")
+            return [unavailable_line.format(
+                why=why, prior=_prior_verdict_bit(contract, snapshot_data))]
+        if status == "otm" and spot and strike:
+            return [
+                f"   - **Exit cost anatomy:** OTM — spot ${spot:,.2f} is "
+                f"{(spot / strike - 1) * 100:.1f}% above the ${strike:g} "
+                f"strike; the buyback is pure time value."
+            ]
+        return []
+
+    if opt_type == "CALL":
+        # Call anatomy isn't modeled (module is put-only) — but a short-call
+        # take-profit close still must not render silent (defect 2).
+        if spot and strike:
+            if spot < strike * 0.97:
+                return [
+                    f"   - **Exit cost anatomy:** OTM — spot ${spot:,.2f} is "
+                    f"{(1 - spot / strike) * 100:.1f}% below the ${strike:g} "
+                    f"strike; the buyback is pure time value."
+                ]
+            return [unavailable_line.format(
+                why="call-side anatomy not modeled; contract is near/at the "
+                    "strike",
+                prior=_prior_verdict_bit(contract, snapshot_data))]
+        return [unavailable_line.format(
+            why="no live spot quote",
+            prior=_prior_verdict_bit(contract, snapshot_data))]
+
+    return []
+
+
+# Exit-cost verdicts that mean "closing is the cheap exit" — when the verdict
+# drives the action (exit_cost.verdict_drives_action, default true), these
+# convert a composed EXECUTE ROLL into a plain CLOSE (task #37 fix 1: the
+# briefing spent $44K of roll debits on positions whose own verdict said
+# CLOSE — clean exit).
+_CLOSE_VERDICTS = ("CLOSE_CLEAN", "CLOSE_AFTER_CRUSH", "CLOSE_URGENT")
+
+# CLAUDE.md rule #3 hard gate — an actionable roll/forced-decision item on a
+# SHORT PUT requires GENUINE assignment risk. TSM 2026-07-30 bug: a $380P
+# with spot $402.92 (6% above strike, |δ| 0.30, 100% extrinsic) rendered
+# "EXECUTE ROLL — −$838 debit" because the matrix's NEAR_ATM band (8% above
+# strike) fed an explicit ROLL rec into block #3, which trusted the rec and
+# skipped its own moneyness gate. Rule #3 claims blocks #3+#4 enforce
+# "moneyness, not P&L%" — this helper makes the claim true on EVERY path
+# that surfaces an actionable short-put roll (block #3 priced candidates,
+# block #4 generic roll directives, and the 4c forced-decision item).
+_ROLL_GATE_MONEYNESS = 1.03   # spot/strike below this = at/past/near strike
+_ROLL_GATE_DELTA = 0.40       # measured |delta| at/above this = tested
+# Task #40 fix 6 (AVGO 2026-07-30): a MEASURED |delta| below this floor means
+# the strike is NOT threatened regardless of moneyness — the $375P at
+# moneyness 1.0297 (inside the <1.03 band) carried δ 0.10 and still got an
+# $871 defensive roll. The moneyness band is the FALLBACK for missing delta,
+# not an override of a measured 10-delta.
+_ROLL_GATE_DELTA_FLOOR = 0.25
+
+
+def _short_put_roll_gate_ok(moneyness: float, delta) -> bool:
+    """True when a short put has genuine assignment risk.
+
+    Measured-delta first (task #40 fix 6): |δ| ≥ 0.40 passes outright;
+    |δ| < 0.25 FAILS regardless of moneyness (a 10-delta put has nothing to
+    defend — the moneyness band exists only as the fallback when the chain
+    carried no delta). In the 0.25–0.40 band, and whenever the delta is
+    unmeasured, the moneyness band (spot < 1.03 × strike) decides.
+    A failing gate demotes the item to a Watch-panel note — never an
+    actionable ticket. Loss-stop / crash paths never consult this gate.
+    Fail-open: unmeasurable moneyness (callers pass 1.0) keeps the legacy
+    behavior."""
+    measured = None
+    try:
+        measured = abs(float(delta)) if delta is not None else None
+    except (TypeError, ValueError):
+        measured = None
+    if measured is not None:
+        if measured >= _ROLL_GATE_DELTA:
+            return True
+        if measured < _ROLL_GATE_DELTA_FLOOR:
+            return False  # measured, untested — moneyness cannot override
+    try:
+        if float(moneyness) < _ROLL_GATE_MONEYNESS:
+            return True
+    except (TypeError, ValueError):
+        return True  # no measured moneyness → never invent a gate
+    return False
+
+
+def _roll_gate_demotion_note(moneyness, delta) -> str:
+    """Accurate demotion text for a rule-#3 / delta-veto gate failure —
+    names the MEASURED delta when that is what failed the gate (rule #19:
+    the reason shown must be the reason measured)."""
+    measured = None
+    try:
+        measured = abs(float(delta)) if delta is not None else None
+    except (TypeError, ValueError):
+        measured = None
+    try:
+        mny_bit = f"spot is {(float(moneyness) - 1) * 100:.1f}% above the strike"
+    except (TypeError, ValueError):
+        mny_bit = "spot is above the strike"
+    if measured is not None and measured < _ROLL_GATE_DELTA_FLOOR:
+        return (
+            f"Roll demoted from the action list (rule #3 gate, measured-delta "
+            f"veto): |δ| {measured:.2f} < {_ROLL_GATE_DELTA_FLOOR:.2f} — a "
+            f"{measured * 100:.0f}-delta put is not threatened even with "
+            f"{mny_bit}; theta is working. Re-evaluate on a genuine test."
+        )
+    return (
+        f"Roll demoted from the action list (rule #3 gate): {mny_bit} with no "
+        f"genuine strike test (|δ| < {_ROLL_GATE_DELTA:.2f}) — theta "
+        f"is working; re-evaluate on a genuine test."
+    )
+
+
+def _nothing_to_defend_note(rev: dict, moneyness) -> str | None:
+    """Task #40 fix 6 (AVGO $375P, 2026-07-30): a PROFITABLE, fully-OTM
+    short put whose MEASURED |δ| is below the tested threshold (0.40 — the
+    same definition exit_cost's HOLD_FOR_DECAY uses) has nothing to defend,
+    even inside the <1.03 moneyness band. The real card composed an $871
+    debit roll on a +15%-captured OTM put at measured δ 0.37 while the
+    briefing displayed the STO leg's δ 0.10. Returns the demotion note, or
+    None when the position is ITM, underwater, or the delta is unmeasured
+    (fail-open — never withhold defense on missing data)."""
+    try:
+        if float(moneyness) <= 1.0:
+            return None  # at/past the strike — genuinely ITM
+    except (TypeError, ValueError):
+        return None
+    try:
+        measured = (abs(float(rev.get("delta")))
+                    if rev.get("delta") is not None else None)
+    except (TypeError, ValueError):
+        measured = None
+    if measured is None or measured >= _ROLL_GATE_DELTA:
+        return None
+    try:
+        entry = float(rev.get("entry_price") or 0)
+        mid = float(rev.get("current_mid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if entry <= 0 or mid > entry:
+        return None  # underwater / unknown P&L → defense may be warranted
+    return (
+        f"Roll demoted (nothing to defend): position is OTM and profitable "
+        f"({(entry - mid) / entry * 100:.0f}% captured) with measured "
+        f"|δ| {measured:.2f} < {_ROLL_GATE_DELTA:.2f} — theta is doing the "
+        f"job; re-evaluate on a genuine strike test."
+    )
+
+
+def _truncate_at_word(text: str, limit: int = 160) -> str:
+    """Truncate at a WORD boundary with an ellipsis (task #40 fix 7 — URGENT
+    titles rendered '…extrinsic is at its peak. Th' from a fixed-width
+    slice). Text at/under the limit passes through unchanged."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;·—-") + " …"
+
+
+def _verdict_close_lines(n: int, contract: str, rev: dict, anatomy,
+                         snapshot_data: dict | None,
+                         equity_reviews: list | None,
+                         date_str: str | None,
+                         config_local: dict) -> list[str]:
+    """Render the CLOSE action a CLOSE_* exit-cost verdict drives (fix 1).
+
+    BTC ticket at the measured chain mid (GTC), the anatomy block, and the
+    one-line "Roll skipped" note. Used by both block #3 (priced-candidate
+    rolls) and block #4 (matrix roll directives)."""
+    out: list[str] = []
+    qty_c = abs(rev.get("qty", 0) or 0)
+    mid_c = float(anatomy.btc_mid or rev.get("current_mid") or 0)
+    cost_c = mid_c * 100.0 * qty_c
+    ext_pct_c = (anatomy.extrinsic_per_share / anatomy.btc_mid * 100.0
+                 if anatomy.btc_mid else 0.0)
+    headline_c = {
+        "CLOSE_CLEAN": "clean exit (mostly intrinsic)",
+        "CLOSE_AFTER_CRUSH": "close after the IV crush",
+        "CLOSE_URGENT": "close before the binary",
+    }.get(anatomy.verdict, "closing is the cheap exit")
+    out.append(
+        f"{n}. **CLOSE** {contract} — exit-cost verdict: {headline_c}; "
+        f"buy-to-close {int(qty_c)}× limit ${mid_c:.2f} "
+        f"(≈ ${cost_c:,.0f}), GTC"
+    )
+    out.append(f"   - **Why:** {anatomy.verdict_reason}")
+    out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews, date_str))
+    out.append(
+        f"   - _Roll skipped: exit-cost verdict says closing is cheap "
+        f"(extrinsic {ext_pct_c:.0f}%); re-enter on your own terms "
+        f"after stabilization. Full roll menu stays in the Watch "
+        f"panel's ROLL ANALYSIS table._"
+    )
+    out.append(
+        f"   - **Account:** "
+        f"{_route_account('CLOSE', rev.get('underlying', ''), rev.get('account') or rev.get('account_type'), config_local.get('accounts', []) or [])}"
+    )
+    return out
+
+
+def _candidate_extension_days(c: dict, cur_expiration) -> int | None:
+    """Days the candidate's STO leg extends past the position's CURRENT
+    expiration. Prefers the advisor's measured ``dteExtension``; falls back
+    to date math (sell_expiration − current expiration). None = unmeasurable
+    — callers composing actionable tickets must fail closed on None."""
+    ext = c.get("dteExtension")
+    if ext is not None:
+        try:
+            return int(ext)
+        except (TypeError, ValueError):
+            pass
+    try:
+        sell_exp = (c.get("instruction") or {}).get("sell_expiration") or ""
+        d_new = datetime.strptime(str(sell_exp)[:10], "%Y-%m-%d").date()
+        d_cur = datetime.strptime(
+            str(cur_expiration)[:10], "%Y-%m-%d").date()
+        return (d_new - d_cur).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_roll_down_candidates(rev: dict, max_tenor_days: int | None):
+    """Yield (reduction, net, candidate) for every strictly-lower-strike,
+    real-priced roll-down candidate INSIDE the tenor cap. Shared by the
+    credit headline picker and the small-debit alternative picker."""
+    cur_strike = _strike_from_contract(
+        rev.get("contract", ""), rev.get("strike")) or 0
+    for c in (rev.get("roll_candidates") or []):
+        if not isinstance(c, dict) or c.get("id") == "A":
+            continue
+        instr = c.get("instruction") or {}
+        try:
+            s = float(instr.get("sell_strike") or 0)
+            net = float(c.get("netDollars") or 0)
+        except (TypeError, ValueError):
+            continue
+        if s <= 0 or not instr.get("sell_expiration"):
+            continue
+        if not cur_strike or s >= cur_strike:
+            continue                      # DOWN only — never up / same-strike
+        # Tenor cap (CLAUDE.md rule #14, 2026-08-04 regression): the composer
+        # once surfaced "STO 1× VRT $240P Fri Dec 15 '28" against a Jan '27
+        # position — ~700d past the current expiry, ~6× the 120d cap — because
+        # the ONLY credit-positive roll-down was the 2.4-year one (the
+        # max-credit trap resurrected). A candidate past the cap, or with an
+        # unmeasurable tenor, is NOT ticket-eligible (fail closed).
+        if max_tenor_days is not None:
+            ext = _candidate_extension_days(c, rev.get("expiration"))
+            if ext is None or ext > max_tenor_days:
+                continue
+        yield (cur_strike - s, net, c)
+
+
+def _pick_roll_down_candidate(rev: dict,
+                              max_tenor_days: int | None = None) -> dict | None:
+    """Credit-positive roll-DOWN candidate (strictly lower strike, real
+    priced STO leg, INSIDE the action tenor cap) for the one-voice
+    take-profit path. Preference: biggest strike reduction first, credit
+    second — the CLAUDE.md #42 put-side discipline (risk reduction over max
+    credit). Returns the candidate dict or None (caller falls back to
+    HOLD — GTC at 50%)."""
+    scored = [t for t in _iter_roll_down_candidates(rev, max_tenor_days)
+              if t[1] > 0]                # headline must be a net CREDIT
+    if not scored:
+        return None
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    return scored[0][2]
+
+
+def _pick_debit_roll_down_alternative(
+        rev: dict, max_tenor_days: int | None,
+        min_strike_reduction: float = 25.0) -> dict | None:
+    """Small-debit, IN-TENOR roll-down worth OFFERING (never the headline)
+    under the HOLD — GTC fallback, when the strike reduction is meaningful
+    (≥ $25 by default). Preference: SMALLEST debit that clears the reduction
+    floor, then biggest reduction — "small-debit" means cheapest genuine risk
+    cut, not deepest cut at any price. Labeled honestly with the debit by
+    the renderer."""
+    scored = [t for t in _iter_roll_down_candidates(rev, max_tenor_days)
+              if t[1] <= 0 and t[0] >= min_strike_reduction]
+    if not scored:
+        return None
+    scored.sort(key=lambda t: (abs(t[1]), -t[0]))
+    return scored[0][2]
+
+
+def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
+                                 capture_pct: float,
+                                 snapshot_data: dict | None,
+                                 equity_reviews: list | None,
+                                 date_str: str | None) -> list[str]:
+    """One-voice resolution for a PROFITABLE close whose exit-cost verdict is
+    ROLL_DONT_CLOSE (2026-08-04 fix 1).
+
+    Observed 2026-08-04, action #4: headline "**CLOSE** VRT_PUT_280_20270115
+    — +30% ($+2,226)" rendered with "**⚖️ Verdict: ROLL, don't close** —
+    closing pays $4,534 of panic premium at IV rank 89" inline — two
+    contradictory voices on one card. The take-profit close path never
+    consulted the exit-cost verdict (task #37 wired verdicts into the ROLL
+    path, not the TAKE-PROFIT path). Resolution — exactly ONE recommendation:
+
+      - a credit-positive, IN-TENOR roll-DOWN candidate exists → **TAKE
+        PROFIT VIA ROLL-DOWN**: one two-leg ticket (BTC current + STO the
+        roll-down), banking the risk reduction while the theta engine keeps
+        running;
+      - none exists → **HOLD — GTC AT 50%**: place a GTC buy-to-close at the
+        50%-capture price; the high-extrinsic exit is expensive today, let
+        decay pay you. A small-debit IN-TENOR roll-down (strike reduction
+        ≥ $25) may render as an honest ALTERNATIVE line, never the headline.
+
+    Tenor cap (rule #14 regression, observed 2026-08-04): the first cut of
+    this composer rendered "TAKE PROFIT VIA ROLL-DOWN VRT_PUT_280_20270115 —
+    BTC 1× @ $51.97 + STO 1× VRT $240P Fri Dec 15 '28 @ $75.75 → net +$2,270
+    credit" — the STO leg ~700 days past the current Jan '27 expiry, ~6× the
+    120d action tenor cap, because the ONLY credit-positive $240P was the
+    2.4-year one. Candidate selection now enforces roll.max_action_tenor_days
+    (core-union-aware ×3, same discipline as block #3 and advise.py).
+
+    The anatomy block renders under whichever single recommendation wins.
+    Kill switch: exit_cost.one_voice (default true)."""
+    out: list[str] = []
+    qty = abs(rev.get("qty", 0) or 0)
+    entry = float(rev.get("entry_price") or 0)
+    mid = float(anatomy.btc_mid or rev.get("current_mid") or 0)
+    pl = (entry - float(rev.get("current_mid") or 0)) * 100 * qty
+    und = rev.get("underlying") or str(contract).split("_")[0]
+    cur_strike = _strike_from_contract(contract, rev.get("strike")) or 0
+    # Tenor cap — identical discipline to block #3's ranker call: 120d
+    # default, ×3 for core (core_positions ∪ Tier A).
+    _cfg_tp = (snapshot_data or {}).get("_config") or {}
+    try:
+        _max_tenor_tp = int(
+            (_cfg_tp.get("roll") or {}).get("max_action_tenor_days", 120))
+    except (TypeError, ValueError):
+        _max_tenor_tp = 120
+    if und in _core_union_safe(_cfg_tp):
+        _max_tenor_tp *= 3
+    # HOLD_FOR_DECAY (near-money gate, 2026-08-05 defect 2): the verdict says
+    # "no exit needed — theta decaying in your favor", so no roll-down is
+    # hunted; resolve straight to HOLD — GTC AT 50% with a verdict-accurate
+    # Why (never a CLOSE headline contradicted by a HOLD verdict inline).
+    if getattr(anatomy, "verdict", None) == "HOLD_FOR_DECAY":
+        gtc_hd = entry * 0.5 if entry > 0 else 0.0
+        out.append(
+            f"{n}. **HOLD — GTC AT 50%** {contract} — +{capture_pct:.0f}% "
+            f"captured; place a GTC buy-to-close at the 50%-capture price "
+            f"${gtc_hd:.2f}"
+        )
+        out.append(
+            f"   - **Why:** exit-cost verdict HOLD — the buyback is "
+            f"${anatomy.extrinsic_total:,.0f} of pure time value decaying in "
+            f"your favor (strike untested); closing now pays that theta "
+            f"away. Let the GTC fill when the market comes to your price."
+        )
+        out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews,
+                                    date_str, include_near_money=True))
+        return out
+    best = _pick_roll_down_candidate(rev, max_tenor_days=_max_tenor_tp)
+    if best is not None:
+        instr = best.get("instruction") or {}
+        s = float(instr.get("sell_strike") or 0)
+        exp_raw = instr.get("sell_expiration") or ""
+        try:
+            exp_pretty = datetime.strptime(
+                str(exp_raw), "%Y-%m-%d").strftime("%a %b %d '%y")
+        except (ValueError, TypeError):
+            exp_pretty = str(exp_raw or "?")
+        sell_mid = float(instr.get("sell_mid") or 0)
+        net = float(best.get("netDollars") or 0)
+        out.append(
+            f"{n}. **TAKE PROFIT VIA ROLL-DOWN** {contract} — "
+            f"+{capture_pct:.0f}% (${pl:+,.0f}) banked as one two-leg roll: "
+            f"BTC {int(qty)}× @ ${mid:.2f} mid + STO {int(qty)}× {und} "
+            f"${s:g}P {exp_pretty} @ ${sell_mid:.2f} mid → "
+            f"net +${net:,.0f} credit"
+        )
+        out.append(
+            f"   - **Why:** banks the risk reduction (strike ${cur_strike:g} "
+            f"→ ${s:g}) AND keeps the theta engine running; closing outright "
+            f"would pay ${anatomy.extrinsic_total:,.0f} of extrinsic away "
+            f"(exit-cost verdict: ROLL, don't close — one card, one voice)."
+        )
+    else:
+        gtc = entry * 0.5 if entry > 0 else 0.0
+        out.append(
+            f"{n}. **HOLD — GTC AT 50%** {contract} — +{capture_pct:.0f}% "
+            f"captured; place a GTC buy-to-close at the 50%-capture price "
+            f"${gtc:.2f}"
+        )
+        out.append(
+            f"   - **Why:** the high-extrinsic exit is expensive today "
+            f"(closing pays ${anatomy.extrinsic_total:,.0f} of extrinsic"
+            f"{' — IV ' + anatomy.iv_context if anatomy.iv_context else ''}) "
+            f"and no credit-positive roll-down inside the {_max_tenor_tp}d "
+            f"tenor cap is priced — let decay pay you; the GTC fills when "
+            f"the market comes to your price."
+        )
+        # Honest ALTERNATIVE (never the headline): a small-debit IN-TENOR
+        # roll-down with a meaningful strike reduction (≥ $25).
+        alt = _pick_debit_roll_down_alternative(rev, _max_tenor_tp)
+        if alt is not None:
+            a_instr = alt.get("instruction") or {}
+            try:
+                a_strike = float(a_instr.get("sell_strike") or 0)
+                a_mid = float(a_instr.get("sell_mid") or 0)
+                a_net = float(alt.get("netDollars") or 0)
+                a_exp = datetime.strptime(
+                    str(a_instr.get("sell_expiration") or "")[:10],
+                    "%Y-%m-%d").strftime("%a %b %d '%y")
+            except (TypeError, ValueError):
+                a_strike = 0.0
+            if a_strike > 0:
+                out.append(
+                    f"   - **Alternative (in-tenor debit roll-down):** BTC "
+                    f"{int(qty)}× @ ${mid:.2f} mid + STO {int(qty)}× {und} "
+                    f"${a_strike:g}P {a_exp} @ ${a_mid:.2f} mid → net "
+                    f"-${abs(a_net):,.0f} DEBIT — pays to cut the strike "
+                    f"${cur_strike:g} → ${a_strike:g}; only take it if the "
+                    f"risk reduction is worth the cost."
+                )
+    out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews, date_str,
+                                include_near_money=True))
+    return out
+
+
+# ── Action-count sync (2026-08-05 defect 3) ────────────────────────────────
+# The header's "**Action Items:** N" was computed from render_action_list's
+# output BEFORE later composers/post-passes touched the list — the observed
+# briefing said "Action Items: 2" while 3 numbered items rendered. This
+# post-pass recounts the numbered items in the FINAL composed markdown and
+# rewrites the header line to match. Fail-open: any shape it doesn't
+# recognize leaves the markdown untouched.
+_ACTION_COUNT_RE = re.compile(r"^(\*\*Action Items:\*\*)\s*\d+\s*$", re.M)
+_ACTION_SECTION_HEAD_RE = re.compile(r"^##\s+Today's Action List", re.M)
+_NUMBERED_ITEM_RE = re.compile(r"^\s{0,3}\d+\.\s")
+
+
+def sync_action_item_count(markdown: str) -> str:
+    """Rewrite the header's "**Action Items:** N" from the FINAL composed
+    action-list section (defect 3, 2026-08-05: header said 2, list rendered
+    3 — the count was taken before a later composer appended an item)."""
+    try:
+        if not markdown:
+            return markdown
+        head = _ACTION_SECTION_HEAD_RE.search(markdown)
+        if head is None or _ACTION_COUNT_RE.search(markdown) is None:
+            return markdown
+        section = markdown[head.end():]
+        nxt = re.search(r"^#{1,2}\s", section, re.M)
+        if nxt is not None:
+            section = section[:nxt.start()]
+        count = sum(1 for ln in section.splitlines()
+                    if _NUMBERED_ITEM_RE.match(ln))
+        return _ACTION_COUNT_RE.sub(rf"\1 {count}", markdown, count=1)
+    except Exception:  # noqa: BLE001 — cosmetic sync must never break the ship
+        return markdown
+
+
+# One-voice sweep (2026-08-04 fix 1) — a card must never pair a CLOSE
+# headline with a "ROLL, don't close" verdict. CLOSE INTO RECOVERY is exempt
+# by documented precedence (task #40 fix 4: event risk beats premium
+# mechanics, and its Why line says so explicitly).
+_ONE_VOICE_HEAD_RE = re.compile(r"^\s*\d+\.\s+(?:🚨\s*)?\*\*[^*]*CLOSE[^*]*\*\*")
+
+
+def one_voice_violations(items) -> list[str]:
+    """Sweep rendered action-list lines (or a full briefing markdown string)
+    for cards that carry BOTH a CLOSE headline and a 'ROLL, don't close'
+    verdict. Returns the offending headlines ([] = one-voice rule holds)."""
+    if isinstance(items, str):
+        items = items.splitlines()
+    violations: list[str] = []
+    head: str | None = None
+    block: list[str] = []
+
+    def _check():
+        if head is None:
+            return
+        text = "\n".join(block)
+        if "CLOSE INTO RECOVERY" in head:
+            return  # documented precedence — the card explains the override
+        if "ROLL, don't close" in text:
+            violations.append(head.strip())
+
+    for line in items or []:
+        if re.match(r"^\s*\d+\.\s", line or ""):
+            _check()
+            head = line if _ONE_VOICE_HEAD_RE.match(line) else None
+            block = [line]
+        elif head is not None and (line or "").startswith("  "):
+            block.append(line)
+        else:
+            _check()
+            head = None
+            block = []
+    _check()
+    return violations
+
+
+def _verdict_hold_basis_lines(n: int, contract: str, rev: dict, anatomy,
+                              snapshot_data: dict | None,
+                              equity_reviews: list | None,
+                              date_str: str | None,
+                              churn_age_note: str | None = None) -> list[str]:
+    """Render the no-ticket item a HOLD_FOR_BASIS verdict drives (task #40
+    fix 1). Observed 2026-07-30: cards #2 (QCOM $185P) and #4 (VRT $280P)
+    rendered '⚖️ Verdict: Assignment acceptable — hold for basis' AND an
+    actionable debit-roll order — a contradiction. Same verdict-drives-action
+    flow as CLOSE_CLEAN / HOLD_FOR_DECAY (kill switch:
+    exit_cost.verdict_drives_action): the verdict + anatomy render, the roll
+    ticket does not; the full roll menu stays in Watch."""
+    out: list[str] = []
+    out.append(
+        f"{n}. **HOLD FOR BASIS** {contract} — assignment acceptable "
+        f"(exit-cost verdict); no roll ticket"
+    )
+    out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews, date_str))
+    basis = anatomy.assignment_basis
+    pct = anatomy.basis_vs_spot_pct
+    if basis is not None and pct is not None:
+        rel = "below" if pct <= 0 else "above"
+        out.append(
+            f"   - _Roll skipped: assignment basis ${basis:,.2f} is "
+            f"{abs(pct) * 100:.1f}% {rel} market — holding for basis; "
+            f"the roll menu stays in Watch._"
+        )
+    else:
+        out.append(
+            "   - _Roll skipped: assignment acceptable per the exit-cost "
+            "verdict — holding for basis; the roll menu stays in Watch._"
+        )
+    if churn_age_note:
+        out.append(f"   - _{churn_age_note}_")
+    return out
+
+
+def _debit_capped_close_lines(n: int, contract: str, rev: dict, anatomy,
+                              debit_pct: float, cap_pct: float,
+                              snapshot_data: dict | None,
+                              equity_reviews: list | None,
+                              date_str: str | None,
+                              config_local: dict) -> list[str]:
+    """Render the CLOSE action left standing when the debit cap demotes the
+    ranked defensive roll on a GENUINELY ITM short put (task #43 fix 2).
+
+    Observed (NOK_PUT_11_20260918, 2026-07-31): yesterday rendered
+    '**CLOSE** NOK_PUT_11_20260918 — exit-cost verdict: clean exit;
+    buy-to-close 10× limit $2.28'; today the verdict slipped to NEUTRAL
+    (extrinsic 15.6% of the buyback vs the 15% clean bar — a $0.03 move),
+    the ranked roll-down failed the debit cap ($2,065 debit = 34% of the
+    $6,000 new collateral) and the position vanished from the action list
+    entirely. A demoted roll must never swallow the position's own exit
+    path: the demotion note itself says 'close or take assignment
+    instead' — this composes that choice as the action, priced from the
+    live chain mid the anatomy measured."""
+    out: list[str] = []
+    qty_c = abs(rev.get("qty", 0) or 0)
+    mid_c = float(anatomy.btc_mid or rev.get("current_mid") or 0)
+    cost_c = mid_c * 100.0 * qty_c
+    ext_pct_c = (anatomy.extrinsic_per_share / anatomy.btc_mid * 100.0
+                 if anatomy.btc_mid else 0.0)
+    basis = anatomy.assignment_basis
+    basis_bit = (f" — or take assignment (basis ${basis:,.2f})"
+                 if basis is not None else "")
+    out.append(
+        f"{n}. **CLOSE** {contract} — defensive roll debit-capped; "
+        f"buy-to-close {int(qty_c)}× limit ${mid_c:.2f} "
+        f"(≈ ${cost_c:,.0f}), GTC{basis_bit}"
+    )
+    out.append(
+        f"   - **Why:** the ranked defensive roll was demoted "
+        f"(debit {debit_pct:.0f}% of new collateral, cap {cap_pct:.0f}%) — "
+        f"on a genuinely ITM put the remaining exits are closing "
+        f"(extrinsic {ext_pct_c:.0f}% of the buyback) or taking assignment; "
+        f"the full roll menu stays in the Watch panel's ROLL ANALYSIS table."
+    )
+    out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews, date_str))
+    out.append(
+        f"   - **Account:** "
+        f"{_route_account('CLOSE', rev.get('underlying', ''), rev.get('account') or rev.get('account_type'), config_local.get('accounts', []) or [])}"
+    )
+    return out
+
+
+def _roll_cushion_change_pct(is_put: bool, cur_strike: float,
+                             new_strike: float, spot: float) -> float:
+    """Signed % change in protective distance, computed from REAL strikes.
+
+    CALL: cap headroom change = (new − cur) / spot (higher strike = more
+    upside room). PUT: downside cushion change = (cur − new) / spot (LOWER
+    strike = more cushion — the old call-side formula rendered a put
+    roll-down as "-12.0% more cap headroom", nonsense on a put).
+    """
+    if not spot:
+        return 0.0
+    if is_put:
+        return (cur_strike - new_strike) / spot * 100.0
+    return (new_strike - cur_strike) / spot * 100.0
+
+
+def _roll_why_text(is_put: bool, credit: float, underwater: bool,
+                   unrealized_loss: float, cur_strike: float,
+                   new_strike: float, spot: float, dte_added: int,
+                   cur_exp_pretty: str, new_exp_pretty: str) -> str:
+    """Sign- and side-aware Why text for a composed roll (task #37 fix 4c).
+
+    A DEBIT roll must never claim "the roll books net credit" — on a put
+    roll-down it pays $X of debit for $Y of strike reduction (Z% more
+    cushion), and the text says exactly that with measured numbers.
+    """
+    parts = []
+    cushion = _roll_cushion_change_pct(is_put, cur_strike, new_strike, spot)
+    if underwater and credit >= 0:
+        parts.append(
+            f"Position underwater by ~${unrealized_loss:,.0f}; rather than "
+            f"realizing that loss, the roll books net credit by extending duration"
+        )
+    elif credit < 0:
+        reduction = (cur_strike - new_strike) if is_put else (new_strike - cur_strike)
+        lead = (f"Position underwater by ~${unrealized_loss:,.0f}; the roll "
+                if underwater else "The roll ")
+        if is_put and reduction > 0:
+            parts.append(
+                f"{lead}pays ${abs(credit):,.0f} debit for ${reduction:g} of "
+                f"strike reduction ({cushion:+.1f}% more downside cushion)"
+            )
+        elif is_put:
+            parts.append(
+                f"{lead}pays ${abs(credit):,.0f} debit to extend duration at "
+                f"the same strike — no strike reduction; confirm it's worth it"
+            )
+        else:
+            parts.append(
+                f"{lead}pays ${abs(credit):,.0f} debit for the adjusted strike "
+                f"({cushion:+.1f}% cap headroom change)"
+            )
+    else:
+        parts.append("Best candidate captures meaningful additional premium "
+                     "without giving up strike protection")
+    if dte_added:
+        parts.append(f"adds {dte_added} more days of theta runway "
+                     f"({cur_exp_pretty} → {new_exp_pretty})")
+    return "; ".join(parts) + "."
+
+
+def _roll_gain_text(is_put: bool, credit: float, underwater: bool,
+                    cur_strike: float, new_strike: float, spot: float,
+                    dte_added: int) -> str:
+    """Sign- and side-aware Gain text (task #37 fix 4d — no "cap headroom"
+    call-language on put rolls; cushion delta computed from real strikes)."""
+    cushion = _roll_cushion_change_pct(is_put, cur_strike, new_strike, spot)
+    gain_parts = []
+    if credit >= 0:
+        gain_parts.append(f"${credit:,.0f} cash credited today")
+    elif is_put:
+        gain_parts.append(
+            f"${abs(credit):,.0f} debit paid for {cushion:+.1f}% more downside "
+            f"cushion (strike ${cur_strike:g} → ${new_strike:g})"
+        )
+    else:
+        gain_parts.append(
+            f"${abs(credit):,.0f} debit paid for {cushion:+.1f}% more cap headroom"
+        )
+    if dte_added:
+        gain_parts.append(f"clock reset by {dte_added}d for continued theta capture")
+    if underwater and credit >= 0:
+        gain_parts.append("avoids realizing the unrealized loss while "
+                          "preserving the path to break-even")
+    return "; ".join(gain_parts).capitalize() + "."
+
+
+def _pre_print_roll_alternative(candidates: list, cur_strike: float,
+                                opt_type: str, underlying: str,
+                                earnings_calendar: dict, today_iso: str,
+                                spot: float) -> dict | None:
+    """Find a roll candidate whose STO expiration CLEARS the earnings print.
+
+    Task #37 fix 2: when the ranked best roll's STO leg spans an imminent
+    earnings print (earnings guard BLOCK), prefer an alternative expiration
+    that expires BEFORE the print — with viable premium — over deferring the
+    roll entirely. Returns the best qualifying candidate dict or None.
+    """
+    try:
+        earnings_str = (earnings_calendar or {}).get(underlying)
+        earn_date = None
+        if earnings_str:
+            try:
+                earn_date = datetime.strptime(str(earnings_str)[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                earn_date = None
+        viable = []
+        for c in candidates or []:
+            if c.get("id") == "A":
+                continue
+            ins = c.get("instruction") or {}
+            exp = ins.get("sell_expiration") or ""
+            if not exp:
+                continue
+            # Put discipline: never swap to a HIGHER strike (deeper ITM).
+            if (opt_type == "PUT" and cur_strike
+                    and float(ins.get("sell_strike") or 0) > cur_strike + 0.01):
+                continue
+            # Must genuinely clear the print: expiration strictly before the
+            # earnings date, and the guard must not flag it.
+            try:
+                exp_d = datetime.strptime(str(exp)[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            if earn_date is not None and exp_d >= earn_date:
+                continue
+            chk = check_earnings_conflict(underlying, exp,
+                                          earnings_calendar or {}, today_iso)
+            if chk.get("level") == "block":
+                continue
+            # Viable premium on the STO leg (fix 3's floor, applied here too).
+            if float(ins.get("sell_bid") or 0) <= 0:
+                continue
+            if float(ins.get("sell_mid") or 0) < 0.10:
+                continue
+            viable.append(c)
+        if not viable:
+            return None
+        best_alt, _ = rank_candidates(
+            viable, spot=spot or cur_strike or 1.0,
+            min_credit_threshold=0.0,
+            option_type=opt_type or "CALL",
+        )
+        return best_alt
+    except Exception:
+        return None
+
+
+def _hedge_nag_vacate(items: list, aging_info: dict | None,
+                      config_local: dict, *, instr, strike, exp_str,
+                      contracts, cost_f) -> bool:
+    """Fix 4 (2026-08-04): hedge-nag resolution.
+
+    After `hedge_nag_days` (config, default 14) consecutive IGNORED sessions
+    the HEDGE item vacates the action list's numbered slots — it stops
+    outranking money actions — while:
+      (a) its aging clock keeps ticking via a synthetic action, so the
+          ⛔ Stalled Items entry REMAINS (aging is aging);
+      (b) the 💰 Money Plan carries it once in the Blocked-money line as
+          "hedge undecided Nd — standing question" (aging_info["hedge_nag"]);
+      (c) ready-to-paste directive templates render (both variants: defer
+          until coverage ≥ 0.5×, or hedge now at half size) so the user can
+          DECIDE it instead of re-reading it a 30th time.
+
+    Returns True when vacated. Fail-open: no aging_info / unmeasurable prior
+    days → False and the legacy numbered item renders."""
+    if aging_info is None:
+        return False
+    try:
+        nag_days = int((config_local or {}).get("hedge_nag_days", 14) or 14)
+    except (TypeError, ValueError):
+        nag_days = 14
+    ident = str(instr or "SPY_PUT").split("_")[0].upper()
+    key = f"HEDGE:{ident}"
+    try:
+        prior_days = int(((aging_info.get("state") or {}).get(key) or {})
+                         .get("days_flagged", 0) or 0)
+    except (TypeError, ValueError):
+        prior_days = 0
+    if prior_days < nag_days:
+        return False
+    summary = (f"HEDGE Buy {contracts}× {ident} put ${strike}P {exp_str} "
+               f"(~${cost_f:,.0f})")
+    aging_info.setdefault("synthetic_actions", []).append(
+        {"key": key, "kind": "HEDGE", "ident": ident, "summary": summary})
+    aging_info["hedge_nag"] = {
+        "key": key, "days": prior_days, "contracts": contracts,
+        "cost": cost_f, "instrument": ident, "strike": strike,
+        "expiration": exp_str, "summary": summary,
+    }
+    items.append("")
+    items.append(
+        f"_⏸ HEDGE ({ident} put) vacated from the numbered list — undecided "
+        f"{prior_days} consecutive sessions (hedge_nag_days={nag_days}). It "
+        f"remains in ⛔ Stalled Items and the 💰 Money Plan as a standing "
+        f"question; decide it with a directive:_"
+    )
+    items.append(
+        "_📋 `DIRECTIVE: DEFER hedge until stress coverage ≥ 0.5×; "
+        "auto-revisit when coverage crosses the floor.`_"
+    )
+    if contracts:
+        try:
+            half = max(1, int(round(float(contracts) / 2.0)))
+            items.append(
+                f"_📋 `DIRECTIVE: HEDGE NOW at half size — buy {half}× "
+                f"{ident} put ${strike}P {exp_str}; revisit the remainder "
+                f"next cycle.`_"
+            )
+            return True
+        except (TypeError, ValueError):
+            pass
+    items.append(
+        f"_📋 `DIRECTIVE: HEDGE NOW at half size — halve the recommended "
+        f"{ident} put ticket; revisit the remainder next cycle.`_"
+    )
+    return True
+
+
 def render_action_list(
     equity_reviews: list,
     options_reviews: list,
@@ -738,33 +1894,159 @@ def render_action_list(
     equity_reviews = equity_reviews or []
     new_ideas = new_ideas or []
 
+    # Bug #25 — contract-level standing directives (state/fable_advisor_
+    # memory.md, parsed by analysis.advisor_directives and stashed on
+    # snapshot_data by aggregate). A directive that HOLDS a contract
+    # suppresses its CLOSE action (transparency footer instead) and keeps
+    # the rec-aging clock from ticking — following a documented directive
+    # is not "ignoring" a recommendation. Fail-open: no directives → no-op.
+    _adv_directives = (snapshot_data or {}).get("_advisor_directives") or []
+    _directive_suppressed: list[dict] = []
+    # Task #43 defect 3: directive suppressions PAUSED by an imminent
+    # earnings print (capture ≥ 25%) — the CLOSE surfaces normally and the
+    # footer explains why the directive didn't hold it this cycle.
+    _directive_paused: list[str] = []
+    # Directive-held tested/urgent contracts — transparency notes rendered in
+    # the footer (rule #24: demote visibly, never hide). Shared by block #3's
+    # urgent strike-tested path and block 4c's forced-decision path.
+    _tested_directive_notes: list[str] = []
+
+    def _close_held_by_directive(contract: str, rev: dict,
+                                 capture_pct: float, dte) -> bool:
+        """True when a standing directive suppresses CLOSE on this contract
+        (release conditions not met). Records the suppression for the
+        transparency footer + aging skip."""
+        if not _adv_directives:
+            return False
+        try:
+            from analysis.advisor_directives import directive_holds_contract
+            und = rev.get("underlying") or str(contract).split("_")[0]
+            spot = float((((snapshot_data or {}).get("quotes") or {})
+                          .get(und) or {}).get("last") or 0) or None
+            d = directive_holds_contract(
+                contract, _adv_directives, capture_pct / 100.0,
+                int(dte or 0), spot)
+        except Exception:
+            return False                 # fail-open — never crash the list
+        if d is None:
+            return False
+        # Task #43 defect 3 (AMD_PUT_420_20261218, 2026-07-31): universal
+        # implicit release — a hold directive that predates an imminent
+        # earnings print is PAUSED (not deleted) when the position is
+        # profitable (capture ≥ 25%). The CLOSE surfaces so the user can
+        # decide before the binary; "through earnings" in the directive
+        # text is exempt (explicit intent wins). Fail-open toward the
+        # directive on any error / missing earnings date.
+        try:
+            from analysis.advisor_directives import earnings_pause
+            _d2e = _days_to_earnings(und)
+            if earnings_pause(d, capture_pct / 100.0, _d2e,
+                              (snapshot_data or {}).get("_config") or {}):
+                _directive_paused.append(
+                    f"_📋 Directive on {contract} paused: earnings in "
+                    f"{int(_d2e)}d with {capture_pct:+.0f}% captured — the "
+                    f"directive predates this print; close before the "
+                    f"report or reaffirm the hold (add \"through earnings\" "
+                    f"to the directive)._"
+                )
+                return False
+        except Exception:
+            pass                         # fail toward respecting the directive
+        _directive_suppressed.append({
+            "contract": contract, "capture_pct": capture_pct,
+            "dte": int(dte or 0),
+        })
+        return True
+
     # ---- 1. URGENT (earnings + losing) ----
+    # Days-to-earnings lookup for condition-specific Why text (task #40 fix 3:
+    # every URGENT item rendered "Earnings or expiry within ~14d …" — false
+    # for MU with earnings 55d away; the wrapper was reusing a pre-earnings
+    # template on strike-tested items).
+    _earn_cal_urgent = (snapshot_data or {}).get("earnings_calendar", {}) or {}
+    _today_urgent = None
+    try:
+        _today_urgent = datetime.strptime(
+            (date_str or datetime.now().strftime("%Y-%m-%d")), "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        pass
+
+    def _days_to_earnings(underlying: str):
+        try:
+            e = _earn_cal_urgent.get(underlying)
+            if not e or _today_urgent is None:
+                return None
+            e_d = datetime.strptime(str(e)[:10], "%Y-%m-%d").date()
+            return (e_d - _today_urgent).days
+        except (ValueError, TypeError):
+            return None
+
     for rev in options_reviews:
         rationale = (rev.get("rationale") or "")
         contract = rev.get("contract", "")
         is_urgent = "🚨" in rationale or "URGENT" in rationale.upper()
-        if is_urgent and contract not in seen_contracts:
-            dte = rev.get("days_to_expiry")
-            entry = rev.get("entry_price") or 0
-            mid = rev.get("current_mid") or 0
-            qty = abs(rev.get("qty", 0) or 0)
-            loss_dollars = (mid - entry) * 100 * qty if (mid > entry and entry > 0 and qty) else 0
-            items.append(f"{n}. 🚨 **URGENT** {contract} — {rationale[:140]}")
+        if not is_urgent or contract in seen_contracts:
+            continue
+        # Task #40 fix 8: strike-tested urgency (GUARDRAIL_STRIKE_TESTED) is
+        # a ROLL directive — surfacing urgency with NO order was the bug
+        # (items #9/#10/#12-15 on 2026-07-30). Hand these to block #3/#4,
+        # which compose the full two-leg combo ticket (or the correct
+        # earnings/churn deferral) and carry the 🚨 URGENT branding forward.
+        if "STRIKE_TESTED" in (rev.get("matrix_cell_id") or "").upper():
+            rev["_urgent_strike_tested"] = True
+            continue
+        dte = rev.get("days_to_expiry")
+        entry = rev.get("entry_price") or 0
+        mid = rev.get("current_mid") or 0
+        qty = abs(rev.get("qty", 0) or 0)
+        loss_dollars = (mid - entry) * 100 * qty if (mid > entry and entry > 0 and qty) else 0
+        # Fix 7: word-boundary truncation, never a mid-word slice.
+        items.append(f"{n}. 🚨 **URGENT** {contract} — {_truncate_at_word(rationale, 140)}")
+        # Fix 3: the Why must state the condition that actually fired.
+        _d2e_u = _days_to_earnings(
+            rev.get("underlying") or contract.split("_")[0])
+        _pre_print = _d2e_u is not None and 0 <= _d2e_u <= 14
+        if _pre_print:
             items.append(
-                f"   - **Why:** Earnings or expiry within ~14d combined with material "
+                f"   - **Why:** Earnings in {_d2e_u}d combined with material "
                 f"underwater P&L; binary gap risk dominates remaining theta. "
                 f"Closing/rolling now removes the gap exposure before the report."
             )
-            gain_parts = ["caps tail risk on the next print"]
-            if loss_dollars:
-                gain_parts.append(f"locks loss at ~${loss_dollars:,.0f} instead of letting it expand")
-            if dte:
-                gain_parts.append(f"frees the next {dte}d of collateral for redeployment")
-            items.append(f"   - **Gain:** {'; '.join(gain_parts).capitalize()}.")
-            seen_contracts.add(contract)
-            n += 1
+        elif dte is not None and 0 <= int(dte) <= 14:
+            items.append(
+                f"   - **Why:** Expiry in {int(dte)}d with material underwater "
+                f"P&L — gamma compounds daily into expiration; act before "
+                f"the final week."
+            )
+        else:
+            items.append(
+                f"   - **Why:** {_truncate_at_word(rationale, 220)} "
+                f"(review cell `{rev.get('matrix_cell_id', '?')}` — no "
+                f"imminent earnings/expiry; act on the trigger named above)."
+            )
+        gain_parts = []
+        if _pre_print:
+            gain_parts.append("caps tail risk on the next print")
+        else:
+            gain_parts.append("resolves the flagged risk on your terms")
+        if loss_dollars:
+            gain_parts.append(f"locks loss at ~${loss_dollars:,.0f} instead of letting it expand")
+        if dte:
+            gain_parts.append(f"frees the next {dte}d of collateral for redeployment")
+        items.append(f"   - **Gain:** {'; '.join(gain_parts).capitalize()}.")
+        seen_contracts.add(contract)
+        n += 1
 
-    # ---- 2. CLOSE WINNERS (capture >= 30%) ----
+    # ---- 2. CLOSE WINNERS (capture >= 30%; pre-print discipline relaxes
+    #         the floor to 20% when the print is <= 1 day away) ----
+    # Task #43 defect 2 (PLTR $200C, 2026-08-03): Friday's "+37% CLOSE"
+    # (4th consecutive session flagged, earnings then 3d) decayed to +28.6%
+    # by Monday and slipped under the 30% floor — vanishing from the action
+    # list on the DAY of the print, when its urgency peaked. Invariant: a
+    # profitable short option on an underlying with earnings ≤ 1 day away
+    # must surface a close-or-directive decision item (the wheelhouz
+    # "close before print, re-sell after crush" rule).
+    _PRE_PRINT_CLOSE_MIN_CAPTURE = 20.0
     for rev in options_reviews:
         contract = rev.get("contract", "")
         if contract in seen_contracts:
@@ -774,10 +2056,117 @@ def render_action_list(
         qty = abs(rev.get("qty", 0) or 0)
         if entry and mid and entry > 0 and qty > 0:
             capture_pct = (entry - mid) / entry * 100
-            if capture_pct >= 30:
+            _d2e_close = _days_to_earnings(
+                rev.get("underlying") or contract.split("_")[0])
+            _print_imminent = _d2e_close is not None and 0 <= _d2e_close <= 1
+            if capture_pct >= 30 or (
+                    _print_imminent
+                    and capture_pct >= _PRE_PRINT_CLOSE_MIN_CAPTURE):
                 pl_dollars = (entry - mid) * 100 * qty
                 limit = mid * 1.05
                 dte = rev.get("days_to_expiry") or 0
+                # 2026-08-06 defect 1: gamma-escape close — DTE ≤ 10 with
+                # ≥30% captured (or the guardrail cell itself fired). Side-
+                # agnostic: puts AND calls.
+                _gamma_escape = (
+                    "GAMMA_ESCAPE" in (rev.get("matrix_cell_id") or "").upper()
+                    or (dte is not None and 0 <= int(dte) <= 10
+                        and capture_pct >= 30))
+                # Bug #25: standing directive → suppress the CLOSE entirely
+                # (footer transparency line instead; aging clock stops).
+                if _close_held_by_directive(contract, rev, capture_pct, dte):
+                    seen_contracts.add(contract)
+                    continue
+                # ── ONE-VOICE rule (2026-08-04 fix 1) ────────────────────
+                # A card carries exactly ONE recommendation. The observed
+                # briefing rendered "**CLOSE** VRT_PUT_280_20270115 — +30%
+                # ($+2,226)" with "**⚖️ Verdict: ROLL, don't close**" inline;
+                # the take-profit path never consulted the verdict (task #37
+                # wired it into the ROLL path only). A profitable close whose
+                # verdict is ROLL_DONT_CLOSE resolves to ONE recommendation:
+                # TAKE PROFIT VIA ROLL-DOWN (two-leg ticket) or, with no
+                # credit-positive roll-down priced, HOLD — GTC at 50%.
+                # CLOSE_* verdicts (they agree with closing) are unchanged.
+                # Kill switch: exit_cost.one_voice (default true).
+                _ov_anatomy = None
+                _ov_status = None
+                _ov_anatomy_computed = False
+                _ov_cfg = (((snapshot_data or {}).get("_config", {}) or {})
+                           .get("exit_cost") or {})
+                if _ov_cfg.get("one_voice", True):
+                    # 2026-08-05 defect 2 (VRT $280P/$270P): near-money puts
+                    # are IN scope — yesterday's ITM "ROLL, don't close"
+                    # position drifting 0.3% OTM must not silently lose its
+                    # anatomy/verdict on today's CLOSE card.
+                    _ov_anatomy, _ov_status = _exit_cost_anatomy(
+                        rev, snapshot_data, equity_reviews, date_str,
+                        include_near_money=True)
+                    _ov_anatomy_computed = True
+                    if (_ov_anatomy is not None
+                            and _ov_anatomy.verdict in ("ROLL_DONT_CLOSE",
+                                                        "HOLD_FOR_DECAY")):
+                        # One card, one voice: ROLL_DONT_CLOSE resolves to
+                        # TAKE PROFIT VIA ROLL-DOWN / HOLD — GTC; a
+                        # HOLD_FOR_DECAY verdict (newly reachable via the
+                        # near-money gate) resolves to HOLD — GTC directly —
+                        # never a CLOSE headline contradicted by a HOLD
+                        # verdict inline.
+                        items.extend(_one_voice_take_profit_lines(
+                            n, contract, rev, _ov_anatomy, capture_pct,
+                            snapshot_data, equity_reviews, date_str))
+                        seen_contracts.add(contract)
+                        n += 1
+                        continue
+                # ── Dollar action floor (rule #43 micro-fix, 2026-08-04) ──
+                # Observed: "CLOSE AMZN_CALL_330_20260904 — +30% ($+27);
+                # buy-to-close limit $0.66 ... Remaining ~$63 of theta" — a
+                # recommendation to bank twenty-seven dollars. Churn noise:
+                # commissions/spread eat a meaningful fraction, and it
+                # occupies an action slot. A take-profit close whose banked
+                # profit is below close_winner_min_dollars (default $100)
+                # demotes to a Watch-panel note (rule #24 — visible, never
+                # hidden). Exceptions that ALWAYS surface: pre-print closes
+                # (earnings ≤ 2d), loss-stops, CLOSE_URGENT/recovery
+                # verdicts, gamma-escape (DTE ≤ 10, capture ≥ 30%) closes on
+                # ANY short option — put or CALL. 2026-08-06 defect 1: the
+                # put-only exception floored the SPY_CALL_784_20260811
+                # gamma-escape (77% captured, $87) two days running while
+                # Risk Alerts screamed CLOSE_FOR_PROFIT.
+                # (CLOSE INTO RECOVERY and the URGENT block are separate
+                # composers — never floored.) Config 0 disables.
+                try:
+                    _cw_floor = float(
+                        ((snapshot_data or {}).get("_config", {}) or {})
+                        .get("close_winner_min_dollars", 100))
+                except (TypeError, ValueError):
+                    _cw_floor = 100.0
+                if _cw_floor > 0 and pl_dollars < _cw_floor:
+                    _cw_pre_print = (_d2e_close is not None
+                                     and 0 <= _d2e_close <= 2)
+                    _cw_gamma_escape = _gamma_escape
+                    _cw_loss_stop = "LOSS_STOP" in (
+                        rev.get("matrix_cell_id") or "").upper()
+                    if not _ov_anatomy_computed:
+                        try:
+                            _ov_anatomy, _ov_status = _exit_cost_anatomy(
+                                rev, snapshot_data, equity_reviews, date_str,
+                                include_near_money=True)
+                        except Exception:
+                            _ov_anatomy = None
+                    _cw_urgent_verdict = (
+                        _ov_anatomy is not None
+                        and _ov_anatomy.verdict == "CLOSE_URGENT")
+                    if not (_cw_pre_print or _cw_gamma_escape
+                            or _cw_loss_stop or _cw_urgent_verdict):
+                        rev["_close_floor_demotion"] = (
+                            f"+{capture_pct:.0f}% captured but only "
+                            f"${pl_dollars:,.0f} — below the "
+                            f"${_cw_floor:,.0f} action floor; let it decay "
+                            f"or close at your convenience (buy-to-close "
+                            f"~${limit:.2f})."
+                        )
+                        seen_contracts.add(contract)
+                        continue
                 strike = _strike_from_contract(contract, rev.get("strike"))
                 opt_type = (rev.get("type") or "").upper()
                 if opt_type == "PUT" and strike:
@@ -807,23 +2196,57 @@ def render_action_list(
                 )
                 if yield_res:
                     items.append(f"   - {format_yield_line(yield_res)}")
-                items.append(
-                    f"   - **Why:** {capture_pct:.0f}% of max profit already captured "
-                    f"with {dte}d still on the contract. Remaining ~${remaining_premium:,.0f} of "
-                    f"theta isn't worth carrying the gamma/gap risk for {dte}d more — "
-                    f"close-at-50% rule (and stretch to ~30% for OTM/short-dated)."
-                )
+                if _print_imminent:
+                    items.append(
+                        f"   - **Why:** Earnings print in {_d2e_close}d with "
+                        f"{capture_pct:.0f}% of max profit captured — close "
+                        f"BEFORE the print to lock the gain, re-sell after the "
+                        f"IV crush (pre-print discipline: a profitable short "
+                        f"option doesn't hold through the binary unmanaged)."
+                    )
+                elif _gamma_escape:
+                    # 2026-08-06 defect 1: the gamma rationale travels with
+                    # the action — a gamma-escape close is about the risk
+                    # zone, not the close-at-50% rule.
+                    items.append(
+                        f"   - **Why:** Gamma-escape — DTE {int(dte)} ≤ 10 with "
+                        f"{capture_pct:.0f}% captured. The remaining "
+                        f"~${remaining_premium:,.0f} of theta rides final-week "
+                        f"gamma, where one adverse gap erases weeks of decay — "
+                        f"lock the win before the gamma-risk zone."
+                    )
+                else:
+                    items.append(
+                        f"   - **Why:** {capture_pct:.0f}% of max profit already captured "
+                        f"with {dte}d still on the contract. Remaining ~${remaining_premium:,.0f} of "
+                        f"theta isn't worth carrying the gamma/gap risk for {dte}d more — "
+                        f"close-at-50% rule (and stretch to ~30% for OTM/short-dated)."
+                    )
                 items.append(
                     f"   - **Gain:** Locks ${pl_dollars:+,.0f} profit and {collateral_label}; "
                     f"redeploy that collateral into a fresh higher-premium opportunity."
                 )
+                # Exit-cost anatomy footer — NEVER silent (2026-08-05 defect
+                # 2): full anatomy when computable (incl. near-money), a
+                # fail-closed "verify at broker" warning with yesterday's
+                # verdict when it isn't, "OTM — pure time value" for genuine
+                # OTM winners.
+                if not _ov_anatomy_computed:
+                    _ov_anatomy, _ov_status = _exit_cost_anatomy(
+                        rev, snapshot_data, equity_reviews, date_str,
+                        include_near_money=True)
+                items.extend(_close_anatomy_footer(
+                    rev, _ov_anatomy, _ov_status, snapshot_data,
+                    equity_reviews, date_str))
                 seen_contracts.add(contract)
                 n += 1
 
     # ---- 3. EXECUTE ROLL — use tax-aware ranker (core mode for core_positions) ----
     ROLL_CREDIT_THRESHOLD = 1000.0
     config_local = (snapshot_data or {}).get("_config", {}) if snapshot_data else {}
-    core_tickers_set = set(config_local.get("core_positions", []))
+    # 2026-08-04 (PLTR): "core" = core_positions ∪ Tier A — a Tier A name
+    # gets the same roll tenor allowance / tax-aware core ranking.
+    core_tickers_set = _core_union_safe(config_local)
     ltcg_rate_local = float(config_local.get("ltcg_rate", 0.238))
 
     for rev in options_reviews:
@@ -910,6 +2333,111 @@ def render_action_list(
             # so the user can act on these opportunistically if they want.
             continue
 
+        # Rule #3 hard gate (TSM 2026-07-30): even an explicit matrix ROLL
+        # rec cannot surface an actionable short-put roll without genuine
+        # assignment risk — moneyness < 1.03 OR measured |δ| ≥ 0.40. Demote
+        # to the Watch panel (note stashed on the review), never a ticket.
+        if _opt_type_gate == "PUT" and not _short_put_roll_gate_ok(
+                _moneyness, rev.get("delta")):
+            rev["_roll_gate_demotion"] = _roll_gate_demotion_note(
+                _moneyness, rev.get("delta"))
+            seen_contracts.add(contract)
+            continue
+
+        # Task #40 fix 6 (continued): profitable + OTM + measured δ below
+        # the tested threshold → nothing to defend (the AVGO shape).
+        if _opt_type_gate == "PUT":
+            _ntd = _nothing_to_defend_note(rev, _moneyness)
+            if _ntd:
+                rev["_roll_gate_demotion"] = _ntd
+                seen_contracts.add(contract)
+                continue
+
+        # Task #40 fix 8: an URGENT strike-tested contract covered by a
+        # standing directive gets the transparency note, not the nag —
+        # the user's decision is on file.
+        if rev.get("_urgent_strike_tested") and _adv_directives:
+            try:
+                from analysis.advisor_directives import directive_holds_contract
+                _cap_u = 0.0
+                _e_u = float(rev.get("entry_price") or 0)
+                _m_u = float(rev.get("current_mid") or 0)
+                if _e_u > 0:
+                    _cap_u = (_e_u - _m_u) / _e_u
+                _held_u = directive_holds_contract(
+                    contract, _adv_directives, _cap_u,
+                    int(rev.get("days_to_expiry") or 0), _spot_gate or None)
+            except Exception:
+                _held_u = None
+            if _held_u is not None:
+                _tested_directive_notes.append(
+                    f"_⏸ {contract} strike-tested (urgent) — held by "
+                    f"standing directive; decision on file_"
+                )
+                seen_contracts.add(contract)
+                continue
+
+        # Task #40 fix 2: churn guard — no roll recommendation on a contract
+        # opened within roll.min_position_age_days (default 5 trading days).
+        # VRT_PUT_280 was filled at ~2:23 PM and the 2:54 PM run recommended
+        # re-rolling it for -$2,740; QCOM $185P opened the same morning got a
+        # same-day re-roll. Safety always wins: loss-stop/crash cells are
+        # exempt inside check_churn_guard. Fail-open on unmeasurable age.
+        try:
+            from analysis.churn_guard import check_churn_guard
+            _churn_note = check_churn_guard(
+                contract, rev.get("matrix_cell_id"),
+                (snapshot_data or {}).get("_position_ages"), config_local)
+        except Exception:
+            _churn_note = None
+
+        # ── Task #37 fix 1: the exit-cost VERDICT drives the action ──────
+        # (rule #14's pattern — the action list defers to the position's own
+        # advisor). When analysis/exit_cost.py says CLOSE — clean exit
+        # (mostly intrinsic), composing a large-debit roll on top of it is a
+        # contradiction: the 2026-07-30 briefing spent $44K of roll debits
+        # while five of those positions' own verdicts said closing was cheap.
+        # Kill switch: exit_cost.verdict_drives_action (default true).
+        _xc_cfg = (config_local.get("exit_cost") or {})
+        _verdict_drives = bool(_xc_cfg.get("verdict_drives_action", True))
+        _anatomy = None
+        if _verdict_drives:
+            _anatomy, _ = _exit_cost_anatomy(rev, snapshot_data,
+                                             equity_reviews, date_str)
+        if _anatomy is not None and _anatomy.verdict in _CLOSE_VERDICTS:
+            items.extend(_verdict_close_lines(
+                n, contract, rev, _anatomy, snapshot_data,
+                equity_reviews, date_str, config_local))
+            seen_contracts.add(contract)
+            n += 1
+            continue
+        if _anatomy is not None and _anatomy.verdict == "HOLD_FOR_DECAY":
+            # HOLD_FOR_DECAY suppresses BOTH the close and the roll ticket —
+            # the position renders in Watch with the verdict note only
+            # (per_option_commentary surfaces it there).
+            seen_contracts.add(contract)
+            continue
+        if _anatomy is not None and _anatomy.verdict == "HOLD_FOR_BASIS":
+            # Task #40 fix 1: HOLD_FOR_BASIS suppresses the roll ticket
+            # exactly like CLOSE_CLEAN / HOLD_FOR_DECAY drive theirs — the
+            # 2026-07-30 briefing rendered "Assignment acceptable — hold for
+            # basis" UNDER an actionable $1,027/$2,740 debit-roll order on
+            # QCOM $185P / VRT $280P. Verdict + anatomy render; no ticket.
+            items.extend(_verdict_hold_basis_lines(
+                n, contract, rev, _anatomy, snapshot_data,
+                equity_reviews, date_str, churn_age_note=_churn_note))
+            seen_contracts.add(contract)
+            n += 1
+            continue
+
+        # Task #40 fix 2 (continued): a measurable age below the churn floor
+        # demotes the roll to a Watch note — the position the user JUST
+        # opened gets a settling period before any re-roll recommendation.
+        if _churn_note:
+            rev["_churn_guard_demotion"] = _churn_note
+            seen_contracts.add(contract)
+            continue
+
         underlying = rev.get("underlying", contract.split("_")[0])
         is_core = underlying in core_tickers_set
 
@@ -948,13 +2476,65 @@ def render_action_list(
         _roll_cfg = (config_local.get("roll") or {})
         _max_action_tenor = int(_roll_cfg.get("max_action_tenor_days", 120))
         _max_tenor_for_pos = _max_action_tenor * 3 if is_core else _max_action_tenor
+
+        # Task #40 fix 8: on an URGENT strike-tested put with an OPEN credit
+        # window, rank among the same-or-lower-strike CREDIT candidates —
+        # the whole point of the strike-test alarm is "roll while the credit
+        # window is open"; picking a debit roll there contradicts it.
+        candidates_for_rank = candidates
+        if rev.get("_urgent_strike_tested") and _opt_type_gate == "PUT":
+            _cw_u = (((snapshot_data or {}).get("_credit_windows") or {})
+                     .get(contract)) or {}
+            if _cw_u.get("state") == "open":
+                _credit_cands = [
+                    c for c in candidates
+                    if c.get("id") != "A"
+                    and float(c.get("netDollars") or 0) > 0
+                    and float((c.get("instruction") or {}).get("sell_strike")
+                              or 0) <= (cur_strike_for_rank or 0) + 0.01
+                ]
+                if _credit_cands:
+                    candidates_for_rank = _credit_cands
+
         best, _scores = rank_candidates(
-            candidates, spot=underlying_spot or cur_strike_for_rank,
+            candidates_for_rank, spot=underlying_spot or cur_strike_for_rank,
             is_core=is_core, embedded_tax_dollars=embedded_tax,
             min_credit_threshold=ROLL_CREDIT_THRESHOLD,
             max_tenor_days=_max_tenor_for_pos,
+            # Side-aware ranking (CLAUDE.md #42): defensive short-PUT rolls
+            # rank by strike reduction, never max credit — a put roll-up is
+            # deeper ITM, not "more upside".
+            option_type=_opt_type_gate or "CALL",
         )
         if best:
+            # ── Task #37 fix 2: earnings guard runs BEFORE the ticket is
+            # composed. A 🔴 BLOCK on the STO leg (it would span an imminent
+            # print) must never render under a fully actionable limit order
+            # ("NEVER sell puts through earnings"). Preference order:
+            #   1. Swap to an alternative candidate whose expiration CLEARS
+            #      the print (expires before earnings) with viable premium;
+            #   2. else demote to a visible, non-actionable ROLL DEFERRED
+            #      entry (rule #24 — demote, never hide).
+            _today_iso_gate = date_str or datetime.now().strftime("%Y-%m-%d")
+            _earn_cal_gate = (snapshot_data or {}).get("earnings_calendar", {}) or {}
+            earnings_deferred = False
+            pre_print_swap = False
+            _gate_exp = (best.get("instruction") or {}).get("sell_expiration") or ""
+            _gate_check = check_earnings_conflict(
+                rev.get("underlying", contract.split("_")[0]),
+                _gate_exp, _earn_cal_gate, _today_iso_gate)
+            if _gate_check.get("level") == "block":
+                _alt = _pre_print_roll_alternative(
+                    candidates, cur_strike_for_rank,
+                    _opt_type_gate or "PUT",
+                    rev.get("underlying", contract.split("_")[0]),
+                    _earn_cal_gate, _today_iso_gate, underlying_spot)
+                if _alt is not None and _alt is not best:
+                    best = _alt
+                    pre_print_swap = True
+                else:
+                    earnings_deferred = True
+
             credit = best.get("netDollars", 0)
             desc = best.get("description", "")
             dte_added = best.get("dteExtension") or 0
@@ -1015,12 +2595,22 @@ def render_action_list(
             position_value = (rev.get("position_value")
                               or underlying_spot * 100 * qty
                               or 1.0)
-            roll_yield = compute_roll_yield(
-                new_premium=new_mid, new_strike=new_strike, new_dte=dte_added or 30,
-                contracts=int(qty), spot=underlying_spot or 1,
-                net_credit_dollars=credit, position_value=position_value,
-                old_strike=cur_strike,
-            )
+            try:
+                roll_yield = compute_roll_yield(
+                    new_premium=new_mid, new_strike=new_strike, new_dte=dte_added or 30,
+                    contracts=int(qty), spot=underlying_spot or 1,
+                    net_credit_dollars=credit, position_value=position_value,
+                    old_strike=cur_strike,
+                    option_type=opt_type or "CALL",
+                )
+            except TypeError:
+                # Older yield-calculator without option_type — fall back
+                roll_yield = compute_roll_yield(
+                    new_premium=new_mid, new_strike=new_strike, new_dte=dte_added or 30,
+                    contracts=int(qty), spot=underlying_spot or 1,
+                    net_credit_dollars=credit, position_value=position_value,
+                    old_strike=cur_strike,
+                )
 
             # Headline — option-type aware. For CALLs, higher strike = more
             # cap headroom (defensive). For PUTs, higher strike = closer to
@@ -1062,10 +2652,206 @@ def render_action_list(
                 )
             credit_label = (f"+${credit:,.0f} net credit"
                             if credit >= 0 else f"−${abs(credit):,.0f} net debit (paying for cushion)")
+
+            if earnings_deferred:
+                # Task #37 fix 2 — demote visibly (rule #24): keep the
+                # analysis (anatomy, why, reference strikes) but strip every
+                # executable order/limit line.
+                _earn_str = _earn_cal_gate.get(
+                    rev.get("underlying", contract.split("_")[0]))
+                try:
+                    _earn_pretty = datetime.strptime(
+                        str(_earn_str)[:10], "%Y-%m-%d").strftime("%b %d")
+                except (ValueError, TypeError):
+                    _earn_pretty = str(_earn_str or "the upcoming")
+
+                # ── Task #40 fix 4: CLOSE INTO RECOVERY ──────────────────
+                # When the roll is earnings-blocked AND the position has
+                # recovered to better than recovery_close.max_loss_pct
+                # (default -5% of premium) AND earnings are ≤ 14d away,
+                # exit flat pre-print instead of surfacing nothing (the LITE
+                # $700P case: underwater by ~$2 after a +14% bounce, earnings
+                # 12d away, roll correctly blocked — and NO action surfaced).
+                # PRECEDENCE: this outranks the ROLL_DONT_CLOSE exit-cost
+                # verdict — that verdict optimizes premium mechanics
+                # (swap inflated IV for inflated IV); it does not price the
+                # binary event risk of holding a big short put through a
+                # print. Removing the binary at ~zero cost wins.
+                _rc_cfg = (config_local.get("recovery_close") or {})
+                try:
+                    _rc_max_loss = abs(float(
+                        _rc_cfg.get("max_loss_pct", 0.05)))
+                except (TypeError, ValueError):
+                    _rc_max_loss = 0.05
+                _loss_frac = ((cur - entry) / entry) if entry > 0 else None
+                _d2e_rc = None
+                try:
+                    if _earn_str:
+                        _e_rc = datetime.strptime(
+                            str(_earn_str)[:10], "%Y-%m-%d").date()
+                        _t_rc = datetime.strptime(
+                            _today_iso_gate, "%Y-%m-%d").date()
+                        _d2e_rc = (_e_rc - _t_rc).days
+                except (ValueError, TypeError):
+                    _d2e_rc = None
+                if (_loss_frac is not None and _loss_frac <= _rc_max_loss
+                        and _d2e_rc is not None and 0 < _d2e_rc <= 14):
+                    _btc_cost_rc = cur * 100.0 * qty
+                    _pl_word = (f"{-_loss_frac * 100:+.1f}% of premium"
+                                if _loss_frac else "flat")
+                    items.append(
+                        f"{n}. **CLOSE INTO RECOVERY** {contract} — "
+                        f"recovered to ~breakeven ({_pl_word}) before the "
+                        f"{_earn_pretty} print; buy-to-close {int(qty)}× "
+                        f"limit ${cur:.2f} (≈ ${_btc_cost_rc:,.0f}), GTC"
+                    )
+                    items.append(
+                        f"   - **Why:** position recovered to ~breakeven "
+                        f"before the {_earn_pretty} print — exiting flat "
+                        f"removes the binary; re-enter post-print on your "
+                        f"own terms. (The roll path is earnings-blocked; "
+                        f"a ROLL-don't-close verdict optimizes premium "
+                        f"mechanics, not event risk — event risk wins here.)"
+                    )
+                    items.append(
+                        f"   - **Earnings check:** "
+                        f"{format_earnings_badge(_gate_check)}")
+                    items.extend(_exit_cost_lines(rev, snapshot_data,
+                                                  equity_reviews, date_str))
+                    # Portfolio-intent note when the ticker is flagged for
+                    # deconcentration in the standing directives.
+                    _und_rc = rev.get("underlying", contract.split("_")[0])
+                    try:
+                        _decon = any(
+                            _und_rc in (d.raw_text or "")
+                            and any(k in (d.raw_text or "").lower()
+                                    for k in ("deconcentrat", "reduce",
+                                              "trim", "lighten"))
+                            for d in _adv_directives)
+                    except Exception:
+                        _decon = False
+                    if _decon:
+                        items.append(
+                            f"   - _Portfolio intent: {_und_rc} is flagged "
+                            f"for deconcentration in your directives — "
+                            f"closing (not rolling) also serves the "
+                            f"reduction plan._"
+                        )
+                    items.append(
+                        f"   - **Account:** "
+                        f"{_route_account('CLOSE', _und_rc, rev.get('account') or rev.get('account_type'), config_local.get('accounts', []) or [])}"
+                    )
+                    seen_contracts.add(contract)
+                    n += 1
+                    continue
+                _def_prefix = ("🚨⏸ **URGENT — ROLL DEFERRED (earnings block)**"
+                               if rev.get("_urgent_strike_tested")
+                               else "⏸ **ROLL DEFERRED (earnings block)**")
+                items.append(
+                    f"{n}. {_def_prefix} {contract} — "
+                    f"{roll_label}: {credit_label} — analysis only, no order"
+                )
+                items.append(
+                    f"   - **Earnings check:** {format_earnings_badge(_gate_check)}")
+                items.append(
+                    f"   - Reference legs (NOT an order): BTC {int(qty)}× "
+                    f"${cur_strike:g}{opt_type[:1]} {cur_exp_pretty} "
+                    f"(mid ~${cur:.2f}) → STO {int(qty)}× "
+                    f"${new_strike:g}{opt_type[:1]} {new_exp_pretty} "
+                    f"(bid ${new_bid:.2f} / mid ${new_mid:.2f})."
+                )
+                items.extend(_exit_cost_lines(rev, snapshot_data,
+                                              equity_reviews, date_str))
+                items.append("   - **Why (for reference):** " + _roll_why_text(
+                    is_put, credit, underwater, unrealized_loss,
+                    cur_strike, new_strike, underlying_spot, dte_added,
+                    cur_exp_pretty, new_exp_pretty))
+                items.append(
+                    f"   - _STO leg spans the {_earn_pretty} print — "
+                    f"re-evaluate after earnings or pick a post-print "
+                    f"expiration._"
+                )
+                seen_contracts.add(contract)
+                n += 1
+                continue
+
+            # ── Task #40 fix 5: debit-to-collateral sanity cap ────────────
+            # IREN: a $652 roll debit on $3,700 of new collateral = 18% —
+            # disproportionate. Above roll.max_debit_pct_of_collateral
+            # (default 8%) the roll demotes to a Watch note; the exit-cost
+            # verdict (already rendered there) proposes the alternative.
+            if is_put and credit < 0:
+                try:
+                    _max_debit_frac = float(
+                        _roll_cfg.get("max_debit_pct_of_collateral", 0.08))
+                except (TypeError, ValueError):
+                    _max_debit_frac = 0.08
+                _new_collateral = (new_strike or 0) * 100.0 * qty
+                if (_new_collateral > 0
+                        and abs(credit) > _max_debit_frac * _new_collateral):
+                    _debit_pct = abs(credit) / _new_collateral * 100.0
+                    rev["_debit_cap_demotion"] = (
+                        f"Roll demoted (debit cap): ${abs(credit):,.0f} "
+                        f"debit is {_debit_pct:.0f}% of the "
+                        f"${_new_collateral:,.0f} new collateral "
+                        f"(cap {_max_debit_frac * 100:.0f}%) — "
+                        f"disproportionate; close or take assignment "
+                        f"instead (see the exit-cost verdict)."
+                    )
+                    seen_contracts.add(contract)
+                    # ── Task #43 fix 2 (NOK $11P, 2026-07-31) ─────────────
+                    # A demoted roll must never swallow the position's own
+                    # exit path: control falls to the exit-cost verdict.
+                    # CLOSE_* composes the close ticket (safety net — the
+                    # upstream verdict check normally catches these first);
+                    # NEUTRAL on a GENUINELY ITM put still surfaces the
+                    # close-or-take-assignment choice the demotion note
+                    # points at (the NOK shape: verdict slipped CLOSE_CLEAN
+                    # → NEUTRAL on a $0.03 move and the item vanished).
+                    # ROLL_DONT_CLOSE / HOLD_* keep the Watch-note-only
+                    # demotion. Fail-open: no anatomy → Watch note only.
+                    if _verdict_drives and _anatomy is not None:
+                        if _anatomy.verdict in _CLOSE_VERDICTS:
+                            items.extend(_verdict_close_lines(
+                                n, contract, rev, _anatomy, snapshot_data,
+                                equity_reviews, date_str, config_local))
+                            n += 1
+                            continue
+                        if _anatomy.verdict == "NEUTRAL" and genuinely_itm:
+                            items.extend(_debit_capped_close_lines(
+                                n, contract, rev, _anatomy, _debit_pct,
+                                _max_debit_frac * 100.0, snapshot_data,
+                                equity_reviews, date_str, config_local))
+                            n += 1
+                            continue
+                    continue
+
+            # Task #40 fix 8: strike-tested urgency carries its 🚨 branding
+            # into the composed two-leg ticket.
+            _urgent_prefix = ("🚨 **URGENT — EXECUTE ROLL**"
+                              if rev.get("_urgent_strike_tested")
+                              else "**EXECUTE ROLL**")
             items.append(
-                f"{n}. **EXECUTE ROLL** {contract} — {roll_label}: {credit_label} "
+                f"{n}. {_urgent_prefix} {contract} — {roll_label}: {credit_label} "
                 f"({int(qty)} spreads @ ${spread_bid:.2f}/share)"
             )
+            if rev.get("_urgent_strike_tested"):
+                # Condition-specific urgency rationale (task #40 fix 3):
+                # the strike-test trigger, verbatim from the guardrail —
+                # measured δ / capture / DTE — never the earnings template.
+                items.append(
+                    f"   - **Why (urgent):** "
+                    f"{_truncate_at_word(rev.get('rationale') or '', 220)}")
+                _cw_line_u = None
+                try:
+                    from analysis.credit_windows import format_credit_window_line
+                    _cw_line_u = format_credit_window_line(
+                        (((snapshot_data or {}).get("_credit_windows") or {})
+                         .get(contract)) or {})
+                except Exception:
+                    _cw_line_u = None
+                if _cw_line_u:
+                    items.append(f"   - {_cw_line_u}")
             items.append(f"   - {format_yield_line(roll_yield)}")
             # Order ticket — explicit two-leg combo
             items.append(
@@ -1092,11 +2878,19 @@ def render_action_list(
                 f"Drop to {_fmt_per_share(spread_bid)} (= {_fmt_total(total_at_bid)} total) for near-certain fill. "
                 f"Range: best {_fmt_per_share(best_for_user)} / worst {_fmt_per_share(worst_for_user)}. GTC, day-good."
             )
-            why_parts = []
-            cap_buf_change = ((new_strike - (cur_strike or 0)) / underlying_spot * 100
-                              if underlying_spot else 0)
+            # Exit-cost anatomy on the BTC leg (ITM/underwater short puts):
+            # shows what closing outright would pay away vs what the roll
+            # swaps, plus the assignment basis (the 2026-07-29 LITE lesson).
+            items.extend(_exit_cost_lines(rev, snapshot_data,
+                                          equity_reviews, date_str))
+            # Side-aware cushion math (task #37 fix 4d): calls measure cap
+            # headroom above spot; puts measure downside cushion below spot.
+            cap_buf_change = _roll_cushion_change_pct(
+                is_put, cur_strike or 0, new_strike, underlying_spot)
             if not is_calendar and new_strike > (cur_strike or 0):
-                # Diagonal up
+                # Diagonal up (CALL only at this point — put roll-ups were
+                # skipped above)
+                why_parts = []
                 why_parts.append(
                     f"{rev.get('underlying', 'this name')} is a core holding — calendar rolls "
                     f"compound assignment probability over time. This diagonal-up moves the cap from "
@@ -1116,26 +2910,26 @@ def render_action_list(
                         f"strike would have triggered (if NVDA rallies past the new strike "
                         f"instead, the eventual tax bill is larger but on a larger gain)"
                     )
-            elif underwater:
-                why_parts.append(
-                    f"Position underwater by ~${unrealized_loss:,.0f}; rather than realizing that loss, "
-                    f"the roll books net credit by extending duration"
+                if dte_added:
+                    why_parts.append(
+                        f"adds {dte_added} more days of theta runway "
+                        f"({cur_exp_pretty} → {new_exp_pretty})")
+                items.append(f"   - **Why:** {'; '.join(why_parts)}.")
+            else:
+                # Sign-aware Why (task #37 fix 4c): a DEBIT roll never claims
+                # "books net credit".
+                items.append("   - **Why:** " + _roll_why_text(
+                    is_put, credit, underwater, unrealized_loss,
+                    cur_strike or 0, new_strike, underlying_spot, dte_added,
+                    cur_exp_pretty, new_exp_pretty))
+            if pre_print_swap:
+                items.append(
+                    "   - _Expiration chosen to clear the earnings print "
+                    "(the ranked best roll's STO leg would have spanned it)._"
                 )
-            else:
-                why_parts.append("Best candidate captures meaningful additional premium without giving up strike protection")
-            if dte_added:
-                why_parts.append(f"adds {dte_added} more days of theta runway ({cur_exp_pretty} → {new_exp_pretty})")
-            items.append(f"   - **Why:** {'; '.join(why_parts)}.")
-            gain_parts = []
-            if credit >= 0:
-                gain_parts.append(f"${credit:,.0f} cash credited today")
-            else:
-                gain_parts.append(f"${abs(credit):,.0f} debit paid for {cap_buf_change:+.1f}% more cap headroom")
-            if dte_added:
-                gain_parts.append(f"clock reset by {dte_added}d for continued theta capture")
-            if underwater and credit >= 0:
-                gain_parts.append("avoids realizing the unrealized loss while preserving the path to break-even")
-            items.append(f"   - **Gain:** {'; '.join(gain_parts).capitalize()}.")
+            items.append("   - **Gain:** " + _roll_gain_text(
+                is_put, credit, underwater, cur_strike or 0, new_strike,
+                underlying_spot, dte_added))
 
             # Earnings guard on the new short leg
             today_iso_r = date_str or datetime.now().strftime("%Y-%m-%d")
@@ -1166,6 +2960,16 @@ def render_action_list(
             # 10%-OTM short puts (spot $210, strike $190) show as "delta 0.65,
             # ITM" — completely wrong.
             new_delta = (instruction or {}).get("sell_delta") or instruction.get("delta")
+            # MEASURED delta only (chain-sourced) — the moneyness heuristic
+            # below is a display approximation and must never feed the
+            # trade-validator's EV / P(assignment) math (rule #19).
+            measured_delta = new_delta if new_delta is not None else best.get("deltaChange")
+            try:
+                measured_delta = float(measured_delta) if measured_delta else None
+            except (TypeError, ValueError):
+                measured_delta = None
+            if new_delta is None and measured_delta is not None:
+                new_delta = measured_delta
             if new_delta is None and underlying_spot and new_strike:
                 moneyness = underlying_spot / new_strike  # spot/strike
                 if opt_type == "PUT":
@@ -1192,7 +2996,9 @@ def render_action_list(
                         new_delta = 0.65
                     else:
                         new_delta = 0.85
-            delta_str = _format_delta_line(new_delta)
+            delta_str = _format_delta_line(new_delta, opt_type,
+                                           strike=new_strike,
+                                           spot=underlying_spot)
             if delta_str:
                 items.append(f"   - {delta_str}")
 
@@ -1204,7 +3010,13 @@ def render_action_list(
             )
             items.append(f"   - **Account:** {routing}")
 
-            # Trade validator — EV / break-even / verdict
+            # Trade validator — EV / break-even / verdict.
+            # Task #37 fix 4a: the old path fed hardcoded delta=0.30 and
+            # credit=0 on debit rolls, so all 14 cards rendered the same
+            # "EV $+0 — P(assignment) 30%" — a constant masquerading as
+            # data. Now the validator only runs on inputs it can actually
+            # measure: a real credit AND a chain-measured delta. Debit
+            # rolls / missing delta → honest "n/a", never a fake number.
             try:
                 if not is_calendar and new_strike > (cur_strike or 0):
                     val = validate_diagonal_up_roll(
@@ -1215,18 +3027,31 @@ def render_action_list(
                         debit_per_share=abs(spread_bid) if credit < 0 else -spread_bid,
                         contracts=int(qty),
                         new_dte=dte_added or 30,
-                        new_delta=abs(new_delta or 0.10),
+                        new_delta=abs(measured_delta) if measured_delta else 0.10,
                         current_delta=0.30,
+                    )
+                elif credit <= 0:
+                    val = None
+                    items.append(
+                        "   - **Trade-validator:** EV n/a (not computed for "
+                        "debit rolls — see the exit-cost verdict above)"
+                    )
+                elif not measured_delta:
+                    val = None
+                    items.append(
+                        "   - **Trade-validator:** EV n/a (chain carried no "
+                        "delta for the STO leg — verify P(assignment) at the "
+                        "broker)"
                     )
                 else:
                     val = validate_calendar_roll(
                         spot=underlying_spot or 0,
                         strike=new_strike,
                         new_premium=new_mid,
-                        credit_per_share=spread_bid if credit > 0 else 0,
+                        credit_per_share=spread_bid,
                         contracts=int(qty),
                         new_dte=dte_added or 30,
-                        delta=0.30,
+                        delta=abs(measured_delta),
                     )
                 if val is not None:
                     items.append(f"   - {format_validation_line(val)}")
@@ -1247,9 +3072,12 @@ def render_action_list(
     # ticker in core_positions, NEVER recommend CLOSE. The user has explicitly
     # said they roll core CCs year after year and don't want to realize the
     # short-call loss. Pivot CLOSE → DEFENSIVE ROLL UP-AND-OUT.
-    core_tickers_actionable = set((
-        (snapshot_data or {}).get("_config", {}) or {}
-    ).get("core_positions", []) or [])
+    # 2026-08-04 (PLTR): the observed briefing rendered "CLOSE PLTR_CALL_200
+    # — Loss stop 2.46x" on a 24%-OTM covered call because PLTR is Tier A in
+    # position_tiers but absent from core_positions. Core protections key off
+    # the UNION (core_positions ∪ tier_a_core) — single source of conviction.
+    core_tickers_actionable = _core_union_safe(
+        (snapshot_data or {}).get("_config", {}) or {})
 
     actionable_decisions = {"CLOSE", "CLOSE_FOR_PROFIT", "ROLL_OUT", "ROLL_OUT_AND_DOWN",
                             "ROLL_OUT_AND_UP", "TAKE_ASSIGNMENT", "LET_EXPIRE"}
@@ -1404,6 +3232,75 @@ def render_action_list(
                 seen_contracts.add(contract)
                 continue
 
+            # Rule #3 hard gate (TSM 2026-07-30) — same gate as block #3:
+            # an actionable roll directive on a short PUT needs genuine
+            # assignment risk (moneyness < 1.03 OR measured |δ| ≥ 0.40).
+            # Demote to a Watch note otherwise.
+            if _otype == "PUT":
+                _mny4 = (_spot_g / _strike_g) if (_spot_g and _strike_g) else 1.0
+                if not _short_put_roll_gate_ok(_mny4, rev.get("delta")):
+                    rev["_roll_gate_demotion"] = _roll_gate_demotion_note(
+                        _mny4, rev.get("delta"))
+                    seen_contracts.add(contract)
+                    continue
+                # Task #40 fix 6 (continued): the AVGO nothing-to-defend
+                # demotion on the directive path too.
+                _ntd4 = _nothing_to_defend_note(rev, _mny4)
+                if _ntd4:
+                    rev["_roll_gate_demotion"] = _ntd4
+                    seen_contracts.add(contract)
+                    continue
+
+            # Task #40 fix 2: churn guard on the roll-directive path too —
+            # a contract the user just opened gets a settling period.
+            try:
+                from analysis.churn_guard import check_churn_guard
+                _churn_note4 = check_churn_guard(
+                    contract, rev.get("matrix_cell_id"),
+                    (snapshot_data or {}).get("_position_ages"),
+                    (snapshot_data or {}).get("_config", {}) or {})
+            except Exception:
+                _churn_note4 = None
+
+            # Task #37 fix 1 (block #4 path): the exit-cost verdict drives
+            # the action here too — a CLOSE_* verdict converts the roll
+            # directive into a plain CLOSE with the anatomy block, and a
+            # HOLD_FOR_DECAY verdict suppresses the ticket entirely (Watch
+            # note only).
+            _xc_cfg4 = ((snapshot_data or {}).get("_config", {}) or {}
+                        ).get("exit_cost") or {}
+            if _xc_cfg4.get("verdict_drives_action", True):
+                _an4, _ = _exit_cost_anatomy(rev, snapshot_data,
+                                             equity_reviews, date_str)
+                if _an4 is not None and _an4.verdict in _CLOSE_VERDICTS:
+                    items.extend(_verdict_close_lines(
+                        n, contract, rev, _an4, snapshot_data,
+                        equity_reviews, date_str,
+                        (snapshot_data or {}).get("_config", {}) or {}))
+                    seen_contracts.add(contract)
+                    n += 1
+                    continue
+                if _an4 is not None and _an4.verdict == "HOLD_FOR_DECAY":
+                    seen_contracts.add(contract)
+                    continue
+                if _an4 is not None and _an4.verdict == "HOLD_FOR_BASIS":
+                    # Task #40 fix 1 (block #4 path): same verdict-driven
+                    # suppression as block #3 — no roll ticket on a
+                    # hold-for-basis position.
+                    items.extend(_verdict_hold_basis_lines(
+                        n, contract, rev, _an4, snapshot_data,
+                        equity_reviews, date_str,
+                        churn_age_note=_churn_note4))
+                    seen_contracts.add(contract)
+                    n += 1
+                    continue
+
+            # Task #40 fix 2 (block #4 path): churn-guard demotion.
+            if _churn_note4:
+                rev["_churn_guard_demotion"] = _churn_note4
+                seen_contracts.add(contract)
+                continue
+
             qty = abs(float(rev.get("qty", 0) or 0))
             cur_mid = float(rev.get("current_mid", 0) or 0)
             up = ("UP" in rec)
@@ -1412,7 +3309,14 @@ def render_action_list(
                          else "DOWN and out — lower the strike to cut assignment risk" if down
                          else "OUT in time — keep the strike")
             new_side = "higher" if up else "lower" if down else "same"
-            items.append(f"{n}. **{rec}** {contract} — roll {direction}")
+            _rec_label = (f"🚨 **URGENT — {rec}**"
+                          if rev.get("_urgent_strike_tested")
+                          else f"**{rec}**")
+            items.append(f"{n}. {_rec_label} {contract} — roll {direction}")
+            if rev.get("_urgent_strike_tested"):
+                items.append(
+                    f"   - **Why (urgent):** "
+                    f"{_truncate_at_word(rev.get('rationale') or '', 220)}")
             items.append(
                 f"   - **Why:** Decision matrix triggered `{rev.get('matrix_cell_id', '?')}` "
                 f"(regime + DTE + moneyness)."
@@ -1518,6 +3422,10 @@ def render_action_list(
                     f"before placing**. Do NOT place the BTC on its own."
                 )
 
+            # Exit-cost anatomy on the BTC leg (ITM/underwater short puts).
+            items.extend(_exit_cost_lines(rev, snapshot_data,
+                                          equity_reviews, date_str))
+
             if up:
                 items.append(
                     "   - Prefer a strike above spot for headroom and a tenor ≤120 days; "
@@ -1528,7 +3436,7 @@ def render_action_list(
             continue
 
         if rec in actionable_decisions:
-            rationale = (rev.get("rationale") or "")[:140]
+            rationale = _truncate_at_word(rev.get("rationale") or "", 140)
             # Derive a real buy-to-close ticket for CLOSE_FOR_PROFIT using the
             # live chain price already on the review. Without this the verifier
             # flags the action as "lacks chain attribution" — and the user has
@@ -1539,6 +3447,13 @@ def render_action_list(
             btc_cost = current_mid * 100.0 * qty
             profit_dollars = (entry_price - current_mid) * 100.0 * qty if entry_price else 0.0
             profit_pct = ((entry_price - current_mid) / entry_price * 100.0) if entry_price else 0.0
+
+            # Bug #25: standing directive suppresses matrix CLOSE recs too
+            # (same contract, same directive, same release conditions).
+            if rec in ("CLOSE", "CLOSE_FOR_PROFIT") and _close_held_by_directive(
+                    contract, rev, profit_pct, rev.get("days_to_expiry")):
+                seen_contracts.add(contract)
+                continue
 
             ticket_suffix = ""
             if current_mid and qty:
@@ -1560,6 +3475,13 @@ def render_action_list(
                     f"${current_mid:.2f} — limit ${current_mid:.2f} GTC, day-good."
                 )
                 items.append(f"   - **Source:** Live E*TRADE chain")
+            # Exit-cost anatomy on the CLOSE ticket (ITM/underwater short
+            # puts): decompose intrinsic vs panic-IV extrinsic vs spread
+            # before the user pays the ask (the 2026-07-29 LITE lesson).
+            # Never overrides the guardrail — CLOSE stays the action; the
+            # verdict guides timing/pricing or points at the defensive roll.
+            items.extend(_exit_cost_lines(rev, snapshot_data,
+                                          equity_reviews, date_str))
             if profit_dollars:
                 gain_text = f"Locks ${profit_dollars:+,.0f} of theta gain; frees position for new opportunities."
             else:
@@ -1570,10 +3492,105 @@ def render_action_list(
             seen_contracts.add(contract)
             n += 1
 
+    # ---- 4c. FORCED DECISION — tested short puts inside the gamma window ----
+    # Task #38 Part 3: any SHORT PUT that is GENUINELY tested (rule #3 gate:
+    # spot < 1.03 × strike, or measured |δ| ≥ 0.40) with DTE ≤ forced_decision_dte
+    # (default 21) gets a mandatory decision item — roll, close, or file an
+    # accept-assignment directive. The strike-tested guardrail deliberately
+    # stops at 21 DTE; this is the hand-off. A directive-held contract renders
+    # the transparency note but NOT the nag (following a documented directive
+    # is not indecision). Fail-open: no measured spot → no item (rule #19).
+    _st_cfg = (config_local.get("strike_tested") or {})
+    _forced_dte = int(_st_cfg.get("forced_decision_dte", 21))
+    for rev in options_reviews:
+        contract = rev.get("contract", "")
+        if not contract or contract in seen_contracts:
+            continue  # an actionable item already demands the decision
+        if (rev.get("type") or "").upper() != "PUT":
+            continue
+        if float(rev.get("qty", 0) or 0) >= 0:
+            continue  # short puts only
+        _dte_f = rev.get("days_to_expiry")
+        if _dte_f is None or int(_dte_f) > _forced_dte or int(_dte_f) < 0:
+            continue
+        _strike_f = float(rev.get("strike") or 0)
+        _und_f = rev.get("underlying") or contract.split("_")[0]
+        _spot_f = float((((snapshot_data or {}).get("quotes") or {})
+                         .get(_und_f) or {}).get("last") or 0)
+        if not (_strike_f and _spot_f):
+            continue  # no measured spot → never guess "tested"
+        # Rule #3 gate (TSM 2026-07-30): "tested" means genuine assignment
+        # risk — moneyness < 1.03 OR measured |δ| ≥ 0.40 — not merely inside
+        # the walker's 8% NEAR_ATM band. A 6%-above δ-0.10 put is theta's
+        # job, not a forced decision.
+        if not _short_put_roll_gate_ok(_spot_f / _strike_f, rev.get("delta")):
+            continue
+        _entry_f = float(rev.get("entry_price") or 0)
+        _mid_f = float(rev.get("current_mid") or 0)
+        _capture_f = ((_entry_f - _mid_f) / _entry_f * 100.0) if _entry_f else 0.0
+
+        # Standing directive → note, not nag.
+        _held_f = None
+        if _adv_directives:
+            try:
+                from analysis.advisor_directives import directive_holds_contract
+                _held_f = directive_holds_contract(
+                    contract, _adv_directives, _capture_f / 100.0,
+                    int(_dte_f), _spot_f or None)
+            except Exception:
+                _held_f = None
+        if _held_f is not None:
+            _tested_directive_notes.append(
+                f"_⏸ {contract} tested at ≤{_forced_dte} DTE "
+                f"(spot ${_spot_f:,.2f} vs strike ${_strike_f:,.2f}, "
+                f"{int(_dte_f)}d left, {_capture_f:.0f}% captured) — held by "
+                f"standing directive; decision on file_"
+            )
+            seen_contracts.add(contract)
+            continue
+
+        _itm_f = _spot_f < _strike_f
+        _state_word = "ITM" if _itm_f else "at the strike"
+        items.append(
+            f"{n}. ⛔ **TESTED ≤{_forced_dte} DTE** {contract} — {_state_word} "
+            f"with {int(_dte_f)}d left: roll, close, or file an "
+            f"accept-assignment directive before gamma week"
+        )
+        items.append(
+            f"   - **Why:** spot ${_spot_f:,.2f} vs strike ${_strike_f:,.2f} "
+            f"({(_spot_f / _strike_f - 1) * 100:+.1f}%) with {_capture_f:.0f}% "
+            f"captured and {int(_dte_f)}d left — inside 21 DTE gamma compounds "
+            f"daily and roll credits shrink toward debits."
+        )
+        # Credit-window state (computed by aggregate before this list) — the
+        # roll-economics read that makes the decision concrete.
+        _cw_f = (((snapshot_data or {}).get("_credit_windows") or {})
+                 .get(contract))
+        if _cw_f:
+            try:
+                from analysis.credit_windows import format_credit_window_line
+                _cw_line_f = format_credit_window_line(_cw_f)
+                if _cw_line_f:
+                    items.append(f"   - {_cw_line_f}")
+            except Exception:
+                pass
+        items.append(
+            "   - **⛔ DECISION REQUIRED:** Execute today, or file a directive "
+            "(DEFER / accept-assignment with reason) — this item will not "
+            "silently repeat."
+        )
+        seen_contracts.add(contract)
+        n += 1
+
     # ---- 5. CONCENTRATION TRIM (>10% NLV) ----
     nlv = (snapshot_data or {}).get("balance", {}).get("accountValue", 0) or 0
     config = (snapshot_data or {}).get("_config", {}) if snapshot_data else {}
-    core_tickers = set(config.get("core_positions", []))
+    # 2026-08-04 (PLTR): "TRIM PLTR — 10.6% NLV (over 10% cap)" fired while
+    # Risk Alerts on the SAME run said "within Tier A bounds (cap 22%)".
+    # Core = core_positions ∪ Tier A; explicitly-tiered names (A/B) use
+    # concentration_cap_for_tier, so this generator can never contradict the
+    # tier-aware drift alert.
+    core_tickers = _core_union_safe(config)
     ltcg_rate = float(config.get("ltcg_rate", 0.238))
 
     # Core holdings get a higher concentration cap (default 18%) because the
@@ -1597,6 +3614,13 @@ def render_action_list(
             target_pct = max(core_cap * 0.85, 0.12)  # trim toward ~85% of core cap
         else:
             effective_cap = standard_cap
+            # Explicit Tier B income names use their tier cap (12% default)
+            # when looser than the standard cap — the tier assignment is a
+            # deliberate conviction call (rule #29); the drift alert already
+            # reads the tier cap, this generator must agree with it.
+            _tb_cap = _tier_b_cap_pct(ticker, config)
+            if _tb_cap is not None:
+                effective_cap = max(effective_cap, _tb_cap / 100.0)
             target_pct = 0.09
 
         if weight <= effective_cap:
@@ -1822,12 +3846,43 @@ def render_action_list(
                 except AttributeError:
                     exp_str = str(exp) if exp else ""
                 cost_f = float(cost or 0)
+                # Fix 4 (2026-08-04): after hedge_nag_days consecutive
+                # ignored sessions the hedge vacates the numbered slots
+                # (directive templates + Money Plan standing question
+                # instead; stalled panel entry remains via a synthetic
+                # aging action). See _hedge_nag_vacate.
+                if _hedge_nag_vacate(items, aging_info, config_local,
+                                     instr=instr, strike=strike,
+                                     exp_str=exp_str, contracts=contracts,
+                                     cost_f=cost_f):
+                    recs = []  # numbered rendering below is skipped
+            if recs:
                 cost_pct = (cost_f / nlv * 100) if nlv else 0
                 # Approx protected delta-shares: contracts × |delta| × 100; with 0.20 delta SPY puts
                 protected_notional = (contracts or 0) * 0.20 * 100 * float(strike or 0)
+                # Task #37 fix 4e: the old label printed the STRESS-coverage
+                # ratio (0.10×) as "coverage 10%" next to "target 10%" —
+                # conflating two different metrics and reading as already
+                # resolved while the Hedge Book showed 0% hedged. Use the
+                # hedge book's OWN current/target coverage (delta
+                # neutralization), re-read from CURRENT data every day.
+                # (When current >= target the hedge book emits no
+                # recommendations at all, so this item auto-resolves.)
+                hb_cur = getattr(hb, "current_coverage_pct", None)
+                if hb_cur is None and isinstance(hb, dict):
+                    hb_cur = hb.get("current_coverage_pct")
+                hb_tgt = getattr(hb, "target_coverage_pct", None)
+                if hb_tgt is None and isinstance(hb, dict):
+                    hb_tgt = hb.get("target_coverage_pct")
+                if hb_cur is not None and hb_tgt is not None:
+                    cov_label = (f"hedge coverage {float(hb_cur):.0%} → "
+                                 f"target {float(hb_tgt):.0%}; "
+                                 f"stress coverage {cov:.2f}×")
+                else:
+                    cov_label = f"stress coverage {cov:.2f}× — hedge to target"
                 items.append(
                     f"{n}. **HEDGE** Buy {contracts}× {instr.split('_')[0].upper()} put "
-                    f"${strike}P {exp_str} (~${cost_f:,.0f}; coverage {cov:.0%} → target 10%)"
+                    f"${strike}P {exp_str} (~${cost_f:,.0f}; {cov_label})"
                 )
                 # Yield via yield-calculator skill
                 spy_spot = analytics.get("spy_price") if analytics else 0
@@ -1898,9 +3953,14 @@ def render_action_list(
         if mid:
             line += f" @ ${mid:.2f} mid"
 
+        # A NEW-open put whose contract spans the print is a hard BLOCK at any
+        # distance — never just a warning (domain rule: never sell puts
+        # through earnings; same treatment as the CSP — PAID-TO-WAIT surface).
+        _nc_block = (earn_check.get("level") == "block"
+                     or earn_check.get("spans_expiration"))
         if ws_blocked:
             line += "  🚫 WASH-SALE BLOCKED"
-        if earn_check.get("level") == "block":
+        if _nc_block:
             line += "  🔴 EARNINGS CONFLICT"
         elif earn_check.get("level") == "warn":
             line += "  ⚠️ EARNINGS WARNING"
@@ -1914,8 +3974,11 @@ def render_action_list(
             # Affirmative wash-sale clearance so user knows it was checked
             items.append(f"   - **Wash-sale check:** ✅ {ticker} clear (no recent loss closures within 30d).")
 
-        if earn_check.get("level") == "block":
-            items.append(f"   - **🔴 Skip — {format_earnings_badge(earn_check)}**")
+        if _nc_block:
+            items.append(
+                f"   - **Earnings check:** "
+                f"{format_new_open_block(ticker, earn_check, exp_iso)}"
+            )
             n += 1
             continue
         # Earnings check line — ALWAYS prefixed "Earnings check:" so the
@@ -1939,7 +4002,9 @@ def render_action_list(
             items.append(f"   - {format_yield_line(csp_yield)}")
 
         # Delta line (assignment probability)
-        delta_str = _format_delta_line(idea.get("delta"))
+        delta_str = _format_delta_line(
+            idea.get("delta"), "PUT", strike=strike,
+            spot=((snapshot_data or {}).get("quotes", {}).get(ticker) or {}).get("last"))
         if delta_str:
             items.append(f"   - {delta_str}")
 
@@ -1974,6 +4039,10 @@ def render_action_list(
     # so we can surface a transparency footer (without putting them in the
     # actionable list).
     _filtered_csps: list = []
+    # Extended-band (RSI 60-70) PULLBACK CSPs demoted to a "⏸ CSPs — wait for
+    # a pullback" subsection (rule #43): full ticket shown (rule #24), never a
+    # numbered actionable rec.
+    _wait_csp_blocks: list = []
     if cash_avail > 5000 and core_tickers_set:
         ledger_path = config_local.get("wash_sale_ledger_path")
         ec_today = (snapshot_data or {}).get("earnings_calendar", {}) or {}
@@ -2055,15 +4124,89 @@ def render_action_list(
             # RSI (>70) blocks the new open (thin premium right before a
             # reversal can whip the stock through the strike). Surface in the
             # transparency footer rather than the action list.
-            _csp_rsi = rsi_discipline.rsi_for(ticker, csp_technicals)
-            _csp_rsi_assess = rsi_discipline.assess(_csp_rsi, "put", csp_rsi_th)
-            if csp_rsi_gate_on and _csp_rsi_assess.blocked:
+            #
+            # Rule #46 (PLTR 2026-08-04): the gate reads the RESOLVED RSI, not
+            # the raw snapshot value. Observed card: "PULLBACK CSP PLTR — sell
+            # $145P ... RSI 48 🟢 pullback ... ✅ GOOD TRADE" while PLTR was
+            # +29% intraday (RSI 48 was computed through YESTERDAY's close
+            # $125.65; live RSI ~70-75 = hard block). The resolver falls back
+            # to the E*TRADE position price when the yfinance quote is
+            # missing, recomputes a live Wilder RSI when the close series
+            # allows, and reports unverifiable vintages so no favourable
+            # badge can render on them.
+            _csp_res = None
+            try:
+                from analysis import vintage_guard as _vgp
+                _csp_res = _vgp.resolve_new_open_rsi(
+                    ticker, csp_technicals,
+                    quotes=(snapshot_data or {}).get("quotes"),
+                    positions=(snapshot_data or {}).get("positions"),
+                    config=config_local,
+                )
+            except Exception:
+                _csp_res = None
+            if _csp_res is not None:
+                _csp_rsi = _csp_res.get("rsi")
+                _csp_rsi_status = _csp_res.get("status", "fresh")
+                _csp_rsi_note = _csp_res.get("note")
+            else:
+                _csp_rsi = rsi_discipline.rsi_for(ticker, csp_technicals)
+                _csp_rsi_status = "fresh"
+                _csp_rsi_note = None
+            # Fail-safe: spot gapped UP past the vintage threshold and the
+            # live RSI is not computable → the live RSI is plausibly >70;
+            # a new put open may not fire on the stale favourable read.
+            if (csp_rsi_gate_on and _csp_rsi_status == "stale"
+                    and (_csp_res.get("move_pct") or 0) > 0):
                 _filtered_csps.append({
                     "ticker": ticker,
                     "verdict": "RSI_BLOCK",
-                    "reason": _csp_rsi_assess.reason,
+                    "reason": (
+                        f"{_csp_rsi_note or 'stale RSI — reverify'}; snapshot "
+                        f"RSI is pre-gap and the live RSI is plausibly >70 "
+                        f"(rule #44 fail-safe)"
+                    ),
                 })
                 continue
+            _csp_rsi_assess = rsi_discipline.assess(_csp_rsi, "put", csp_rsi_th)
+            if csp_rsi_gate_on and _csp_rsi_assess.blocked:
+                _blk_reason = _csp_rsi_assess.reason
+                if _csp_rsi_status == "live" and _csp_rsi_note:
+                    _blk_reason = f"{_blk_reason} ({_csp_rsi_note})"
+                _filtered_csps.append({
+                    "ticker": ticker,
+                    "verdict": "RSI_BLOCK",
+                    "reason": _blk_reason,
+                })
+                continue
+            # Extended-band demotion (rule #43): RSI 60-70 → the full ticket
+            # still renders below, but into the wait subsection, not the
+            # numbered action list. Computed here; applied after the block is
+            # fully built (so the wait card carries every check line).
+            _csp_wait_reason = (
+                rsi_discipline.put_extended_wait(_csp_rsi, csp_rsi_th)
+                if csp_rsi_gate_on else None
+            )
+
+            # Chase guard (rule #44, INTC 2026-08-05): a multi-session
+            # vertical baked into FRESH daily bars passes the RSI gate (RSI
+            # off an oversold base can't flag a 24% run) — measure the tape
+            # directly. Blocked → transparency footer (rule #24).
+            _csp_tech_entry = csp_technicals.get(ticker) or {}
+            _csp_chase = chase_guard.check_chase(
+                ticker,
+                closes=_csp_tech_entry.get("recent_closes")
+                if isinstance(_csp_tech_entry, dict) else None,
+                spot=spot, config=config_local,
+            )
+            if _csp_chase["blocked"]:
+                _filtered_csps.append({
+                    "ticker": ticker,
+                    "verdict": "CHASE_GUARD",
+                    "reason": _csp_chase["reason"],
+                })
+                continue
+            _csp_chase_caution = _csp_chase["caution"]
 
             # LT-verdict discipline gate (hard rule #39, audit 2026-07-03).
             # No new put on a name whose long_term_verdict is broken/
@@ -2129,9 +4272,21 @@ def render_action_list(
             ws_blocked, ws_reason = is_wash_sale_blocked(ticker, as_of_iso, ledger_path=ledger_path)
             if ws_blocked:
                 continue
-            # Earnings guard
+            # Earnings guard — a NEW-open put whose underlying prints before
+            # (or on) the contract's expiry SPANS the print → hard BLOCK
+            # (domain rule: never sell puts through earnings). Observed
+            # 2026-08-04 NVDA card: prints Aug 26, expiry Sep 04 — the old
+            # code only blocked the ≤14d "imminent" level and rendered the
+            # spanning contract as an actionable card with a double-⚠️
+            # "Earnings 22d away, -9d before expiration" warning. Demoted to
+            # the transparency footer, never silently hidden (rule #24).
             ec = check_earnings_conflict(ticker, target_exp, ec_today, as_of_iso)
-            if ec.get("level") == "block":
+            if ec.get("level") == "block" or ec.get("spans_expiration"):
+                _filtered_csps.append({
+                    "ticker": ticker,
+                    "verdict": "EARNINGS_WINDOW",
+                    "reason": format_new_open_block(ticker, ec, target_exp),
+                })
                 continue
             collateral_needed = target_strike * 100 * 1
             if collateral_needed > cash_avail:
@@ -2164,11 +4319,53 @@ def render_action_list(
             csp_y = compute_csp_yield(
                 premium=est_premium, strike=target_strike, contracts=1, dte=est_dte,
             )
-            items.append(
-                f"{n}. **PULLBACK CSP** {ticker} — sell ${target_strike:g}P "
+            _blk_start = len(items)
+            # Label renamed from "PULLBACK CSP" (2026-08-04): George read
+            # "PULLBACK CSP NVDA" as "NVDA is in a pullback now". It's a
+            # STRATEGY name (sell a below-spot put; get paid to wait for a
+            # pullback fill) — "CSP — PAID-TO-WAIT" says what the trade is,
+            # and the explainer line below states the stock's CURRENT state
+            # explicitly. Internal kind stays PULLBACK_CSP (label aliased in
+            # briefing_diff/capital-planner so keys/kinds are unchanged).
+            _csp_header = (
+                f"{n}. **CSP — PAID-TO-WAIT** {ticker} — sell ${target_strike:g}P "
                 f"exp {exp_date.strftime('%a %b %d')} for ${est_premium:.2f} premium "
                 f"(would re-acquire 100 shares @ {(target_strike/spot - 1)*100:.0f}% below spot)"
             )
+            # Rule #46: non-fresh RSI vintages carry their read inline so the
+            # aggregate annotator never re-attaches a favourable 🟢 tag. A
+            # verified-fresh name renders unchanged (tagged downstream).
+            if _csp_rsi_status == "live" and _csp_rsi is not None:
+                _csp_header += (
+                    f"  · {rsi_discipline.tag(_csp_rsi, 'put', csp_rsi_th)} "
+                    f"({_csp_rsi_note})"
+                )
+            elif _csp_rsi_status == "unverified" and _csp_rsi is not None:
+                _csp_header += (
+                    f"  · RSI {_csp_rsi:.0f} ⚠ unverified (no live quote this "
+                    f"cycle) — do not trust the favourable read"
+                )
+            elif _csp_rsi_status == "stale" and _csp_rsi_note:
+                _csp_header += f"  · {_csp_rsi_note}"
+            items.append(_csp_header)
+            # Strategy explainer — the label names the STRATEGY, not the
+            # stock's state; the current state is stated explicitly so
+            # "paid-to-wait" can never be read as "this name is pulling
+            # back now" (the 2026-08-04 NVDA RSI-53 confusion).
+            _csp_state_txt = (
+                f"RSI {_csp_rsi:.0f} ({rsi_discipline.market_state(_csp_rsi)})"
+                if _csp_rsi is not None else "RSI unavailable"
+            )
+            items.append(
+                f"   - _Strategy: sell a put below spot — keep the premium if no "
+                f"dip comes, or re-acquire at {(target_strike/spot - 1)*100:.0f}% "
+                f"if it does. The name does not claim the stock is currently "
+                f"pulling back; today's state: {_csp_state_txt}._"
+            )
+            if _csp_chase_caution:
+                # Rule #44 fail-open path: spot measurable but no close
+                # series — the run-up can't be verified, say so on the card.
+                items.append(f"   - {_csp_chase_caution}")
             items.append(f"   - {format_yield_line(csp_y)}")
             items.append(f"   - **Source:** Live E*TRADE chain")
             # Capacity-gate DEFERRED tag (hard rule #41) — the ticket still
@@ -2205,34 +4402,97 @@ def render_action_list(
                 f"(separate from your existing {ticker} lots). New cost basis = strike − premium = "
                 f"${target_strike - est_premium:.2f}/share."
             )
-            # Concentration post-assignment check
+            # Concentration post-assignment check — tier-aware (rule #29).
+            # 2026-08-04 (PLTR): the card said "~12.6% NLV (over 10% cap)" on
+            # a Tier A name whose cap is 22% — the same run's Risk Alerts said
+            # "within Tier A bounds". Explicit Tier A/B names use
+            # concentration_cap_for_tier; core names (core_positions ∪ Tier A
+            # via core_union) use at least the core soft cap. Legacy 10% text
+            # only when neither applies.
             current_value = (er.get("qty", 0) or 0) * spot
             post_assign_value = current_value + (target_strike * 100)
             post_assign_pct = (post_assign_value / nlv * 100) if nlv else 0
-            if post_assign_pct > 10:
+            _pc_cap = 10.0
+            _pc_label = "10% cap"
+            _pc_tier = None
+            try:
+                from analysis.position_tiers import (
+                    TIER_A as _PC_A, TIER_B as _PC_B,
+                    concentration_cap_for_tier as _pc_cap_for,
+                    tier_for as _pc_tier_for,
+                )
+                if (config_local or {}).get("position_tiers"):
+                    _t = _pc_tier_for(ticker, config_local)
+                    if _t in (_PC_A, _PC_B):
+                        _pc_tier = _t
+                        _pc_cap = _pc_cap_for(_t, config_local)
+                        _pc_label = f"Tier {_t} cap {_pc_cap:.0f}%"
+            except Exception:
+                pass
+            if _pc_tier is None and ticker in core_tickers_set:
+                _core_cap = float(
+                    (config_local or {}).get("core_concentration_cap_pct", 18))
+                if _core_cap > _pc_cap:
+                    _pc_cap = _core_cap
+                    _pc_label = f"core soft cap {_pc_cap:.0f}%"
+            if post_assign_pct > _pc_cap:
                 items.append(
                     f"   - **⚠️ Concentration check:** Assignment would push {ticker} to "
-                    f"~{post_assign_pct:.1f}% NLV (over 10% cap). Consider sizing down or pre-arrange "
+                    f"~{post_assign_pct:.1f}% NLV (over {_pc_label}). Consider sizing down or pre-arrange "
                     f"a partial-sale plan."
+                )
+            elif post_assign_pct > 10:
+                _pc_bounds = (f"Tier {_pc_tier} bounds" if _pc_tier
+                              else "core bounds")
+                items.append(
+                    f"   - **📊 Concentration check:** Assignment would push {ticker} to "
+                    f"~{post_assign_pct:.1f}% NLV — within {_pc_bounds} "
+                    f"(cap {_pc_cap:.0f}%)."
                 )
             items.append(
                 f"   - **Account:** "
                 f"{_route_account('NEW CSP', ticker, None, accounts_cfg)}"
             )
-            n += 1
-            # Limit to 3 pullback CSPs
-            if sum(1 for it in items if "PULLBACK CSP" in it) >= 3:
+            if _csp_wait_reason:
+                # Move the fully-built block into the wait subsection: swap the
+                # numbered header for a ⏸ one and keep every check line (full
+                # ticket, rule #24). The numbered action list never sees it.
+                blk = items[_blk_start:]
+                del items[_blk_start:]
+                blk[0] = blk[0].replace(
+                    f"{n}. **CSP — PAID-TO-WAIT** {ticker}",
+                    f"- ⏸ **CSP — PAID-TO-WAIT (wait)** {ticker}",
+                )
+                blk.insert(1, f"   - **{_csp_wait_reason}**")
+                _wait_csp_blocks.extend(blk)
+            else:
+                n += 1
+            # Limit to 3 pullback CSPs (actionable + wait combined)
+            if (sum(1 for it in items if "CSP — PAID-TO-WAIT" in it)
+                    + sum(1 for it in _wait_csp_blocks if "CSP — PAID-TO-WAIT" in it)) >= 3:
                 break
+
+    # ⏸ CSPs — wait for a pullback (rule #43): extended-band (RSI 60-70)
+    # PULLBACK CSPs, full ticket shown but never numbered/green-lit.
+    if _wait_csp_blocks:
+        items.append("")
+        items.append("**⏸ CSPs — wait for a pullback** (RSI 60-70 extended — "
+                     "full ticket shown, re-check on a red day / RSI 35-55)")
+        items.extend(_wait_csp_blocks)
 
     # Transparency footer: tell the user which CSP ideas were rejected and why.
     # Two reasons today:
     #   (a) Trade-validator POOR/BLOCK verdicts (negative EV)
     #   (b) Existing-put-stack: skip names where user already has ≥2 short puts
     if _filtered_csps:
-        validator_rejects = [c for c in _filtered_csps if c.get("verdict") not in ("SKIPPED", "RSI_BLOCK", "LT_VERDICT")]
+        validator_rejects = [c for c in _filtered_csps if c.get("verdict") not in
+                             ("SKIPPED", "RSI_BLOCK", "LT_VERDICT",
+                              "EARNINGS_WINDOW", "CHASE_GUARD")]
         stack_skips = [c for c in _filtered_csps if c.get("verdict") == "SKIPPED"]
         rsi_blocks = [c for c in _filtered_csps if c.get("verdict") == "RSI_BLOCK"]
         lt_blocks = [c for c in _filtered_csps if c.get("verdict") == "LT_VERDICT"]
+        earnings_blocks = [c for c in _filtered_csps if c.get("verdict") == "EARNINGS_WINDOW"]
+        chase_blocks = [c for c in _filtered_csps if c.get("verdict") == "CHASE_GUARD"]
         items.append("")
         if validator_rejects:
             names = ", ".join(
@@ -2243,21 +4503,65 @@ def render_action_list(
                 f"(negative expected value): {names}. Premium is too thin or strike too "
                 f"close to spot — wait for a better setup._"
             )
+        if earnings_blocks:
+            # The reason already leads with "🚫 BLOCK (EARNINGS_WINDOW)" — no
+            # second glyph (the observed card's "⚠️ ⚠️" doubling, inverted).
+            for c in earnings_blocks:
+                items.append(
+                    f"_CSP — PAID-TO-WAIT {c['ticker']} blocked — "
+                    f"{c.get('reason', '🚫 contract spans the earnings print')}_"
+                )
         if rsi_blocks:
             for c in rsi_blocks:
                 items.append(
-                    f"_📊 PULLBACK CSP {c['ticker']} blocked — {c.get('reason', 'RSI overbought')}_"
+                    f"_📊 CSP — PAID-TO-WAIT {c['ticker']} blocked — {c.get('reason', 'RSI overbought')}_"
+                )
+        if chase_blocks:
+            # Rule #44 chase guard — vertical multi-session tape (never
+            # silently hidden, rule #24).
+            for c in chase_blocks:
+                items.append(
+                    f"_CSP — PAID-TO-WAIT {c['ticker']} blocked — "
+                    f"{c.get('reason', '🚫 chase guard (rule #44)')}_"
                 )
         if lt_blocks:
             for c in lt_blocks:
                 items.append(
-                    f"_📉 PULLBACK CSP {c['ticker']} blocked — {c.get('reason', 'LT-verdict gate (rule #39)')}_"
+                    f"_📉 CSP — PAID-TO-WAIT {c['ticker']} blocked — {c.get('reason', 'LT-verdict gate (rule #39)')}_"
                 )
         if stack_skips:
             for c in stack_skips:
                 items.append(
-                    f"_📚 PULLBACK CSP {c['ticker']} skipped — {c.get('reason', 'put-stack guard')}_"
+                    f"_📚 CSP — PAID-TO-WAIT {c['ticker']} skipped — {c.get('reason', 'put-stack guard')}_"
                 )
+
+    # Bug #25 transparency footer: every CLOSE suppressed by a standing
+    # directive is named (never silently hidden — rule #24), with the
+    # measured capture/DTE so the user can see the release conditions
+    # haven't fired.
+    if _directive_suppressed:
+        items.append("")
+        for _ds in _directive_suppressed:
+            items.append(
+                f"_📋 CLOSE {_ds['contract']} suppressed by standing directive "
+                f"(capture {_ds['capture_pct']:.0f}%, DTE {_ds['dte']}d — "
+                f"release conditions not met)_"
+            )
+
+    # Task #43 defect 3: directive suppressions paused by an imminent
+    # earnings print — the CLOSE rendered above; this note explains why
+    # the standing directive didn't hold it this cycle (rule #24: the
+    # user sees the pause, never a silent override).
+    if _directive_paused:
+        items.append("")
+        items.extend(_directive_paused)
+
+    # Task #38 Part 3: tested-at-≤21-DTE contracts held by a standing
+    # directive — the note renders (rule #24, never hidden), the ⛔ nag does
+    # not (the user's decision is on file).
+    if _tested_directive_notes:
+        items.append("")
+        items.extend(_tested_directive_notes)
 
     # RSI discipline display: append a side-aware RSI tag to every numbered
     # action line. Annotate a display copy so the summary card still parses the
@@ -2272,7 +4576,17 @@ def render_action_list(
     # break the briefing.
     if aging_info is not None:
         try:
-            from analysis.rec_aging import apply_aging_to_action_items
+            from analysis.rec_aging import action_key, apply_aging_to_action_items
+            # Bug #25: directive-suppressed CLOSEs must not age — record their
+            # keys so the stalled panel (and any other aging consumer) skips
+            # them. The user is FOLLOWING the directive, not ignoring the rec.
+            aging_info["directive_suppressed"] = {
+                action_key("CLOSE", _ds["contract"])
+                for _ds in _directive_suppressed
+            } | {
+                action_key("CLOSE_FOR_PROFIT", _ds["contract"])
+                for _ds in _directive_suppressed
+            }
             display_items = apply_aging_to_action_items(display_items, aging_info)
         except Exception as _age_e:
             print(f"[action_list] recommendation aging failed: {_age_e}", file=sys.stderr)
@@ -2349,7 +4663,13 @@ def render_watch(equity_reviews: list, options_reviews: list) -> list:
                 lines.append(f"  - {human}")
             roll = review.get("roll_target")
             if roll:
-                lines.append(f"  - roll target: {roll.get('strike')} exp {roll.get('expiration')} for ${roll.get('expectedNetCredit', 0):.2f} credit")
+                # Legacy select_roll_target keys are strikePrice/expirationDate
+                # (rule #43, 2026-07-31: the old strike/expiration lookups
+                # rendered None/? placeholders). Fail closed when unresolved.
+                r_strike = roll.get("strikePrice") or roll.get("strike")
+                r_exp = roll.get("expirationDate") or roll.get("expiration")
+                if r_strike and r_exp:
+                    lines.append(f"  - roll target: ${float(r_strike):g} exp {r_exp} for ${roll.get('expectedNetCredit', 0):.2f} credit")
         lines.append("")
 
     return lines
@@ -2366,6 +4686,11 @@ def render_opportunities(new_ideas: list) -> list:
 
     actionable = [i for i in new_ideas if i.get("instruction")]
     watch_only = [i for i in new_ideas if not i.get("instruction")]
+
+    # Extended-band demotion (rule #43): rsi_wait ideas keep the full ticket
+    # but render under "⏸ CSPs — wait for a pullback", never as actionable.
+    rsi_wait_ideas = [i for i in actionable if i.get("rsi_wait")]
+    actionable = [i for i in actionable if not i.get("rsi_wait")]
 
     if actionable:
         lines.append(f"### Actionable: cash-secured puts ({len(actionable)})")
@@ -2429,6 +4754,30 @@ def render_opportunities(new_ideas: list) -> list:
             if rec_label:
                 lines.append(f"- Source: {rec_label} ({age}d old)")
             lines.append("")
+
+    if rsi_wait_ideas:
+        lines.append(f"### ⏸ CSPs — wait for a pullback ({len(rsi_wait_ideas)})")
+        lines.append("")
+        lines.append("_RSI 60-70 extended — full ticket shown (never hidden), but "
+                     "selling into a green streak sets the strike against an inflated "
+                     "spot. Re-check on a red day / RSI 35-55._")
+        lines.append("")
+        for idea in rsi_wait_ideas:
+            ticker = idea.get("ticker", "?")
+            spot = idea.get("spot", 0)
+            strike = idea.get("strike", 0)
+            mid = idea.get("mid", 0)
+            exp_pretty = idea.get("expiration_pretty", idea.get("expiration", "?"))
+            dte = idea.get("dte", 0)
+            annualized = idea.get("annualized_pct", 0)
+            collateral = idea.get("collateral", 0)
+            lines.append(
+                f"- ⏸ **{ticker}** (spot ${spot:.2f}) — SELL TO OPEN {exp_pretty} "
+                f"**${strike:g} PUT** @ ${mid:.2f} mid · {dte} DTE · "
+                f"{annualized:.1f}% annualized · collateral ${collateral:,.0f}"
+            )
+            lines.append(f"  - **{idea.get('rsi_wait_reason', '')}**")
+        lines.append("")
 
     if watch_only:
         valid_watch = [i for i in watch_only if i.get("ticker") and i.get("rationale")]

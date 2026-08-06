@@ -31,7 +31,65 @@ def _format_exp(exp_str: str) -> str:
         exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
         return exp_date.strftime("%a %b %d '%y")
     except (ValueError, TypeError):
-        return exp_str or "?"
+        # Rule #19: never render a "?" placeholder as data.
+        return exp_str or "(exp unavailable — verify at broker)"
+
+
+def _roll_target_line(opt_rev: dict) -> str:
+    """Resolve the URGENT ROLLS TARGET line from the SAME ranked candidate the
+    ROLL ANALYSIS table marks ✅ recommended (side-aware candidate_ranker output).
+
+    Bug (rule #43, 2026-07-31): the old code read the legacy select_roll_target
+    dict with the WRONG keys ("strike"/"expiration" vs its actual
+    "strikePrice"/"expirationDate"), so the brief rendered
+    "IREN ? $? PUT for $0.40 net credit" — unresolved placeholders next to a
+    real credit. Now: ranked candidate first; legacy dict (correct keys) as a
+    fallback; honest "target unavailable" text when neither resolves — never
+    "?" placeholders (rule #19).
+    """
+    underlying = (opt_rev.get("contract") or "").split("_")[0]
+    opt_letter = "P" if (opt_rev.get("type") or "PUT").upper() == "PUT" else "C"
+    qty = abs(opt_rev.get("qty") or 0)
+
+    candidates = opt_rev.get("roll_candidates") or []
+    by_id = {c.get("id"): c for c in candidates if isinstance(c, dict)}
+    chosen = by_id.get(opt_rev.get("recommended_candidate_id"))
+    if not (chosen and chosen.get("instruction")):
+        # Recommended is HOLD (A) — use the advisor's explicit
+        # "if rolling anyway" candidate before giving up.
+        chosen = by_id.get(opt_rev.get("if_rolling_anyway_candidate_id"))
+    if not (chosen and chosen.get("instruction")):
+        chosen = next((c for c in candidates if c.get("instruction")), None)
+
+    if chosen and chosen.get("instruction"):
+        instr = chosen["instruction"]
+        strike = instr.get("sell_strike")
+        exp = instr.get("sell_expiration")
+        if strike and exp:
+            net = float(chosen.get("netDollars") or 0)
+            if qty > 0:
+                per_share = net / (qty * 100)
+                net_str = f"${abs(per_share):.2f} net {'credit' if per_share >= 0 else 'debit'}"
+            else:
+                net_str = f"${abs(net):,.0f} total net {'credit' if net >= 0 else 'debit'}"
+            return (
+                f"- **TARGET:** {underlying} ${float(strike):g}{opt_letter} "
+                f"{_format_exp(exp)} for {net_str}"
+            )
+
+    # Legacy select_roll_target fallback — its REAL keys are
+    # strikePrice/expirationDate; only render when both resolve.
+    roll_target = opt_rev.get("roll_target") or {}
+    strike = roll_target.get("strikePrice")
+    exp = roll_target.get("expirationDate")
+    if strike and exp:
+        credit = float(roll_target.get("expectedNetCredit") or 0)
+        return (
+            f"- **TARGET:** {underlying} ${float(strike):g}{opt_letter} "
+            f"{_format_exp(exp)} for ${credit:.2f} net credit"
+        )
+
+    return "- **TARGET:** unavailable — see ROLL ANALYSIS table / verify at broker"
 
 
 def render_analyst_brief(
@@ -123,18 +181,10 @@ def render_analyst_brief(
         for opt_rev in urgent_rolls:
             contract = opt_rev.get("contract")
             rec = opt_rev.get("recommendation", "")
-            exp = opt_rev.get("expiration")
-            exp_pretty = _format_exp(exp)
             rationale = opt_rev.get("rationale", "")
             lines.append(f"**{contract} — {rec}**{_rsi_suffix(contract, technicals)}")
             lines.append(f"- **REASON:** {rationale}")
-            roll_target = opt_rev.get("roll_target")
-            if roll_target:
-                roll_exp = _format_exp(roll_target.get("expiration", ""))
-                lines.append(
-                    f"- **TARGET:** {contract.split('_')[0]} {roll_exp} "
-                    f"${roll_target.get('strike', '?')} PUT for ${roll_target.get('expectedNetCredit', 0):.2f} net credit"
-                )
+            lines.append(_roll_target_line(opt_rev))
             lines.append("")
         lines.append("")
 
@@ -198,8 +248,11 @@ def render_analyst_brief(
                     if reason:
                         lines.append(f"  - {reason}")
                 else:
-                    # Fallback for dict format
-                    symbol = close_rec.get("symbol", "?")
+                    # Fallback for dict format (rule #19: skip rather than
+                    # render a "?" placeholder for a missing symbol)
+                    symbol = close_rec.get("symbol")
+                    if not symbol:
+                        continue
                     collateral = close_rec.get("collateral_freed", 0)
                     lines.append(f"- **{symbol}**: frees ${collateral:,.0f}")
         else:
@@ -234,19 +287,54 @@ def render_analyst_brief(
         lines.append("")
         lines.append("")
 
-    # --- SECTION 5: CONCENTRATION ---
+    # --- SECTION 5: CONCENTRATION (tier-aware — CLAUDE.md hard rule #29) ---
+    # Bug #24 (2026-07-22): GOOG/NVDA at 14.3% surfaced "trim to 9% NLV"
+    # while the Risk Alerts panel on the SAME day correctly said "within
+    # Tier A bounds (cap 22% NLV, tracked)". Section 5 now uses the same
+    # tier framework: Tier A/B names only fire ABOVE their tier cap (and
+    # trim TO the cap, not to 9%); Tier C keeps the legacy 10% → 9% bands.
+    # Fail-open: no position_tiers module/config → legacy behavior for all.
+    try:
+        from analysis import position_tiers as _pt
+    except ImportError:  # pragma: no cover - tier framework absent
+        _pt = None
+    _cfg = snapshot_data.get("_config") or {}
+
+    def _tier_and_cap(ticker: str) -> tuple[str, float | None]:
+        """('A', 22.0) for tier A/B names; ('C', None) → legacy bands."""
+        if _pt is None:
+            return "C", None
+        try:
+            tier = _pt.tier_for(ticker, _cfg)
+            if tier in ("A", "B"):
+                return tier, float(_pt.concentration_cap_for_tier(tier, _cfg))
+        except Exception:
+            pass
+        return "C", None
+
     concentrated = []
     for eq_rev in equity_reviews:
         weight = eq_rev.get("weight", 0)
-        if weight > 0.10:
-            concentrated.append((eq_rev.get("ticker"), weight, nlv, eq_rev.get("price", 0), eq_rev.get("qty", 0)))
+        ticker = eq_rev.get("ticker")
+        tier, cap_pct = _tier_and_cap(ticker or "")
+        if cap_pct is not None:
+            # Tier A/B: within the tier cap is BY DESIGN (concentration in
+            # conviction is the strategy) — no trim line unless over cap.
+            if weight * 100 <= cap_pct:
+                continue
+            target_pct = cap_pct
+        elif weight > 0.10:
+            target_pct = 9.0
+        else:
+            continue
+        concentrated.append((ticker, weight, nlv, eq_rev.get("price", 0),
+                             eq_rev.get("qty", 0), tier, target_pct))
 
     if concentrated:
         lines.append("### 5. CONCENTRATION TRIM")
         lines.append("")
-        for ticker, weight, nlv_val, price, qty in concentrated:
+        for ticker, weight, nlv_val, price, qty, tier, target_pct in concentrated:
             current_pct = weight * 100
-            target_pct = 9.0
             current_value = weight * nlv_val
             target_value = (target_pct / 100) * nlv_val
             sell_value = current_value - target_value
@@ -257,7 +345,13 @@ def render_analyst_brief(
                 for opt in options_reviews
             )
 
-            lines.append(f"**{ticker}**: {current_pct:.1f}% → trim to 9% NLV{_rsi_suffix(ticker, technicals)}")
+            if tier in ("A", "B"):
+                lines.append(
+                    f"**{ticker}**: {current_pct:.1f}% → trim to "
+                    f"{target_pct:g}% NLV (Tier {tier} cap)"
+                    f"{_rsi_suffix(ticker, technicals)}")
+            else:
+                lines.append(f"**{ticker}**: {current_pct:.1f}% → trim to 9% NLV{_rsi_suffix(ticker, technicals)}")
 
             if has_cc:
                 lines.append(f"- **Option A** (tax-deferred): Roll up existing covered calls to higher strikes → collect premium + reduce assignment ceiling")
@@ -281,7 +375,9 @@ def render_analyst_brief(
         lines.append("### 6. WATCH-ONLY (SKIPPED)")
         lines.append("")
         for idea in skipped[:5]:  # Top 5 watch-only
-            ticker = idea.get("ticker", "?")
+            ticker = idea.get("ticker")
+            if not ticker:  # rule #19: never render a "?" placeholder ticker
+                continue
             reason = idea.get("rationale", "Not yet actionable")
             suffix = "" if "RSI" in reason else _rsi_suffix(ticker, technicals)
             lines.append(f"- **{ticker}**: {reason}{suffix}")

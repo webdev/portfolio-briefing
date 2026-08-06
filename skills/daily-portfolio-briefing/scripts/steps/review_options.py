@@ -7,6 +7,8 @@ matrix_cell_id we surface in the briefing for auditability.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 import os
 import subprocess
 import sys
@@ -247,6 +249,10 @@ def review_options(
             "entry_price": advisor_input["position"]["entryPrice"],
             "days_to_expiry": advisor_input["position"]["daysToExpiry"],
             "iv_rank": advisor_input["context"]["ivRank"],
+            # Measured per-position delta (E*TRADE) — the rule-#3 roll gate
+            # and exit_cost's HOLD_FOR_DECAY read this; None when the broker
+            # didn't supply one (price fallbacks apply, never a fabricated δ).
+            "delta": pos.get("delta"),
             "recommendation": decision.get("decision", "ERROR"),
             "rationale": decision.get("rationale", ""),
             "matrix_cell_id": decision.get("matrixCell") or decision.get("matrix_cell_id"),
@@ -261,7 +267,7 @@ def review_options(
 
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     with open(snapshot_dir / "options_reviews.json", "w") as f:
-        json.dump(options_reviews, f, indent=2)
+        json.dump(options_reviews, f, indent=2, default=json_default)
 
     print(f"  Reviewed {len(options_reviews)} option positions via wheel-roll-advisor")
     return options_reviews

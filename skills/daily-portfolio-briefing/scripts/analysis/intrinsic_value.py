@@ -38,12 +38,15 @@ from pathlib import Path
 
 try:
     from analysis import rsi_discipline
+    from analysis import line_exclusions
 except ImportError:  # pragma: no cover - path fallback for standalone runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
         from analysis import rsi_discipline
+        from analysis import line_exclusions
     except ImportError:
         import rsi_discipline  # type: ignore
+        import line_exclusions  # type: ignore
 
 
 FMP_BASE = "https://financialmodelingprep.com"
@@ -258,10 +261,17 @@ _REC_KEYWORDS = re.compile(
     r"STRANGLE|SUB-LOT|ADD|TRIM|CLOSE|ROLL|COLLAR|COMPLETE)\b",
     re.I,
 )
+# Literal trade-ticket line inside an LTO / strategy-upgrade card:
+#   "**Trade:** SELL 1× MSFT $410P exp Fri Oct 16 '26 (78 DTE)"
+_TRADE_LINE_RE = re.compile(r"^\s*[-*]?\s*\*\*Trade:\*\*")
+# Card header with a backticked ticker: "### 💎 8. LONG DATED CSP · `MSFT`"
+_CARD_HEADER_TICKER_RE = re.compile(r"^\s*#{2,4}\s.*`([A-Z][A-Z0-9]{0,4})`")
 
 
 def _is_rec_header(line: str) -> bool:
     if _HEADER_NUM_RE.match(line):
+        return True
+    if _TRADE_LINE_RE.match(line):
         return True
     if _BOLD_HEADER_RE.match(line) and _REC_KEYWORDS.search(line):
         return True
@@ -294,16 +304,33 @@ def annotate_intrinsic(
     out: list[str] = []
     stats = {"annotated": 0, "etf": 0, "unavailable": 0}
     in_excluded = False
+    parent_ticker: str | None = None
     for line in lines:
         s = line.strip()
         if s.startswith("## "):
             # Skip sections that render their own fair value: the Capital Plan
             # rollup and the Candidate Trades section (its cards already carry FV).
             in_excluded = ("Capital Plan" in s) or ("Candidate Trades" in s)
+        # Track the current card's ticker from its `### ... \`TICK\`` header so
+        # a **Trade:** ticket line can inherit it when the line itself doesn't
+        # resolve. Continuation/sub-lines NEVER get their own FV (rule #27) —
+        # the 2026-07-30 bug attached AT&T's FV to MSFT's "Triggers:" line.
+        hm = _CARD_HEADER_TICKER_RE.match(line)
+        if hm:
+            parent_ticker = hm.group(1).upper()
+        elif s.startswith("#"):
+            parent_ticker = None
+        if line_exclusions.is_excluded_line(line):
+            out.append(line)
+            continue
         if in_excluded or s.startswith("_") or "FV:" in line or not _is_rec_header(line):
             out.append(line)
             continue
         tk = rsi_discipline.first_known_ticker(line, tickers_sorted)
+        if not tk and _TRADE_LINE_RE.match(line):
+            # A trade-ticket line whose ticker didn't resolve inherits the
+            # parent card's ticker — never a bare-token guess.
+            tk = parent_ticker
         if not tk:
             out.append(line)
             continue

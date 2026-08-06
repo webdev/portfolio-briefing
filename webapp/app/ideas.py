@@ -31,10 +31,22 @@ retired). Each merged idea additionally carries `dte` / `dte_bucket` so
 the Ideas tab's client-side filter chips (Short-dated / Long-dated /
 Sub-lot / Deferred / Skipped) can filter by data attribute.
 
+Rule #43 UX (GOOG $345P, 2026-08-04): the tab used to render every merged
+idea at equal visual weight with one flat badge count — George saw
+"SELL 1× GOOG $345P" inside "💎 Ideas & Candidates (19)" and read it as a
+recommendation even though the pipeline had correctly demoted it. Every
+merged idea now ALSO carries a `group` — "actionable" / "waiting" /
+"gated" — so the template can (a) count only actionable ideas in the tab
+badge, (b) render three sections at descending visual weight, and (c)
+prefix demoted trade tickets ("when conditions clear:" / "excluded:").
+Nothing is hidden (hard rules #24/#32) — only de-emphasized.
+
 Public API:
   - `IDEA_OPPORTUNITY_KINDS` — the LTO kinds we surface as ideas
   - `SUB_LOT_KIND` — the kind assigned to merged sub-lot completions
   - `build_merged_ideas(briefing)` — return list[MergedIdea]
+  - `group_merged_ideas(merged)` — split into actionable/waiting/gated
+  - `ideas_badge_counts(merged)` — (actionable_count, gated_count)
 
 A MergedIdea is a plain dict so it stays template-friendly. Fields:
   - source            — "new_ideas" | "long_term_opportunity" | "strategy_upgrade"
@@ -48,6 +60,7 @@ A MergedIdea is a plain dict so it stays template-friendly. Fields:
   - status_class      — CSS class hint ("ok" | "warn" | "muted")
   - dte               — int days-to-expiry when the row carries one, else None
   - dte_bucket        — "short" (≤60 DTE) | "long" (>60 DTE) | "" (unknown / equity)
+  - group             — "actionable" | "waiting" | "gated" (rule #43 UX)
   - raw               — the underlying dict (for templates that want extra fields)
 """
 
@@ -87,6 +100,41 @@ _SUBLOT_STRATEGY_TYPE = "sublot_completion"
 
 # DTE bucket boundary for the Ideas filter chips: ≤60 days = short-dated.
 SHORT_DATED_MAX_DTE = 60
+
+# ─── Rule #43 UX groups (GOOG $345P case, 2026-08-04) ───────────────────
+# The Ideas tab renders three sections at descending visual weight:
+#   actionable — passed every discipline gate this cycle
+#   waiting    — qualifying setup whose entry condition hasn't arrived
+#                (RSI wait, held put working, reference-demoted card)
+#   gated      — excluded by a hard gate (capacity, equity-stacking,
+#                LT-verdict, ADD/LT-CSP discipline skip)
+IDEA_GROUP_ACTIONABLE = "actionable"
+IDEA_GROUP_WAITING = "waiting"
+IDEA_GROUP_GATED = "gated"
+
+# Statuses that mean "waiting for a condition to clear" rather than a
+# hard exclusion: deferred (held put / discipline defers), reference
+# (📎 shown-for-reference demotion — planning card, not a rec today).
+_WAITING_STATUSES = {"deferred", "reference"}
+# RSI skips clear on their own when RSI moves back into band — that's a
+# wait-for-setup, not a hard gate.
+_WAITING_KINDS = {"SKIPPED_RSI"}
+
+
+def idea_group(status: str, kind: str = "", item: dict[str, Any] | None = None) -> str:
+    """Map a merged idea's (status, kind) to its Ideas-tab group.
+
+    Uses ONLY the pipeline's own classification flags — never re-derives
+    gating logic (rule #19: the pipeline's verdict is the data)."""
+    if status == IDEA_GROUP_ACTIONABLE:
+        return IDEA_GROUP_ACTIONABLE
+    if status in _WAITING_STATUSES:
+        return IDEA_GROUP_WAITING
+    if (kind or "").upper() in _WAITING_KINDS:
+        return IDEA_GROUP_WAITING
+    if item is not None and item.get("rsi_blocked"):
+        return IDEA_GROUP_WAITING
+    return IDEA_GROUP_GATED
 
 # Kind-based bucket fallback when a row carries no structured DTE. These
 # are semantic facts about the kind itself (a LONG_DATED_CSP is by
@@ -137,6 +185,12 @@ def _classify_new_idea_status(item: dict[str, Any]) -> tuple[str, str, str]:
 def _classify_lto_status(item: dict[str, Any]) -> tuple[str, str, str]:
     """Return (status, status_label, status_class) for an Opportunity-shaped dict."""
     kind = (item.get("kind") or "").upper()
+    # Rule #43 (GOOG 2026-08-03): a reference-demoted card (equity-stacking
+    # hard-skip / stale qualifying RSI / ≥2 hard gates) is shown for
+    # planning only — never as an actionable idea, mirroring the briefing's
+    # unnumbered "📎 Shown for reference" subsection (hard rule #32).
+    if item.get("reference_demoted"):
+        return ("reference", "📎 reference — not actionable today", "muted")
     if kind in IDEA_OPPORTUNITY_KINDS:
         return ("actionable", "✓ actionable", "ok")
     if kind == "DEFERRED_ADD_HAS_CSP":
@@ -258,6 +312,8 @@ def build_merged_ideas(briefing: Any) -> list[dict[str, Any]]:
             "type", "underlying", "shares_to_buy", "current_price", "cost",
             "discipline_deferred", "discipline_reason", "rsi_blocked",
             "capacity_deferred_tag", "dte", "days_to_expiry",
+            # rule #43 reference demotion (2026-08-03)
+            "reference_demoted", "reference_reason",
         )}
 
     seen_keys: set[tuple[str, str]] = set()
@@ -285,6 +341,7 @@ def build_merged_ideas(briefing: Any) -> list[dict[str, Any]]:
             "status_class": status_class,
             "dte": dte,
             "dte_bucket": _dte_bucket(kind, dte),
+            "group": idea_group(status, kind, item),
             "raw": item,
         }
         key = (ticker, kind)
@@ -319,6 +376,7 @@ def build_merged_ideas(briefing: Any) -> list[dict[str, Any]]:
             "status_class": status_class,
             "dte": dte,
             "dte_bucket": _dte_bucket(kind, dte),
+            "group": idea_group(status, kind, item),
             "raw": item,
         }
         if status == "actionable":
@@ -352,6 +410,7 @@ def build_merged_ideas(briefing: Any) -> list[dict[str, Any]]:
             "status_class": status_class,
             "dte": None,          # equity buy — no expiration
             "dte_bucket": "",
+            "group": idea_group(status, SUB_LOT_KIND, item),
             "raw": item,
         }
         if status == "actionable":
@@ -367,3 +426,29 @@ def build_merged_ideas(briefing: Any) -> list[dict[str, Any]]:
 def merged_ideas_count(briefing: Any) -> int:
     """Total entries in the merged ideas list (for tab badge)."""
     return len(build_merged_ideas(briefing))
+
+
+def group_merged_ideas(merged: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Split a build_merged_ideas() list into the three rule-#43 groups.
+
+    Relative order within each group is preserved (the existing
+    actionable → deferred → blocked priority). Unknown/missing group
+    falls into "gated" (fail toward LESS prominence, never more)."""
+    groups: dict[str, list[dict[str, Any]]] = {
+        IDEA_GROUP_ACTIONABLE: [],
+        IDEA_GROUP_WAITING: [],
+        IDEA_GROUP_GATED: [],
+    }
+    for m in merged:
+        groups.get(m.get("group") or "", groups[IDEA_GROUP_GATED]).append(m)
+    return groups
+
+
+def ideas_badge_counts(merged: list[dict[str, Any]]) -> tuple[int, int]:
+    """(actionable_count, gated_count) for the Ideas tab badge.
+
+    Rule #43 UX: the badge counts ONLY actionable ideas; everything else
+    (waiting + gated) rolls into the muted "N gated" companion badge so
+    "💎 Ideas (19)" never overstates what's tradeable today."""
+    actionable = sum(1 for m in merged if m.get("group") == IDEA_GROUP_ACTIONABLE)
+    return actionable, len(merged) - actionable

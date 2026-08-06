@@ -13,6 +13,8 @@ E*TRADE chains return real delta, so we pick directly by delta when available.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 import math
 import sys
 import time as _time
@@ -315,7 +317,7 @@ def generate_new_ideas(
         })
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         with open(snapshot_dir / "new_ideas.json", "w") as f:
-            json.dump(ideas, f, indent=2, default=str)
+            json.dump(ideas, f, indent=2, default=json_default)
         print(f"  New CSP entries blocked by capacity gates: {reasons}")
         return ideas
 
@@ -419,6 +421,14 @@ def generate_new_ideas(
                     f"{rec.get('raw_recommendation', '')} — {rv.reason} "
                     f"(would have sold ${idea.get('strike')}P)"
                 )
+            elif rsi_gate_on:
+                # Extended-band demotion (rule #43): RSI 60-70 keeps the full
+                # ticket but renders in the "⏸ CSPs — wait for a pullback"
+                # subsection, never as an actionable income opportunity.
+                _wait = rsi_discipline.put_extended_wait(rsi_val, rsi_th)
+                if _wait:
+                    idea["rsi_wait"] = True
+                    idea["rsi_wait_reason"] = _wait
             # Per-candidate capacity check — per-name put/collateral caps and
             # the expiry-cluster cap (06-wheel-parameters.md §7A). Failures are
             # demoted to watch-only with the failing gate in the skip note.
@@ -448,7 +458,7 @@ def generate_new_ideas(
     # Persist
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     with open(snapshot_dir / "new_ideas.json", "w") as f:
-        json.dump(ideas, f, indent=2, default=str)
+        json.dump(ideas, f, indent=2, default=json_default)
 
     rec_count = len(recommendations_list) if recommendations_list else 0
     actionable = sum(1 for i in ideas if i.get("instruction"))

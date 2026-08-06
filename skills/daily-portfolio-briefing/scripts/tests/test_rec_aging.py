@@ -420,3 +420,61 @@ def test_same_day_rerun_does_not_double_count():
     # Next day: increments normally.
     _, aged3 = rec_aging.age_actions(actions, state2, recon, today_iso="2026-06-12")
     assert aged3[key]["days_flagged"] == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Priority weighting — obligation_at_risk × urgency_class (Task #34, 2026-07-29)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_action_list_priority_obligation_weighted():
+    """User symptom (2026-07-29): 'IREN ($4.7K collateral) ranked #1 for 6
+    days (staleness-driven) while META ($115.5K, loss-stopped, earnings-day)
+    sat at #4-5.' Priority must be (obligation_at_risk × urgency_class) —
+    loss_stop=3, earnings≤2d=3, earnings≤7d=2, stalled=1 — with staleness a
+    TIEBREAKER, not the primary key."""
+    from analysis.rec_aging import apply_aging_to_action_items
+
+    iren_key = "ROLL_OUT:IREN_PUT_47_20261218"
+    items = [
+        "1. **ROLL_OUT** IREN_PUT_47_20261218 — roll OUT in time — keep the strike",
+        "   - **Why:** small stalled roll, $4,700 collateral",
+        "2. **CLOSE** META_PUT_575_20260821 — Loss stop triggered: loss ratio "
+        "2.43x >= 2.0x — buy-to-close limit $26.07",
+        "   - **Why:** loss stop hit; earnings in 1d — binary gap risk",
+    ]
+    aging_info = {
+        "today": "2026-07-29",
+        "state": {iren_key: {"first_flagged": "2026-07-23", "days_flagged": 5}},
+        "reconciliation": {iren_key: "IGNORED"},
+    }
+    out = apply_aging_to_action_items(items, aging_info)
+    text = "\n".join(out)
+    first_item = next(l for l in out if l.strip().startswith("1."))
+    assert "META_PUT_575_20260821" in first_item, (
+        f"loss-stopped $57.5K-obligation CLOSE must outrank the stalled "
+        f"$4.7K roll; got:\n{text}")
+    # The stalled item keeps its ⏳ tag — staleness still surfaces, it just
+    # doesn't outrank a loss-stopped position 12x its size.
+    assert "⏳ IGNORED 6 DAYS" in text
+    second_item = next(l for l in out if l.strip().startswith("2."))
+    assert "IREN_PUT_47_20261218" in second_item
+
+
+def test_action_list_staleness_still_breaks_ties():
+    """Equal-priority items: the older (more-ignored) one sorts first — the
+    pre-existing promote-to-top behavior is preserved as the tiebreaker."""
+    from analysis.rec_aging import apply_aging_to_action_items
+
+    bbb_key = "CLOSE:BBB_PUT_100_20260821"
+    items = [
+        "1. **CLOSE** AAA_PUT_100_20260821 — +50% captured; buy-to-close limit $5.00",
+        "2. **CLOSE** BBB_PUT_100_20260821 — +50% captured; buy-to-close limit $5.00",
+    ]
+    aging_info = {
+        "today": "2026-07-29",
+        "state": {bbb_key: {"first_flagged": "2026-07-26", "days_flagged": 2}},
+        "reconciliation": {bbb_key: "IGNORED"},
+    }
+    out = apply_aging_to_action_items(items, aging_info)
+    first_item = next(l for l in out if l.strip().startswith("1."))
+    assert "BBB_PUT_100_20260821" in first_item

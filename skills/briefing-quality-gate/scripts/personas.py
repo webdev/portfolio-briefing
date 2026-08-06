@@ -230,7 +230,8 @@ def tax_cpa_check(md: str) -> PersonaResult:
     # explicit action headline AND verify the check lines appear within the
     # same action block (≈ next 12 lines).
     action_line_re = re.compile(
-        r"^\s*\d+\.\s+\*\*(PULLBACK CSP|NEW CSP)\*\*", re.MULTILINE
+        r"^\s*\d+\.\s+\*\*(PULLBACK CSP|CSP — PAID-TO-WAIT|NEW CSP)\*\*",
+        re.MULTILINE
     )
     lines_of_md = md.splitlines()
     for m in action_line_re.finditer(md):

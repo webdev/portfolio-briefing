@@ -36,6 +36,12 @@ _CRITICAL_SOURCES = {"positions", "broker_positions", "quotes", "chains"}
 # Source values that are NEVER allowed (= cached/stale by definition)
 _DISALLOWED_SOURCES = {"fixture", "cache", "replay", "stale", "missing"}
 
+# Quote-fetch coverage floor (rule #46, PLTR 2026-08-04): only 22/36 symbols
+# got yfinance quotes that cycle, so the vintage guard had no drift reference
+# for PLTR and a stale "RSI 48 🟢 pullback" shipped. Below this fraction the
+# Live-Data policy panel carries an advisory coverage line.
+_QUOTE_COVERAGE_MIN = 0.90
+
 # Source values that are explicitly allowed for each data type
 _ALLOWED_SOURCES = {
     "positions": {"etrade_live"},
@@ -43,7 +49,11 @@ _ALLOWED_SOURCES = {
     "quotes": {"yfinance", "etrade_live"},
     "chains": {"etrade_live", "yfinance"},
     "iv_ranks": {"yfinance_252d", "etrade_live"},
-    "earnings_calendar": {"yfinance"},
+    # Task #43 defect 3 (2026-08-03): the earnings-unknown fix tags the
+    # combined source as "yfinance+fmp_fallback" (yfinance primary, FMP
+    # fills the gaps) — both fetched live this cycle. "fmp" alone is the
+    # pure-fallback case.
+    "earnings_calendar": {"yfinance", "yfinance+fmp_fallback", "fmp"},
 }
 
 
@@ -54,7 +64,7 @@ class StaleSource:
     max_allowed_minutes: float
     actual_source: str
     issue: str
-    severity: str  # "critical" or "advisory"
+    severity: str  # "critical", "advisory", or "integrity" (🔴 non-blocking)
 
 
 @dataclass
@@ -196,6 +206,58 @@ def police_data_freshness(
             if severity == "critical":
                 blocking.append(source_name)
 
+    # Quote-fetch coverage (rule #46, 2026-08-04): when fewer than 90% of the
+    # requested symbols received live quotes this cycle, surface the count in
+    # the Live-Data policy panel — silent quote gaps are how the PLTR stale-
+    # RSI card shipped. Advisory only (the vintage guard's broker-price
+    # fallback + unverified badges handle the per-name discipline); fail-open
+    # when the provenance lacks the counts (older snapshots).
+    q_meta = provenance.get("quotes", {}) or {}
+    try:
+        q_requested = int(q_meta.get("requested"))
+        q_fetched = int(q_meta.get("fetched"))
+    except (TypeError, ValueError):
+        q_requested = q_fetched = 0
+    if q_requested > 0 and (q_fetched / q_requested) < _QUOTE_COVERAGE_MIN:
+        stale.append(StaleSource(
+            source="quote_coverage",
+            age_minutes=0,
+            max_allowed_minutes=0,
+            actual_source=q_meta.get("source", "yfinance"),
+            issue=(
+                f"only {q_fetched}/{q_requested} symbols "
+                f"({q_fetched / q_requested * 100:.0f}%) received live quotes "
+                f"this cycle (< {_QUOTE_COVERAGE_MIN * 100:.0f}% floor) — "
+                f"missing names fall back to broker position prices for the "
+                f"vintage check; truly unverifiable names render "
+                f"⚠ unverified with favourable RSI badges withheld"
+            ),
+            severity="advisory",
+        ))
+
+    # NLV reconciliation (2026-08-04): the snapshot's computed NLV
+    # (cash + long MV + signed option marks) vs the broker's own
+    # totalAccountValue. A >1% divergence is a data-integrity signal — the
+    # $1,149,562-vs-$1,082,940.74 bug shipped because short-option
+    # liabilities were dropped from a reconstructed NLV. Advisory only:
+    # the pipeline already prefers the broker figure, so this renders a
+    # 🔴 line (severity "integrity") but never blocks. Fail-open when the
+    # balance carries no reconciliation record.
+    rec = ((snapshot_data or {}).get("balance") or {}).get("nlv_reconciliation") or {}
+    if rec.get("warning"):
+        stale.append(StaleSource(
+            source="nlv_reconciliation",
+            age_minutes=0,
+            max_allowed_minutes=0,
+            actual_source="balance",
+            issue=(
+                f"briefing computed NLV ${rec.get('computed_nlv', 0):,.0f} vs "
+                f"broker ${rec.get('broker_nlv', 0):,.0f} — "
+                f"Δ ${rec.get('delta', 0):+,.0f}; using the broker figure"
+            ),
+            severity="integrity",
+        ))
+
     # Verdict
     if blocking:
         verdict = "BLOCK"
@@ -249,7 +311,9 @@ def _build_panel(result: PolicerResult) -> str:
             severity = s.get("severity")
         else:
             sym, actual, issue, severity = s.source, s.actual_source, s.issue, s.severity
-        emoji = "🔴" if severity == "critical" else "🟡"
+        # "integrity" severity: data-integrity mismatch (e.g. NLV
+        # reconciliation) — rendered 🔴 like critical, but never blocking.
+        emoji = "🔴" if severity in ("critical", "integrity") else "🟡"
         lines.append(f"- {emoji} **{sym}** (source `{actual}`): {issue}")
     lines.append("")
     return "\n".join(lines)

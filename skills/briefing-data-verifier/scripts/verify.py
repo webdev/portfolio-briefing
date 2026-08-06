@@ -43,8 +43,14 @@ _STUB_INDICATORS = [
 
 
 def _is_action_line(line: str) -> bool:
-    """Top-level numbered action: '1. **EXECUTE ROLL** ...' etc."""
-    return bool(re.match(r"^\s*\d+\.\s+\*\*", line))
+    """Top-level numbered action: '1. **EXECUTE ROLL** ...' etc.
+
+    Task #43 fix 3 (2026-07-31): emoji-prefixed heads ('2. 🚨 **URGENT —
+    EXECUTE ROLL** …', '3. ⏸ **ROLL DEFERRED …**') are also action heads —
+    the old pattern required `**` immediately after the number, so those
+    blocks were silently merged into the previous block and never scanned.
+    Any non-letter prefix (🚨 / ⏸ / spaces) is allowed before the bold verb."""
+    return bool(re.match(r"^\s*\d+\.\s+[^A-Za-z]*\*\*", line))
 
 
 def _collect_action_blocks(md: str) -> list[tuple[str, list[str]]]:
@@ -95,14 +101,27 @@ def verify_live_data(md: str, strict_mode: bool = False) -> VerificationResult:
     blocks = _collect_action_blocks(md)
 
     # Action types that DON'T require chain attribution:
-    # - CLOSE: based on existing position (entry already known from broker)
+    # - CLOSE (any variant — CLOSE INTO RECOVERY etc.): based on existing
+    #   position (entry already known from broker)
     # - TRIM: equity action, no options chain involved
     # - HEDGE: aggregated SPY recommendation (sized from delta math, not chain)
-    # - URGENT: existing-position warning, not a new order ticket
+    # - URGENT: existing-position warning, not a new order ticket. NOTE:
+    #   '**URGENT — EXECUTE ROLL**' deliberately does NOT match — that head
+    #   carries an executable two-leg ticket and must stay chain-verified.
     # - REVIEW ROLL: advisory ("look at chain at broker"), not an executable order
+    # - HOLD (any variant — HOLD FOR BASIS / HOLD FOR DECAY): verdict items
+    #   with NO order ticket. Task #43 fix 3 (2026-07-31): the verifier
+    #   flagged 'HOLD FOR BASIS QCOM / PLTR / PLTR' as "lacking live E*TRADE
+    #   chain attribution" — a HOLD carries nothing to verify at a broker.
+    # - ROLL DEFERRED / any ⏸-tagged demotion: analysis only, no order.
     # - PULLBACK CSP, EXECUTE ROLL, DEFENSIVE COLLAR: NEW orders → MUST have chain
     EXEMPT_PATTERNS = re.compile(
-        r"\*\*(CLOSE|TRIM|HEDGE|URGENT|REVIEW ROLL|REVIEW|HOLD|CONSIDER|EQUITY)\*\*",
+        r"⏸"                                    # demoted/deferred — no executable ticket
+        r"|ROLL DEFERRED"                        # earnings-blocked roll (analysis only)
+        r"|\*\*(CLOSE[^*]*"                      # CLOSE family (incl. INTO RECOVERY)
+        r"|TRIM|HEDGE|URGENT|REVIEW ROLL|REVIEW"
+        r"|HOLD[^*]*"                            # HOLD family (incl. FOR BASIS/DECAY)
+        r"|CONSIDER|EQUITY)\*\*",
         re.IGNORECASE,
     )
 

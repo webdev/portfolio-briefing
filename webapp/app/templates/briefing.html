@@ -34,6 +34,22 @@
     </p>
 </hgroup>
 
+{# 2026-08-04 — 💰 Money Plan: same panel as the top of the briefing
+   markdown ("what makes me money today"). Rendered from the pipeline's
+   money_plan JSON key; every line passes through inline_md (hard rule #30 —
+   no raw markdown literals in the UI). Hidden when the briefing predates
+   the feature or nothing was measurable that cycle. #}
+{% if briefing.money_plan and briefing.money_plan.get("lines") %}
+<article class="card" id="money-plan" style="margin: 1rem 0 1.5rem; padding: 1rem 1.25rem; border-left: 4px solid var(--color-accent, #4a9);">
+    <header style="margin-bottom: .5rem;"><strong>💰 Money Plan</strong></header>
+    <ul style="margin: 0; padding-left: 1.1rem;">
+        {% for l in briefing.money_plan["lines"] %}
+        <li>{{ l | inline_md }}</li>
+        {% endfor %}
+    </ul>
+</article>
+{% endif %}
+
 {# Task #13 — technical-indicator legend, collapsible. #}
 {{ tech_legend() }}
 
@@ -83,8 +99,13 @@
        upgrades redistribute: CC/collar proposals → Options tab, sub-lot
        completions → Ideas. Nothing is dropped. #}
     {% if merged_ideas %}
+    {# Rule #43 UX (GOOG $345P, 2026-08-04): the badge counts ONLY
+       actionable ideas; the gated remainder renders as a muted companion
+       badge — "💎 Ideas 3 · 16 gated". Zero-actionable days still show
+       the tab (hard rule #32: never hide). #}
     <sl-tab slot="nav" panel="ideas">💎 Ideas &amp; Candidates
-        <sl-badge variant="neutral" pill style="margin-left: .4rem;">{{ merged_ideas|length }}</sl-badge>
+        <sl-badge variant="warning" pill style="margin-left: .4rem;">{{ ideas_actionable_count }}</sl-badge>
+        {% if ideas_gated_count %}<sl-badge variant="neutral" pill style="margin-left: .25rem; opacity: .7;">{{ ideas_gated_count }} gated</sl-badge>{% endif %}
     </sl-tab>
     {% endif %}
     {# Task #7 — infographic-style per-ticker technical read cards.
@@ -97,7 +118,15 @@
     </sl-tab>
     {% endif %}
     {% set _rot = briefing.rotation_opportunities or {} %}
-    {% set _rot_total = (_rot.get('stats', {}).get('equity_count', 0) + _rot.get('stats', {}).get('options_count', 0)) %}
+    {% set _csp_rot = briefing.csp_rotations or [] %}
+    {# Task #21 — near-miss rotations count toward tab visibility so an
+       all-gated day still surfaces the panel (hard rule #24). #}
+    {% set _csp_near = briefing.csp_rotation_near_misses or [] %}
+    {# Task #22 — the composed rotation playbook counts toward tab
+       visibility so a playbook-only day still surfaces the panel. #}
+    {% set _playbook = briefing.rotation_playbook or {} %}
+    {% set _playbook_present = (_playbook.get('closes') or []) | length > 0 %}
+    {% set _rot_total = (_rot.get('stats', {}).get('equity_count', 0) + _rot.get('stats', {}).get('options_count', 0) + (_csp_rot|length) + (_csp_near|length) + (1 if _playbook_present else 0)) %}
     {% if _rot_total > 0 %}
     <sl-tab slot="nav" panel="rotations">🔁 Rotations
         <sl-badge variant="warning" pill style="margin-left: .4rem;">{{ _rot_total }}</sl-badge>
@@ -185,15 +214,17 @@
     {% if merged_ideas %}
     <sl-tab-panel name="ideas">
         <section id="ideas-and-candidates">
-            <h2 style="margin-top: .5rem;">💎 Ideas &amp; Candidates ({{ merged_ideas|length }})</h2>
+            <h2 style="margin-top: .5rem;">💎 Ideas &amp; Candidates — {{ ideas_actionable_count }} actionable · {{ ideas_gated_count }} gated</h2>
             <p class="muted" style="font-size: 12px; margin-bottom: 1rem;">
                 Merged from <code>new_ideas</code> (screener), <code>long_term_opportunities</code>
                 (LONG_DATED_CSP · BUY · ADD · LT_ADD · PULLBACK_CSP · plus deferred / skipped reasons)
                 and sub-lot completions from <code>strategy_upgrades</code> (task #17).
                 Hard rule #32 — capacity-gated opportunities are surfaced as ⏸ deferred, never hidden.
+                Only the ✅ section below is actionable today (rule #43 UX).
             </p>
             {# Task #17 — client-side filter chips. Filters by the
-               data-idea-* attributes on each card; "All" restores. #}
+               data-idea-* attributes on each card; "All" restores.
+               Rule #43: ucIdeaFilter spans all three group grids. #}
             <div class="uc-sort uc-idea-filter" data-target="uc-grid-ideas">
                 <span class="uc-sort-label">Filter:</span>
                 <button type="button" class="uc-sort-chip uc-sort-active" onclick="ucIdeaFilter('all', this)">All</button>
@@ -203,12 +234,52 @@
                 <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('deferred', this)">Deferred</button>
                 <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('skipped', this)">Skipped</button>
             </div>
+
+            {# ── Rule #43 UX: three sections at descending visual weight.
+               Grouping comes from ideas.idea_group (the pipeline's own
+               status flags) — nothing is hidden, only de-emphasized. #}
+            <h3 class="ideas-group-head">✅ Actionable today ({{ ideas_groups.actionable|length }})</h3>
+            <p class="muted" style="font-size: 12px; margin: 0 0 .6rem;">
+                Passed every discipline gate this cycle — these are live recommendations.
+            </p>
+            {% if ideas_groups.actionable %}
             {{ sort_strip("uc-grid-ideas", [("ticker", "Ticker")]) }}
             <div class="uc-grid" id="uc-grid-ideas">
-                {% for n in merged_ideas %}
+                {% for n in ideas_groups.actionable %}
                 {{ unified_card(n, tech_by_ticker.get(resolve_ticker(n, 'idea')), 'idea') }}
                 {% endfor %}
             </div>
+            {% else %}
+            <div class="empty">No actionable ideas today — everything below is waiting on a setup or gated.</div>
+            {% endif %}
+
+            {% if ideas_groups.waiting %}
+            <h3 class="ideas-group-head">⏸ Waiting for setup ({{ ideas_groups.waiting|length }})</h3>
+            <p class="muted" style="font-size: 12px; margin: 0 0 .6rem;">
+                Qualifying names whose entry condition hasn't arrived (RSI wait, held put working,
+                reference-demoted). Shown so you can see what's being considered and why it's
+                blocked — rule #24. Not recommendations today.
+            </p>
+            <div class="uc-grid" id="uc-grid-ideas-waiting">
+                {% for n in ideas_groups.waiting %}
+                {{ unified_card(n, tech_by_ticker.get(resolve_ticker(n, 'idea')), 'idea') }}
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if ideas_groups.gated %}
+            <h3 class="ideas-group-head">⛔ Gated ({{ ideas_groups.gated|length }})</h3>
+            <p class="muted" style="font-size: 12px; margin: 0 0 .6rem;">
+                Excluded by a hard gate (capacity, equity-stacking, LT-verdict, discipline skip).
+                Shown so you can see what's being considered and why it's blocked — rule #24.
+                Not recommendations.
+            </p>
+            <div class="uc-grid" id="uc-grid-ideas-gated">
+                {% for n in ideas_groups.gated %}
+                {{ unified_card(n, tech_by_ticker.get(resolve_ticker(n, 'idea')), 'idea') }}
+                {% endfor %}
+            </div>
+            {% endif %}
         </section>
     </sl-tab-panel>
     {% endif %}
@@ -269,6 +340,173 @@
                     </span>
                 </header>
                 <p class="rotation-rationale">{{ plan.rationale }}</p>
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            {# Task #22 — Actionable Rotation Playbook: the whole composed
+               trade (close all freeable winners → conviction-ranked
+               redeploy). Rendered FIRST — it's the "here's the whole trade
+               if you want it" surface. Every number comes from the
+               pipeline's RotationPlaybook.to_dict() (rule #19). #}
+            {% if _playbook_present %}
+            {% set _pb_closes = _playbook.get('closes') or [] %}
+            {% set _pb_opens = _playbook.get('opens') or [] %}
+            <h3 style="margin-top: 1.25rem;">🎯 Actionable Rotation Playbook</h3>
+            <p class="muted" style="font-size: 12px;">
+                Composed rotation: close {{ _pb_closes|length }} winner CSP(s)
+                to fund {{ _pb_opens|length }} new entr{{ 'y' if _pb_opens|length == 1 else 'ies' }},
+                ranked by Parkev conviction. Not a "must execute" — the whole
+                trade if you want to sweep the winners.
+            </p>
+            <div class="rotation-plan rotation-playbook">
+                <header>
+                    <strong>PHASE 1 — Close {{ _pb_closes|length }} winner(s)</strong>
+                    <span class="muted">
+                        banks ${{ '{:,.0f}'.format(_playbook.get('total_realized_profit') or 0) }} ·
+                        frees ${{ '{:,.0f}'.format(_playbook.get('total_freed') or 0) }}
+                    </span>
+                </header>
+                {% for c in _pb_closes %}
+                <p class="rotation-rationale">
+                    Buy-to-Close {{ c.get('qty') or 1 }}× {{ c.get('ticker') }} ${{ '%g' % (c.get('strike') or 0) }}P {{ c.get('expiration') or '' }}
+                    — limit ${{ '%.2f' % (c.get('buy_to_close_mid') or 0) }} GTC ·
+                    {{ '%.0f' % ((c.get('capture_pct') or 0) * 100) }}% capture ·
+                    frees ${{ '{:,.0f}'.format(c.get('freed_collateral') or 0) }} ·
+                    banks {{ '{:+,.0f}'.format(c.get('realized_profit') or 0) }}
+                </p>
+                {% endfor %}
+            </div>
+            <div class="rotation-plan rotation-playbook">
+                <header>
+                    <strong>PHASE 2 — Open {{ _pb_opens|length }} new CSP(s) by conviction</strong>
+                    <span class="muted">
+                        deploys ${{ '{:,.0f}'.format(_playbook.get('total_collateral_deployed') or 0) }} ·
+                        cushion ${{ '{:,.0f}'.format(_playbook.get('cash_cushion_kept') or 0) }} ·
+                        premium +${{ '{:,.0f}'.format(_playbook.get('total_premium_collected') or 0) }}
+                    </span>
+                </header>
+                {% if _pb_opens %}
+                {% for o in _pb_opens %}
+                {% set _score = o.get('conviction_score') or 0 %}
+                <p class="rotation-rationale">
+                    {% if _score >= 18 %}⭐⭐⭐{% elif _score >= 12 %}⭐⭐{% elif _score >= 6 %}⭐{% endif %}
+                    Sell-to-Open 1× {{ o.get('ticker') }} ${{ '%g' % (o.get('strike') or 0) }}P {{ o.get('expiration') or '' }}
+                    — limit ${{ '%.2f' % (o.get('mid_price') or 0) }} ·
+                    +${{ '{:,.0f}'.format(o.get('premium') or 0) }} premium ·
+                    ${{ '{:,.0f}'.format(o.get('collateral_required') or 0) }} collateral ·
+                    {{ '%.0f' % (o.get('annualized_yield_pct') or 0) }}% ann
+                    {%- if o.get('parkev_rating') %} · Parkev {{ o.get('parkev_rating') }}
+                    {%- if o.get('parkev_conviction') %} {{ o.get('parkev_conviction') }}{% endif %}
+                    {%- if o.get('parkev_age_days') is not none %} · {{ o.get('parkev_age_days') }}d{% endif %}
+                    {%- endif %}
+                    {%- for f in o.get('setup_flags') or [] %} · {{ f }}{% endfor %}
+                </p>
+                {% endfor %}
+                {% else %}
+                <p class="rotation-rationale">
+                    Close for coverage — no qualified re-deployment today.
+                </p>
+                {% endif %}
+            </div>
+            {% if _playbook.get('coverage_before') is not none and _playbook.get('coverage_after') is not none %}
+            <p class="muted" style="font-size: 12px;">
+                Coverage: {{ '%.2f' % _playbook.get('coverage_before') }}× →
+                {{ '%.2f' % _playbook.get('coverage_after') }}× (first-order estimate)
+            </p>
+            {% endif %}
+            {% for w in _playbook.get('warnings') or [] %}
+            <p class="muted" style="font-size: 12px;">⚠ {{ w }}</p>
+            {% endfor %}
+            {% endif %}
+
+            {# Task #20 — CSP rotations: close lower-yield held CSP → open
+               higher-yield candidate, coverage-neutral or better. Rendered
+               ABOVE the equity swaps (it's the more actionable surface when
+               capacity gates are closed). Every number comes from the
+               pipeline's CSPRotation.to_dict() — no fabricated values. #}
+            {% if _csp_rot %}
+            <h3 style="margin-top: 1.25rem;">💰 CSP rotations ({{ _csp_rot|length }})</h3>
+            <p class="muted" style="font-size: 12px;">
+                Close a lower-yield held CSP to fund a higher-yield new entry —
+                same-or-lower total put obligation, better return on capital.
+            </p>
+            {% for r in _csp_rot %}
+            {% set _op = r.get('open_position') or {} %}
+            <div class="rotation-plan csp-rotation">
+                <header>
+                    <strong>🔄
+                        Close {% for c in r.get('close_positions') or [] %}{{ c.get('ticker') }} ${{ '%g' % (c.get('strike') or 0) }}P{% if not loop.last %} + {% endif %}{% endfor %}
+                        → Open {{ _op.get('ticker') }} ${{ '%g' % (_op.get('strike') or 0) }}P {{ _op.get('expiration') or '' }}
+                    </strong>
+                    <span class="muted">
+                        yield {{ '%+.0f' % (r.get('yield_delta_pct') or 0) }} pts ann ·
+                        frees ${{ '{:,.0f}'.format(r.get('freed_collateral') or 0) }} ·
+                        requires ${{ '{:,.0f}'.format(r.get('required_collateral') or 0) }} ·
+                        net {{ '{:+,.0f}'.format(r.get('net_collateral_delta') or 0) }}
+                    </span>
+                </header>
+                <p class="rotation-rationale">
+                    {% for c in r.get('close_positions') or [] %}
+                    Close {{ c.get('ticker') }} ${{ '%g' % (c.get('strike') or 0) }}P {{ c.get('expiration') or '' }} —
+                    {{ '%.0f' % ((c.get('capture_pct') or 0) * 100) }}% capture,
+                    {{ c.get('days_remaining') or 0 }} DTE,
+                    {{ '%.0f' % (c.get('remaining_yield_ann') or 0) }}% ann remaining.
+                    {% endfor %}
+                    Open {{ _op.get('ticker') }} ${{ '%g' % (_op.get('strike') or 0) }}P —
+                    {{ _op.get('dte') or 0 }} DTE,
+                    {{ '%.0f' % (_op.get('yield_ann') or 0) }}% ann,
+                    ${{ '{:,.0f}'.format(_op.get('premium_dollars') or 0) }} premium.
+                </p>
+                {% for w in r.get('warnings') or [] %}
+                <p class="muted" style="font-size: 12px;">⚠ {{ w }}</p>
+                {% endfor %}
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            {# Task #21 — near-miss CSP rotations: blocked by exactly ONE
+               discipline gate. Informational (tone-neutral), never an
+               automatic recommendation — the user decides whether to
+               override the named constraint. Every number comes from the
+               pipeline's NearMissRotation.to_dict() (rule #19). #}
+            {% if _csp_near %}
+            <h3 style="margin-top: 1.25rem;">🔍 Near-miss rotations ({{ _csp_near|length }})</h3>
+            <p class="muted" style="font-size: 12px;">
+                Would have been recommended if a single constraint were relaxed.
+                Shown so you can decide whether to override — not automatic
+                recommendations.
+            </p>
+            {% for r in _csp_near %}
+            {% set _op = r.get('open_position') or {} %}
+            <div class="rotation-plan csp-rotation csp-near-miss">
+                <header>
+                    <strong>🔍
+                        Close {% for c in r.get('close_positions') or [] %}{{ c.get('ticker') }} ${{ '%g' % (c.get('strike') or 0) }}P{% if not loop.last %} + {% endif %}{% endfor %}
+                        → Open {{ _op.get('ticker') }} ${{ '%g' % (_op.get('strike') or 0) }}P {{ _op.get('expiration') or '' }}
+                    </strong>
+                    <span class="muted">
+                        yield {{ '%+.0f' % (r.get('yield_delta_pct') or 0) }} pts ann ·
+                        frees ${{ '{:,.0f}'.format(r.get('freed_collateral') or 0) }} ·
+                        requires ${{ '{:,.0f}'.format(r.get('required_collateral') or 0) }}
+                    </span>
+                </header>
+                <p class="rotation-rationale">
+                    <sl-badge variant="neutral" pill>🚫 {{ {'coverage_floor': 'Coverage floor',
+                        'directive_hold': 'Directive hold',
+                        'overlap': 'Strike overlap (rule #40)',
+                        'earnings': 'Earnings window',
+                        'stacking': 'Single-name stacking',
+                        'bucket_concentration': 'Bucket concentration'}.get(r.get('block_reason'), r.get('block_reason') or 'gate') }}</sl-badge>
+                    {{ r.get('block_detail') or '' }}
+                </p>
+                <p class="rotation-rationale">
+                    <sl-badge variant="neutral" pill>🔓 To unlock</sl-badge>
+                    {{ r.get('unblock_path') or '' }}
+                </p>
+                {% for w in r.get('warnings') or [] %}
+                <p class="muted" style="font-size: 12px;">⚠ {{ w }}</p>
+                {% endfor %}
             </div>
             {% endfor %}
             {% endif %}
@@ -398,6 +636,59 @@
             {% endif %}
             {% elif _attr %}
             <p class="muted">P/L attribution unavailable — {{ _attr.get('note') or _attr.get('status') or 'no data' }}.</p>
+            {% endif %}
+
+            {# Task #41 — 👻 Ghost portfolio: options-stripped counterfactual
+               NAV. Real − Ghost = the options program's net contribution.
+               Renders from the briefing JSON's ghost_portfolio; missing data
+               renders a muted placeholder (never hidden, never a 500). #}
+            {% set _ghost = briefing.ghost_portfolio or {} %}
+            {% if _ghost.get('status') == 'ok' and _ghost.get('series') %}
+            <h3 style="margin-top: 1.4rem;">👻 Ghost Portfolio (no-options counterfactual)</h3>
+            <p class="muted" style="font-size: .82rem;">
+                Is it the market or the moves? Ghost NAV = the same equities +
+                mirrored trades/flows with every option stripped since
+                {{ _ghost.get('inception') or '—' }}.
+                Real − Ghost = the options program's cumulative net contribution.
+            </p>
+            {% set _gs = _ghost.get('summary') or {} %}
+            {% set _dates = _ghost.get('series').keys() | list | sort %}
+            <table>
+                <thead>
+                    <tr><th>As of</th><th>Real NAV</th><th>Ghost NAV</th>
+                        <th>Options net (gap)</th></tr>
+                </thead>
+                <tbody>
+                    {% for _d in [_dates | first, _dates | last] %}
+                    {% set _row = _ghost.get('series').get(_d) or {} %}
+                    <tr>
+                        <td>{{ 'Inception ' if loop.first else 'Today ' }}({{ _d }})</td>
+                        <td class="num">{{ "${:,.0f}".format(_row.get('real_nav')) if _row.get('real_nav') is not none else "n/a" }}</td>
+                        <td class="num">{{ "${:,.0f}".format(_row.get('ghost_nav')) if _row.get('ghost_nav') is not none else "n/a" }}</td>
+                        {% set _g = _row.get('gap') %}
+                        <td class="num">
+                            {% if _g is not none %}
+                            <strong style="color: {{ 'var(--color-red, #EF4444)' if _g < 0 else 'var(--color-green, #34D399)' }};">
+                                {{ "${:+,.0f}".format(_g) }}</strong>
+                            {% else %}n/a{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="muted" style="font-size: .82rem;">
+                {% if _gs.get('total_gap') is not none %}
+                <strong>Options program net since {{ _gs.get('inception') }}:
+                {{ "${:+,.0f}".format(_gs.get('total_gap')) }}</strong>
+                {% if _gs.get('month_gap') is not none %} · this month {{ "${:+,.0f}".format(_gs.get('month_gap')) }}{% endif %}
+                {% if _gs.get('week_gap') is not none %} · past 7d {{ "${:+,.0f}".format(_gs.get('week_gap')) }}{% endif %}
+                {% endif %}
+            </p>
+            {% if _ghost.get('footnote') %}
+            <p class="muted" style="font-size: .78rem;"><em>Assumptions: {{ _ghost.get('footnote') }}</em></p>
+            {% endif %}
+            {% elif _ghost %}
+            <p class="muted">👻 Ghost portfolio unavailable — {{ (_ghost.get('notes') or ['no data']) | join('; ') }}.</p>
             {% endif %}
         </section>
     </sl-tab-panel>
@@ -572,9 +863,11 @@ function ucSort(gridId, key, btn) {
 // Filtering is display-only (server order preserved); "All" restores.
 // Fail-silent throughout — a missing grid or attribute never throws.
 function ucIdeaFilter(filter, btn) {
-    var grid = document.getElementById("uc-grid-ideas");
-    if (!grid) return;
-    var cards = Array.prototype.slice.call(grid.querySelectorAll(":scope > .uc-card"));
+    // Rule #43 UX — the Ideas tab is split into three group grids
+    // (actionable / waiting / gated); the filter spans all of them.
+    var section = document.getElementById("ideas-and-candidates");
+    if (!section) return;
+    var cards = Array.prototype.slice.call(section.querySelectorAll(".uc-grid > .uc-card"));
     cards.forEach(function (c) {
         var kind = (c.dataset.ideaKind || "").toUpperCase();
         var status = (c.dataset.ideaStatus || "").toLowerCase();

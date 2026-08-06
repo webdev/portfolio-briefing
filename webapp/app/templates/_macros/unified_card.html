@@ -29,7 +29,9 @@
 {% macro unified_card(base, tech, tab_kind, extra=None) %}
 {% set _tk = resolve_ticker(base, tab_kind) %}
 {% set _opl = option_pl_pct(base) if tab_kind == 'option' else none %}
-<article class="uc-card uc-{{ tab_kind }}"
+{# Rule #43 UX — waiting/gated idea cards render at reduced visual weight
+   (uc-muted) so a demoted ticket never reads as a recommendation. #}
+<article class="uc-card uc-{{ tab_kind }}{% if tab_kind == 'idea' and base.group in ('waiting', 'gated') %} uc-muted{% endif %}"
          data-ticker="{{ _tk or '' }}"
          {% if tab_kind == 'equity' and base.pl_pct is not none %}data-pl="{{ base.pl_pct }}"{% endif %}
          {% if tab_kind == 'equity' and base.weight is not none %}data-weight="{{ base.weight }}"{% endif %}
@@ -38,7 +40,7 @@
          {% if tab_kind == 'action' and base.days_flagged is not none %}data-age="{{ base.days_flagged }}"{% endif %}
          {% if tab_kind == 'strategy' and base.current_weight_pct is not none %}data-weight="{{ base.current_weight_pct }}"{% endif %}
          {# Task #17 — Ideas filter chips key off these attributes. #}
-         {% if tab_kind == 'idea' %}data-idea-kind="{{ base.kind or '' }}" data-idea-status="{{ base.status or '' }}" data-idea-dte="{{ base.dte if base.dte is not none else '' }}" data-idea-bucket="{{ base.dte_bucket or '' }}"{% endif %}>
+         {% if tab_kind == 'idea' %}data-idea-kind="{{ base.kind or '' }}" data-idea-status="{{ base.status or '' }}" data-idea-dte="{{ base.dte if base.dte is not none else '' }}" data-idea-bucket="{{ base.dte_bucket or '' }}" data-idea-group="{{ base.group or '' }}"{% endif %}>
 
     {# ══ TOP: tab-specific extras ══ #}
     {% if tab_kind == 'action' %}
@@ -162,7 +164,9 @@
             </span>
         </div>
         {% if base.source_label and base.source_label != "—" %}<div class="uc-extras-sub muted">Source: {{ base.source_label }}</div>{% endif %}
-        {% if base.concrete_trade %}<div class="uc-extras-note uc-trade">{{ base.concrete_trade | inline_md }}</div>{% endif %}
+        {# Rule #43 UX — mirror the markdown's "Trade (when RSI cools):"
+           honesty: a demoted ticket is never rendered as a bare trade. #}
+        {% if base.concrete_trade %}<div class="uc-extras-note uc-trade">{% if base.group == 'waiting' %}<span class="uc-trade-prefix">when conditions clear:</span> {% elif base.group == 'gated' %}<span class="uc-trade-prefix">excluded:</span> {% endif %}{{ base.concrete_trade | inline_md }}</div>{% endif %}
         {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
     </div>
 

@@ -15,6 +15,8 @@ dependencies = [
     "httpx>=0.27",       # HTTP client used by the recommendation-list fetcher
     "structlog>=24.1",   # structured logging (recommendation-list fetcher)
     "python-dotenv>=1.0",# load .env (E*TRADE consumer creds + FMP_API_KEY) into the environment
+    "beautifulsoup4>=4.12",  # HTML parsing (finviz-target-fetcher, canslim-screener)
+    "lxml>=5.0",             # faster BeautifulSoup backend; falls back to html.parser if missing
 ]
 
 [project.optional-dependencies]
@@ -25,6 +27,14 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+
+[tool.ruff.lint]
+# F821 (undefined names) is the class of bug that killed the 2026-08-04 live
+# run (`snap_root` NameError in run_briefing.py's rotation-advisor block, plus
+# a latent twin in steps/aggregate.py). Ruff's defaults include the F rules,
+# but pin them explicitly so a future config edit can't silently drop them.
+# Run: `ruff check --select F821 skills/ scripts/ webapp/`
+extend-select = ["F821"]
 
 [tool.uv]
 # This repo is a collection of runnable skills/scripts, not an installable

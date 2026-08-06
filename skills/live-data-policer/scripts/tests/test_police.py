@@ -136,6 +136,28 @@ def test_panel_lists_all_stale_sources():
     assert "broker_positions" in result.panel_md
 
 
+def test_fmp_fallback_earnings_source_passes():
+    """Task #43 defect 3 (2026-08-03 briefing header): '🟡 earnings_calendar
+    (source `yfinance+fmp_fallback`): source 'yfinance+fmp_fallback' not in
+    allow-list ['yfinance']' — the earnings-unknown fix tags the combined
+    live source, but the policer's allow-list wasn't updated. Both the
+    combined tag and plain 'fmp' must PASS."""
+    for src in ("yfinance+fmp_fallback", "fmp"):
+        snapshot = {
+            "data_provenance": {
+                "positions": _provenance("etrade_live", 5),
+                "broker_positions": _provenance("etrade_live", 5),
+                "quotes": _provenance("yfinance", 2),
+                "chains": _provenance("etrade_live", 10),
+                "iv_ranks": _provenance("yfinance_252d", 60),
+                "earnings_calendar": _provenance(src, 60),
+            }
+        }
+        result = police_data_freshness(snapshot)
+        assert result.verdict == "PASS", src
+        assert not result.stale_sources, src
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

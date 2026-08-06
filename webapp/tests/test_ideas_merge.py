@@ -194,3 +194,57 @@ def test_humanize_action_no_raw_machine_identifiers(client):
     # DEFERRED_ADD_HAS_CSP must be humanized in user-visible text
     assert "DEFERRED_ADD_HAS_CSP" not in body_text
     assert "SKIPPED_ADD" not in body_text
+
+
+def test_reference_demoted_lto_gets_reference_status_chip():
+    """Rule #43 (GOOG 2026-08-03): the briefing demoted '💎 6. LONG DATED
+    CSP · GOOG — Trade: SELL 1× GOOG $330P' (⛔ equity-stacking hard-skip
+    16.2% NLV + stale qualifying RSI on a +8.8% move) to the unnumbered
+    '📎 Shown for reference' subsection. The Ideas merge must mirror it:
+    a `reference_demoted` LTO gets a `reference` status chip — never
+    '✓ actionable' — and sorts after actionable rows (hard rule #32:
+    shown, labeled, never hidden). The machine token has a humanized
+    label per hard rule #31."""
+    briefing = _fake_briefing(
+        new_ideas=[],
+        ltos=[
+            {"kind": "LONG_DATED_CSP", "ticker": "AMZN",
+             "concrete_trade": "SELL AMZN $230P Jan 16 '27"},
+            {"kind": "LONG_DATED_CSP", "ticker": "GOOG",
+             "concrete_trade": "SELL 1× GOOG $330P exp Fri Oct 16 '26",
+             "reference_demoted": True,
+             "reference_reason": "equity-stacking hard-skip + stale "
+                                 "qualifying RSI (spot moved +8.8% since "
+                                 "computation)"},
+        ],
+    )
+    merged = build_merged_ideas(briefing)
+    by_ticker = {m["ticker"]: m for m in merged}
+    goog = by_ticker["GOOG"]
+    assert goog["status"] == "reference"
+    assert "reference" in goog["status_label"]
+    assert "not actionable" in goog["status_label"]
+    assert goog["status_class"] == "muted"
+    # Full ticket still surfaced (rule #24) — shown, never hidden.
+    assert "SELL 1× GOOG $330P" in goog["concrete_trade"]
+    # Ordering: actionable AMZN before the reference GOOG row.
+    assert merged.index(by_ticker["AMZN"]) < merged.index(goog)
+    # Rule #31 — the machine token humanizes, never leaks raw.
+    from app.icons import humanize_action
+    assert humanize_action("reference_demoted") == \
+        "Reference — not actionable today"
+
+
+def test_pullback_csp_humanizes_to_paid_to_wait():
+    """Rule #43 (NVDA 2026-08-04): '1. PULLBACK CSP NVDA — sell $185P exp
+    Fri Sep 04 ... RSI 53' — George read the label as 'NVDA is in a pullback
+    now'. It's a strategy name; the render label was renamed to
+    'CSP — PAID-TO-WAIT' on every surface. The webapp label (rule #31) must
+    match: the internal kind PULLBACK_CSP humanizes to 'CSP — Paid-to-Wait',
+    never the misleading 'Pullback CSP'."""
+    from app.icons import action_icon, humanize_action
+    assert humanize_action("PULLBACK_CSP") == "CSP — Paid-to-Wait"
+    assert humanize_action("PULLBACK CSP") == "CSP — Paid-to-Wait"
+    assert humanize_action("CSP — PAID-TO-WAIT") == "CSP — Paid-to-Wait"
+    # The icon mapping recognizes the new rendered label too.
+    assert action_icon("CSP — PAID-TO-WAIT") == action_icon("PULLBACK_CSP")

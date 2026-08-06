@@ -545,3 +545,92 @@ def test_engineered_cc_strike_rebound_proof_math():
     assert ok is True
     # sma_200 $315 < spot $355 (skipped); baseline = 355 × 1.13 = $401.15 → $405
     assert env["min_strike"] >= 400
+
+
+# ─── Tier badge consistency — header vs chip continuation line ─────────────
+
+
+def test_meta_tier_badge_consistent():
+    """User symptom (2026-07-29 briefing): 'META header shows 🟢 Tier A but
+    the chip line in the SAME card shows 🔵 Tier C.' The Watch card's
+    third-party sub-bullet ('  - 🅿️ TOP STOCK · …') carries no ticker of its
+    own — the bare-token fallback extracted 'STOCK' and tier_for('STOCK')
+    returned the Tier C default. Continuation lines must inherit the parent
+    line's ticker so one ticker → one tier badge everywhere in the card."""
+    md = (
+        "- **META** @ $585.61 — 6.8% (+4.2%) → **HOLD**  · RSI 42  "
+        "· 🅿️ TOP STOCK · 🔥 High · ⏰ 19d\n"
+        "  - 🅿️ TOP STOCK · 🔥 High · ⏰ 19d"
+    )
+    annotated = pt.annotate_tier_badges(md, _CONFIG)
+    assert annotated.count("🟢 Tier A") == 2, annotated
+    assert "🔵 Tier C" not in annotated, annotated
+
+
+def test_tier_badge_continuation_line_does_not_inherit_across_cards():
+    """A chip continuation line under a DIFFERENT ticker's header must get
+    that header's tier, not a stale one from an earlier card."""
+    md = (
+        "- **META** @ $585.61 → **HOLD**  · 🅿️ TOP STOCK · 🔥 High · ⏰ 19d\n"
+        "  - 🅿️ TOP STOCK · 🔥 High · ⏰ 19d\n"
+        "- **MU** @ $739.00 → **HOLD**  · 🅿️ BUY · 🔥 High · 1d\n"
+        "  - 🅿️ BUY · 🔥 High · 1d"
+    )
+    annotated = pt.annotate_tier_badges(md, _CONFIG)
+    lines = annotated.splitlines()
+    assert "🟢 Tier A" in lines[0] and "🟢 Tier A" in lines[1]
+    assert "🟡 Tier B" in lines[2] and "🟡 Tier B" in lines[3]
+
+
+# ─── Rule #43 fix (2026-07-31): tier_a.enabled=true must NOT bypass the
+# ─── willing_to_write_cc_on whitelist. The 2026-07-07 production config set
+# ─── `enabled: true` intending opt-in-only, but the old logic short-circuited
+# ─── on the flag and green-lit EVERY Tier A name — observed as
+# ─── "**AMZN — 100 shares (no CC yet, 2.6% NLV)** ✅ READY TO WRITE".
+
+
+def test_tier_a_enabled_true_still_requires_whitelist_membership():
+    """With `enabled: true` AND a whitelist, only whitelisted names pass —
+    AMZN (not listed) must be disabled."""
+    from analysis.position_tiers import is_cc_enabled_for_tier
+    cfg = {
+        "covered_call_tiers": {
+            "tier_a": {
+                "enabled": True,
+                "willing_to_write_cc_on": ["NVDA", "MSFT"],
+            },
+        },
+    }
+    assert is_cc_enabled_for_tier("A", cfg, ticker="AMZN") is False
+    assert is_cc_enabled_for_tier("A", cfg, ticker="GOOG") is False
+    assert is_cc_enabled_for_tier("A", cfg, ticker="NVDA") is True
+    assert is_cc_enabled_for_tier("A", cfg, ticker="MSFT") is True
+
+
+def test_tier_a_enabled_true_with_whitelist_and_no_ticker_is_disabled():
+    """No ticker context + whitelist present → fail-closed (a tier-wide
+    check can't validate per-name opt-in)."""
+    from analysis.position_tiers import is_cc_enabled_for_tier
+    cfg = {
+        "covered_call_tiers": {
+            "tier_a": {
+                "enabled": True,
+                "willing_to_write_cc_on": ["NVDA", "MSFT"],
+            },
+        },
+    }
+    assert is_cc_enabled_for_tier("A", cfg) is False
+    assert is_cc_enabled_for_tier("A", cfg, ticker=None) is False
+
+
+def test_tier_a_enabled_true_without_whitelist_keeps_flag_behavior():
+    """Legacy: `enabled: true` with NO whitelist → tier-wide enabled
+    (the flag drives it, as before)."""
+    from analysis.position_tiers import is_cc_enabled_for_tier
+    cfg = {
+        "covered_call_tiers": {
+            "tier_a": {"enabled": True},
+        },
+    }
+    assert is_cc_enabled_for_tier("A", cfg, ticker="AMZN") is True
+    assert is_cc_enabled_for_tier("A", cfg) is True

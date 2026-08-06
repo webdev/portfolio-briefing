@@ -290,6 +290,41 @@ def render_watch_with_commentary(
             if not commentary and review.get("rationale"):
                 lines.append(f"  - {review.get('rationale')}")
 
+            # Rule #3 gate / HOLD_FOR_DECAY (TSM 2026-07-30): demoted roll
+            # items surface HERE — the Watch panel is the ONLY surface for
+            # them, never an actionable ticket. Fail-open: any error → no
+            # line, the briefing still ships.
+            _gate_note = review.get("_roll_gate_demotion")
+            if _gate_note:
+                lines.append(f"  • ⏸ {_gate_note}")
+            # Task #40 fix 2: churn-guarded roll (position opened within
+            # roll.min_position_age_days) — Watch note, never a ticket.
+            _churn_note = review.get("_churn_guard_demotion")
+            if _churn_note:
+                lines.append(f"  • ⏸ {_churn_note}")
+            # Task #40 fix 5: debit-to-collateral cap demotion.
+            _debit_note = review.get("_debit_cap_demotion")
+            if _debit_note:
+                lines.append(f"  • ⏸ {_debit_note}")
+            # Rule #43 micro-fix (AMZN $330C $27, 2026-08-04): take-profit
+            # close below the dollar action floor (close_winner_min_dollars)
+            # — Watch note, never an action slot.
+            _floor_note = review.get("_close_floor_demotion")
+            if _floor_note:
+                lines.append(f"  • ⏸ _{_floor_note}_")
+            if (opt_type or "").upper() == "PUT" and (qty or 0) < 0:
+                try:
+                    from render.panels import _exit_cost_anatomy
+                    _an, _ = _exit_cost_anatomy(
+                        review, snapshot_data, equity_reviews)
+                    if _an is not None and _an.verdict == "HOLD_FOR_DECAY":
+                        lines.append(
+                            f"  • **⚖️ Verdict: HOLD_FOR_DECAY** — "
+                            f"{_an.verdict_reason}"
+                        )
+                except Exception:
+                    pass
+
             # Cell ID humanized (raw cell preserved in JSON sidecar for audit)
             if cell:
                 # Import locally to avoid circular import
@@ -298,10 +333,34 @@ def render_watch_with_commentary(
                 if human:
                     lines.append(f"  - {human}")
 
+            # Task #38 Part 2: credit-window indicator on every held short
+            # put — the state that matters is "can I still roll for a
+            # credit", surfaced one line above the ROLL ANALYSIS table.
+            # Fail-open: any error → no line, never a fabricated state.
+            if (opt_type or "").upper() == "PUT" and (qty or 0) < 0:
+                try:
+                    from analysis.credit_windows import (
+                        credit_window_for_review, format_credit_window_line)
+                    _cw = (((snapshot_data or {}).get("_credit_windows") or {})
+                           .get(contract)
+                           or credit_window_for_review(
+                               review, (snapshot_data or {}).get("_config") or {}))
+                    _cw_line = format_credit_window_line(_cw) if _cw else None
+                    if _cw_line:
+                        lines.append(f"  {_cw_line}")
+                except Exception:
+                    pass
+
             # Roll target (legacy single-target)
             roll = review.get("roll_target")
             if roll and not review.get("roll_candidates"):
-                lines.append(f"  - roll target: {roll.get('strike')} exp {roll.get('expiration')} for ${roll.get('expectedNetCredit', 0):.2f} credit")
+                # Legacy select_roll_target keys are strikePrice/expirationDate
+                # (rule #43, 2026-07-31: the old strike/expiration lookups
+                # rendered None/? placeholders). Fail closed when unresolved.
+                r_strike = roll.get("strikePrice") or roll.get("strike")
+                r_exp = roll.get("expirationDate") or roll.get("expiration")
+                if r_strike and r_exp:
+                    lines.append(f"  - roll target: ${float(r_strike):g} exp {r_exp} for ${roll.get('expectedNetCredit', 0):.2f} credit")
 
             # NEW: Multi-candidate roll-analysis table from wheel-roll-advisor
             candidates = review.get("roll_candidates") or []
@@ -309,15 +368,66 @@ def render_watch_with_commentary(
                 rec_id = review.get("recommended_candidate_id")
                 if_anyway = review.get("if_rolling_anyway_candidate_id")
                 lines.append("")
+                # Assignment-basis header for ITM short puts (2026-07-29 LITE
+                # lesson): before weighing roll candidates, show what owning
+                # the shares via assignment would actually cost vs market.
+                # All measured values (strike/premium/spot) — no line when any
+                # is missing (CLAUDE.md #19).
+                if ((opt_type or "").upper() == "PUT" and (qty or 0) < 0
+                        and strike and underlying):
+                    _spot_b = float(((snapshot_data or {}).get("quotes", {})
+                                     .get(underlying) or {}).get("last") or 0)
+                    if _spot_b and float(strike) > _spot_b:
+                        try:
+                            from analysis.exit_cost import format_basis_line
+                            _basis_line = format_basis_line(strike, entry, _spot_b)
+                        except Exception:
+                            _basis_line = None
+                        if _basis_line:
+                            lines.append(f"  {_basis_line}")
+                            lines.append("")
                 lines.append("  **ROLL ANALYSIS:**")
                 lines.append("")
                 lines.append("  | id | Action | Net | Notes |")
                 lines.append("  |----|--------|-----|-------|")
+                # Task #43 defect 2 (AVGO candidate E, 2026-07-31): a
+                # candidate extending +854d (~2.3yr) rendered with honest
+                # tenor phrasing but NO warning that it sits 7× past the
+                # action-list tenor cap. The ranker already never picks
+                # these (max_tenor_days); the menu must say why. Core
+                # names get the same 3× allowance the action list uses.
+                _cfg_menu = (snapshot_data or {}).get("_config") or {}
+                try:
+                    _tenor_cap_menu = int((_cfg_menu.get("roll") or {})
+                                          .get("max_action_tenor_days", 120))
+                    # 2026-08-04 (PLTR): core = core_positions ∪ Tier A —
+                    # tier-A names get the same 3× tenor allowance.
+                    try:
+                        from analysis.position_tiers import (
+                            core_union as _core_union_menu,
+                        )
+                        _core_menu = _core_union_menu(_cfg_menu)
+                    except Exception:
+                        _core_menu = set(
+                            _cfg_menu.get("core_positions") or [])
+                    if underlying in _core_menu:
+                        _tenor_cap_menu *= 3
+                except (TypeError, ValueError, AttributeError):
+                    _tenor_cap_menu = None  # unmeasurable cap → no warning
                 for c in candidates:
                     cid = c.get("id", "?")
                     action = c.get("description", "")
                     net = c.get("netDollars", 0) or 0
                     notes = c.get("notes", "")
+                    try:
+                        _ext = int(c.get("dteExtension") or 0)
+                    except (TypeError, ValueError):
+                        _ext = 0
+                    if _tenor_cap_menu and _ext > _tenor_cap_menu:
+                        _warn = (f"⚠ far past the {_tenor_cap_menu}d tenor "
+                                 f"cap — shown for completeness, not "
+                                 f"recommended")
+                        notes = f"{notes} · {_warn}" if notes else _warn
                     is_rec = cid == rec_id
                     is_anyway = cid == if_anyway
                     badge = ""
@@ -359,7 +469,13 @@ def render_watch_with_commentary(
                     lines.append("")
                     lines.append("  ```")
                     lines.append(f"  BUY TO CLOSE   {btc_qty} × {review.get('underlying', '?')}  {_fmt_exp(btc_exp)}  ${btc_strike:g} {review.get('type', 'CALL')}   Limit ${btc_lim:.2f}  GTC")
-                    lines.append(f"  SELL TO OPEN   {btc_qty} × {review.get('underlying', '?')}  {_fmt_exp(sto_exp)}  ${sto_strike:g} {review.get('type', 'CALL')}   Limit ${sto_lim:.2f}  GTC")
+                    # Bug #26 (2026-07-22): the STO leg carries the underlying's
+                    # RSI inline — the parent ROLL header has it, but the RSI
+                    # Coverage verifier scans ±3 lines and the ROLL ANALYSIS
+                    # table pushes the header out of the window. Measured value
+                    # only; omitted when RSI is unknown (never fabricated).
+                    _sto_rsi = f"  · RSI {opt_rsi:.0f}" if opt_rsi is not None else ""
+                    lines.append(f"  SELL TO OPEN   {btc_qty} × {review.get('underlying', '?')}  {_fmt_exp(sto_exp)}  ${sto_strike:g} {review.get('type', 'CALL')}   Limit ${sto_lim:.2f}  GTC{_sto_rsi}")
                     lines.append(f"  NET CREDIT TARGET: ${net_cred:,.0f}")
                     lines.append("  ```")
 

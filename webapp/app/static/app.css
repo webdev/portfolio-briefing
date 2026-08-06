@@ -2860,6 +2860,18 @@ html[data-theme="solarized-light"] .tech-card {
 
 .uc-extras-note { font-size: 12.5px; line-height: 1.45; }
 .uc-extras-note.uc-trade { font-weight: 500; color: var(--color-text-primary); }
+
+/* Rule #43 UX (GOOG $345P, 2026-08-04) — waiting/gated idea cards render
+   at reduced visual weight so a demoted ticket never reads as a
+   recommendation. Hover/focus restores full opacity for reading. */
+.uc-card.uc-muted { opacity: .6; border-color: var(--color-border-subtle); }
+.uc-card.uc-muted:hover, .uc-card.uc-muted:focus-within { opacity: 1; }
+.uc-card.uc-muted .uc-extras-note.uc-trade { font-weight: 400; color: var(--color-text-secondary); }
+.uc-trade-prefix {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--color-text-tertiary); margin-right: .3rem;
+}
+.ideas-group-head { margin: 1.4rem 0 .35rem; }
 .uc-extras-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
 .uc-matrix-cell { font-size: 10px; color: var(--color-text-tertiary); }
 .uc-warnings { display: flex; flex-direction: column; gap: 2px; }

@@ -48,8 +48,18 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     # lt_secular_wait (hard rule #39): a new CC on a measured LT
     # `secular-uptrend` chart caps a compounder — demoted to the wait list
     # alongside the RSI mid-range demotion (shown, never hidden).
-    cc_ready = [c for c in new_ccs if not c.get("rsi_wait") and not c.get("lt_secular_wait")]
-    cc_wait = [c for c in new_ccs if c.get("rsi_wait") or c.get("lt_secular_wait")]
+    # tier_envelope_wait (hard rules #29/#34/#43): a Tier A opt-in or Tier B
+    # write whose proposed contract violates the tier's strict envelope
+    # (RSI floor / min OTM% / max delta / max DTE) is demoted to the wait
+    # list with the specific unmet conditions — shown, never hidden.
+    def _is_wait(c: dict) -> bool:
+        return bool(
+            c.get("rsi_wait") or c.get("lt_secular_wait")
+            or c.get("tier_envelope_wait")
+        )
+
+    cc_ready = [c for c in new_ccs if not _is_wait(c)]
+    cc_wait = [c for c in new_ccs if _is_wait(c)]
 
     def _render_cc(cc: dict, header_badge: str) -> None:
         from datetime import date, timedelta
@@ -101,6 +111,18 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
         if cc.get("lt_secular_note"):
             lines.append(f"  - **⚠ LT-trend:** {cc.get('lt_secular_note')}")
+        # Tier envelope misses (rules #29/#34/#43) — the specific unmet
+        # conditions, so the user can see exactly what would make the write
+        # eligible ("needs RSI ≥ 75 (now 74) · needs ≥20% OTM (proposed 11.7%)").
+        if cc.get("tier_envelope_wait") and cc.get("tier_violations"):
+            lines.append(
+                f"  - **⏸ Tier {cc.get('tier', 'A')} envelope:** "
+                + " · ".join(cc["tier_violations"])
+            )
+        # Pre-trade validator Rule 13 belt-and-suspenders finding
+        tv = cc.get("tier_validator")
+        if isinstance(tv, dict) and tv.get("reason"):
+            lines.append(f"  - 🚫 **Pre-trade validator:** {tv['reason']}")
         if earnings_blocked:
             lines.append(
                 f"  - ⚠ Earnings on {earnings_date} — defer writing until after the print "
@@ -139,7 +161,10 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         )
         lines.append("")
         for cc in cc_wait:
-            _render_cc(cc, "⏸ WAIT FOR STRENGTH")
+            if cc.get("tier_envelope_wait") and not cc.get("rsi_wait"):
+                _render_cc(cc, "⏸ TIER ENVELOPE NOT MET")
+            else:
+                _render_cc(cc, "⏸ WAIT FOR STRENGTH")
 
     # === TIER A CORE HOLDINGS (NO CC by policy) ===
     # CLAUDE.md hard rule #29: Tier A holdings (LT core compounders — NVDA,

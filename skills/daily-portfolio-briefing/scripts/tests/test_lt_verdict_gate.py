@@ -206,8 +206,8 @@ def test_amzn_pullback_csp_blocked_by_overlap(monkeypatch):
     md = "\n".join(render_action_list(
         equity_reviews, [], [], analytics=None,
         snapshot_data=_amzn_snapshot(), date_str=date.today().isoformat()))
-    assert "**PULLBACK CSP** AMZN" not in md          # not actionable
-    assert "PULLBACK CSP AMZN skipped" in md          # transparency footer
+    assert "**CSP — PAID-TO-WAIT** AMZN" not in md    # not actionable
+    assert "CSP — PAID-TO-WAIT AMZN skipped" in md    # transparency footer
     assert "concentrates rather than diversifies" in md
     assert "4.4%" in md                                # measured, not boilerplate
 
@@ -269,7 +269,7 @@ def test_meta_pullback_csp_passes_with_tier5_fresh_override(monkeypatch):
     md = "\n".join(render_action_list(
         equity_reviews, [], [], analytics=None, snapshot_data=snap,
         date_str=date.today().isoformat()))
-    assert "**PULLBACK CSP** META" in md      # kept — override honored
+    assert "**CSP — PAID-TO-WAIT** META" in md  # kept — override honored
     assert "LT-trend note" in md              # ...but the contradiction shows
     assert "downtrend" in md
 
@@ -297,8 +297,8 @@ def test_pullback_csp_blocked_on_broken_chart_without_override(monkeypatch):
     md = "\n".join(render_action_list(
         equity_reviews, [], [], analytics=None, snapshot_data=snap,
         date_str=date.today().isoformat()))
-    assert "**PULLBACK CSP** ZS" not in md
-    assert "PULLBACK CSP ZS blocked" in md
+    assert "**CSP — PAID-TO-WAIT** ZS" not in md
+    assert "CSP — PAID-TO-WAIT ZS blocked" in md
     assert "broken" in md
 
 

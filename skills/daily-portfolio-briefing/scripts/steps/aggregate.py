@@ -56,6 +56,8 @@ def _run_fable_review_cascade(
     briefing_markdown: str,
     snapshot_dir,
     config: dict | None,
+    position_context: str | None = None,
+    executed_rolls: list | None = None,
 ) -> list[str]:
     """LLM second-opinion pass — cascades v2 (advisor) → v1 (critic).
 
@@ -85,6 +87,8 @@ def _run_fable_review_cascade(
             from analysis import fable_advisor as _fa
             fa_result = _fa.generate_advisor_review(
                 briefing_markdown, snapshot_dir, config=config,
+                position_context=position_context,
+                executed_rolls=executed_rolls,
             )
             if fa_result.get("status") == "ok":
                 review_lines = _fa.render_review_section(fa_result)
@@ -158,6 +162,99 @@ def aggregate_briefing(
     # Make config visible to render layer (used for core_positions/ltcg_rate/etc.)
     snapshot_data["_config"] = config
 
+    # Bug #25: parse contract-level standing directives from
+    # state/fable_advisor_memory.md so the CLOSE recommender + rec-aging can
+    # respect them (a directive-held CLOSE is suppressed with a transparency
+    # footer instead of escalating "IGNORED N DAYS"). Fail-open.
+    if "_advisor_directives" not in snapshot_data:
+        try:
+            from analysis.advisor_directives import parse_directives
+            # Canonical location first (<repo>/state/, same resolver Fable
+            # uses) — the snapshot-relative guess is a fallback only, since
+            # snapshot_dir may live under skills/.../state/ while the memory
+            # file lives at the repo root.
+            from analysis.fable_advisor import _default_memory_path
+            _adv_mem = _default_memory_path()
+            if not _adv_mem.exists():
+                _adv_mem = (snapshot_dir.parent.parent if snapshot_dir
+                            else Path("state")) / "fable_advisor_memory.md"
+            if _adv_mem.exists():
+                snapshot_data["_advisor_directives"] = parse_directives(
+                    _adv_mem.read_text())
+        except Exception as _adv_e:
+            import sys as _sys
+            print(f"[aggregate] advisor directives parse failed (non-fatal): "
+                  f"{_adv_e}", file=_sys.stderr)
+
+    # Task #38 Part 2: credit-window states per held short put. Computed once
+    # here (from the advisor's already-priced roll candidates) BEFORE the
+    # action list so both the forced-decision items and the Watch panel read
+    # the same states; persisted to the daily snapshot and diffed against the
+    # previous day for open→closing / open→debit_only transition alerts.
+    # Fail-open: any error → no line, no alert, no crash.
+    credit_window_alerts: list = []
+    try:
+        from analysis import credit_windows as _cwm
+        _cw_map = _cwm.build_credit_windows(options_reviews, config)
+        if _cw_map:
+            snapshot_data["_credit_windows"] = _cw_map
+            _cw_root = (snapshot_dir.parent if snapshot_dir
+                        else Path("state/briefing_snapshots"))
+            _prev_cw, _prev_cw_date = _cwm.load_previous_credit_windows(
+                _cw_root, date_str)
+            credit_window_alerts = _cwm.transition_alerts(
+                _cw_map, _prev_cw, _prev_cw_date)
+            if snapshot_dir:
+                _cwm.persist_credit_windows(snapshot_dir, _cw_map, date_str)
+    except Exception as _cw_e:
+        import sys as _sys
+        print(f"[aggregate] credit windows failed (non-fatal): {_cw_e}",
+              file=_sys.stderr)
+
+    # Task #40 fix 2: churn guard — measure each option position's age (in
+    # trading days) from prior snapshots' position lists, so the action list
+    # can withhold roll recommendations on contracts the user just opened
+    # (roll.min_position_age_days, default 5). Fail-open: no history → {}.
+    try:
+        from analysis import churn_guard as _cg
+        _pa_root = (snapshot_dir.parent if snapshot_dir
+                    else Path("state/briefing_snapshots"))
+        snapshot_data.setdefault("_position_ages", _cg.build_position_ages(
+            snapshot_data.get("positions") or [], _pa_root, date_str))
+    except Exception as _cg_e:
+        import sys as _sys
+        print(f"[aggregate] churn-guard ages failed (non-fatal): {_cg_e}",
+              file=_sys.stderr)
+
+    # 2026-08-05 defect 2: exit-cost verdict persistence. Load yesterday's
+    # per-contract verdicts (so a CLOSE card whose anatomy can't be computed
+    # today can say "yesterday's read was ROLL, don't close"), and persist
+    # today's verdicts for tomorrow. Fail-open: advisory layer.
+    try:
+        from analysis import exit_cost as _xvc
+        from render.panels import _exit_cost_anatomy as _xv_anatomy
+        _xv_root = (snapshot_dir.parent if snapshot_dir
+                    else Path("state/briefing_snapshots"))
+        _xv_prior = _xvc.load_prior_exit_verdicts(_xv_root, date_str)
+        if _xv_prior:
+            snapshot_data.setdefault("_prior_exit_verdicts", _xv_prior)
+        # 2026-08-06 defect 2: rich entries (verdict + anatomy drivers) so
+        # tomorrow can attribute a change; churn-gap carry-forward; and
+        # per-review "_verdict_change" flags for the ⏰ Risk Alerts prefix.
+        _xv_today = _xvc.build_today_verdicts(
+            options_reviews or [],
+            ((snapshot_data.get("_prior_exit_verdicts") or {})
+             .get("verdicts") or {}),
+            snapshot_data.get("iv_ranks") or {},
+            lambda _r: _xv_anatomy(_r, snapshot_data, equity_reviews,
+                                   date_str, include_near_money=True)[0])
+        if snapshot_dir and _xv_today:
+            _xvc.persist_exit_verdicts(snapshot_dir, _xv_today, date_str)
+    except Exception as _xv_e:
+        import sys as _sys
+        print(f"[aggregate] exit-verdict persistence failed (non-fatal): "
+              f"{_xv_e}", file=_sys.stderr)
+
     # Generate action list to count items (must happen before header render).
     # Step 7.5: aging_info (fill reconciliation + recommendation aging) is
     # threaded through render_action_list, which mutates it in place with
@@ -173,11 +270,13 @@ def aggregate_briefing(
     if aging_info and aging_info.get("aged"):
         try:
             from analysis.rec_aging import render_stalled_panel
-            lines.extend(render_stalled_panel(aging_info["aged"]))
+            lines.extend(render_stalled_panel(
+                aging_info["aged"],
+                suppressed=aging_info.get("directive_suppressed")))
         except Exception as _stall_e:
             import sys as _sys
             print(f"[aggregate] stalled panel failed: {_stall_e}", file=_sys.stderr)
-    lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl, gate_state=gate_state))
+    lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl, gate_state=gate_state, balance=balance))
     lines.extend(render_market_context(regime_data, quotes))
     # Pass option positions (with real Greeks from E*TRADE) for the net-Greeks aggregate.
     # If theta is missing on positions, estimate it from current_mid + days_to_expiry as a
@@ -223,6 +322,7 @@ def aggregate_briefing(
         equity_reviews, options_reviews, regime_data,
         put_buckets=analytics.get("put_buckets") or [],
         config=config,
+        credit_window_alerts=credit_window_alerts,
     ))
 
     # NEW (task #16): Benchmark & Attribution — am I beating SPY, and where
@@ -247,6 +347,7 @@ def aggregate_briefing(
                 str(bt_cfg.get("benchmark_ticker") or "SPY"), days=400)
             _attrib = _pa.build_attribution_report(
                 snapshot_root=_bt_root, as_of=date_str, spy_closes=_spy_closes,
+                config=bt_cfg,
             )
             lines.extend(render_benchmark_panel(_bench, _attrib))
             benchmark_report_json = {
@@ -256,6 +357,24 @@ def aggregate_briefing(
     except Exception as _bte:
         import sys as _sys
         print(f"[aggregate] benchmark panel failed (non-fatal): {_bte}", file=_sys.stderr)
+
+    # Task #41 — 👻 Ghost portfolio: options-stripped counterfactual NAV
+    # ("is it the market or my moves?"). Full idempotent recompute from
+    # snapshot history each cycle (also persists state/ghost_portfolio.json).
+    # Fail-open: any exception → no panel, JSON key stays {}, briefing ships.
+    ghost_report_json: dict = {}
+    _ghost_report = None
+    try:
+        from analysis import ghost_portfolio as _gp
+        from render.ghost_panel import render_ghost_panel
+        _g_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
+        _ghost_report = _gp.build_ghost_report(_g_root, persist_state=True)
+        if _ghost_report.status == "ok":
+            lines.extend(render_ghost_panel(_ghost_report))
+            ghost_report_json = _ghost_report.to_dict()
+    except Exception as _ge:
+        import sys as _sys
+        print(f"[aggregate] ghost portfolio failed (non-fatal): {_ge}", file=_sys.stderr)
 
     # Open-orders audit — every pending GTC order on E*TRADE gets run through
     # the pre-trade validator so stale or rule-violating orders surface BEFORE
@@ -285,6 +404,176 @@ def aggregate_briefing(
     if long_term_opportunities:
         from steps.long_term_opportunities import render_long_term_opportunities
         lines.extend(render_long_term_opportunities(long_term_opportunities))
+
+    # NEW (task #20): CSP Rotations — close a lower-yield held CSP to fund a
+    # higher-yield new CSP at same-or-lower total obligation. The open-side
+    # candidates are the LT_CSP / PULLBACK_CSP recs the capacity gate defers;
+    # the close-side is the held short-put book at ≥30% capture. Fail-open:
+    # ANY exception → no section, empty JSON list, briefing ships regardless.
+    csp_rotations_json: list = []
+    csp_rotation_near_json: list = []
+    try:
+        from analysis import csp_rotation as _csp_rot
+        from render.csp_rotation_panel import render_csp_rotations as _render_csp_rot
+
+        _held_puts = [
+            p for p in (snapshot_data.get("positions") or [])
+            if p.get("assetType") == "OPTION"
+            and (p.get("type") or "").upper() == "PUT"
+            and float(p.get("qty", 0) or 0) < 0
+        ]
+        _cand_pool = list(long_term_opportunities or []) + list(new_ideas or [])
+        if _held_puts and _cand_pool:
+            # Standing hold directives from the fable-advisor memory — same
+            # parse the entry/exit recommender uses (close-side skip list).
+            _dir_holds: set = set()
+            _dir_notes: dict = {}
+            try:
+                from analysis.entry_exit_recommender import directive_hold_tickers as _dht
+                # Canonical <repo>/state/ location first (bug #25 follow-up:
+                # snapshot_dir may live under skills/.../state/ while the
+                # memory file lives at the repo root — the old relative guess
+                # silently loaded nothing in production).
+                from analysis.fable_advisor import _default_memory_path as _dmp
+                _mem_p = _dmp()
+                if not _mem_p.exists():
+                    _mem_p = (snapshot_dir.parent.parent if snapshot_dir else Path("state")) \
+                        / "fable_advisor_memory.md"
+                if _mem_p.exists():
+                    _mem_txt = _mem_p.read_text()
+                    _dir_holds = _dht(_mem_txt)
+                    # Task #21 — quotable first line of each hold directive,
+                    # for the near-miss "blocked by" detail.
+                    _dir_notes = _csp_rot.parse_directive_hold_notes(_mem_txt)
+            except Exception:
+                pass
+            _recs_map_rot = {}
+            for _r in (snapshot_data.get("recommendations_list") or []):
+                if isinstance(_r, dict) and _r.get("ticker"):
+                    _recs_map_rot[str(_r["ticker"]).upper()] = _r
+            _rot_analytics = {
+                "nlv": float(nlv or 0),
+                "stress_coverage": analytics.get("stress_coverage"),
+                "snapshot_data": snapshot_data,
+                "technicals": snapshot_data.get("technicals") or {},
+                "earnings_calendar": snapshot_data.get("earnings_calendar") or {},
+                "recs_map": _recs_map_rot,
+                "directive_holds": _dir_holds,
+                "directive_hold_notes": _dir_notes,
+            }
+            _rots = _csp_rot.compute_csp_rotations(
+                held_csps=_held_puts,
+                candidate_csps=_cand_pool,
+                analytics=_rot_analytics,
+                config=config,
+            )
+            csp_rotations_json = [r.to_dict() for r in _rots]
+            # Task #21 — near-misses (blocked by exactly one gate) ship in a
+            # SEPARATE key so csp_rotations stays qualified-only for every
+            # existing consumer.
+            csp_rotation_near_json = [
+                n.to_dict() for n in getattr(_rots, "near_miss", None) or []]
+            lines.extend(_render_csp_rot(_rots, nlv=float(nlv or 0)))
+    except Exception as _csre:
+        import sys as _sys
+        print(f"[aggregate] csp rotation failed (non-fatal): {_csre}", file=_sys.stderr)
+
+    # NEW (task #22): Actionable Rotation Playbook — the whole composed
+    # trade: close ALL freeable winner CSPs → redeploy the freed collateral
+    # into conviction-ranked deferred candidates. Distinct from task #20:
+    # partial deployment allowed (cushion kept), ranked by Parkev
+    # conviction × freshness, not strict coverage-neutral swaps. Fail-open:
+    # ANY exception → no section, empty JSON dict, briefing ships regardless.
+    rotation_playbook_json: dict = {}
+    try:
+        if ((config or {}).get("rotation_playbook") or {}).get("enabled", True):
+            from analysis import rotation_playbook as _rpb
+            from render.rotation_playbook_panel import (
+                render_rotation_playbook as _render_rpb,
+            )
+
+            _pb_held = [
+                p for p in (snapshot_data.get("positions") or [])
+                if p.get("assetType") == "OPTION"
+                and (p.get("type") or "").upper() == "PUT"
+                and float(p.get("qty", 0) or 0) < 0
+            ]
+            # Candidate pool: LT opportunities + new ideas + the scout's
+            # per-theme CSP entries (live E*TRADE tickets on the deferred
+            # Candidate Trades — the same tickets the manual Scenario A
+            # ranked). De-duped by ticker, first occurrence wins.
+            _pb_cands = list(long_term_opportunities or []) + list(new_ideas or [])
+            _seen_scout: set = set()
+            for _results in ((scout_payload or {}).get("results_by_theme")
+                             or {}).values():
+                for _r in _results or []:
+                    if not isinstance(_r, dict):
+                        continue
+                    _q = _r.get("csp_entry") or {}
+                    _tk = str(_r.get("ticker") or "").upper()
+                    if not _tk or _tk in _seen_scout or not _q.get("strike") \
+                            or not (_q.get("mid") or _q.get("bid")):
+                        continue
+                    _seen_scout.add(_tk)
+                    _pb_cands.append({
+                        "kind": "SCOUT_CSP", "ticker": _tk,
+                        "strike": _q.get("strike"),
+                        "expiration": _q.get("expiration"),
+                        "dte": _q.get("dte"),
+                        "premium": _q.get("mid") or _q.get("bid"),
+                        "rsi_14": _r.get("rsi_14"),
+                        "iv_rank": _r.get("iv_rank"),
+                        "drawdown_pct": _r.get("drawdown_pct"),
+                        "verdict": _r.get("verdict"),
+                        "earnings_date": _r.get("earnings_date"),
+                        "days_to_earnings": _r.get("days_to_earnings"),
+                    })
+            if _pb_held:
+                _pb_holds: set = set()
+                try:
+                    from analysis.entry_exit_recommender import (
+                        directive_hold_tickers as _pb_dht,
+                    )
+                    # Canonical <repo>/state/ location first (see bug #25
+                    # follow-up note in the csp-rotation block above).
+                    from analysis.fable_advisor import (
+                        _default_memory_path as _pb_dmp,
+                    )
+                    _pb_mem = _pb_dmp()
+                    if not _pb_mem.exists():
+                        _pb_mem = (snapshot_dir.parent.parent if snapshot_dir
+                                   else Path("state")) / "fable_advisor_memory.md"
+                    if _pb_mem.exists():
+                        _pb_holds = _pb_dht(_pb_mem.read_text())
+                except Exception:
+                    pass
+                _pb_recs = {}
+                for _r in (snapshot_data.get("recommendations_list") or []):
+                    if isinstance(_r, dict) and _r.get("ticker"):
+                        _pb_recs[str(_r["ticker"]).upper()] = _r
+                _pb = _rpb.compute_playbook(
+                    held_csps=_pb_held,
+                    candidate_csps=_pb_cands,
+                    parkev_recs=_pb_recs,
+                    directive_holds=_pb_holds,
+                    analytics={
+                        "nlv": float(nlv or 0),
+                        "stress_coverage": analytics.get("stress_coverage"),
+                        "snapshot_data": snapshot_data,
+                        "technicals": snapshot_data.get("technicals") or {},
+                        "iv_ranks": snapshot_data.get("iv_ranks") or {},
+                        "earnings_calendar":
+                            snapshot_data.get("earnings_calendar") or {},
+                    },
+                    config=config,
+                )
+                if _pb is not None:
+                    rotation_playbook_json = _pb.to_dict()
+                    lines.extend(_render_rpb(_pb))
+    except Exception as _rpbe:
+        import sys as _sys
+        print(f"[aggregate] rotation playbook failed (non-fatal): {_rpbe}",
+              file=_sys.stderr)
 
     # NEW (Wave 26): Thematic Scout — research across themes (semis/nuclear/etc)
     if scout_payload:
@@ -473,7 +762,56 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] RSI coverage check failed: {_e}", file=_sys.stderr)
 
+    # Tenor-cap sweep (rule #14 backstop, 2026-08-04): no actionable ticket
+    # anywhere may carry an STO leg past the applicable tenor cap vs the
+    # position's current expiry (the "STO 1× VRT $240P Fri Dec 15 '28" bug —
+    # ~700d past a Jan '27 expiry via the take-profit composer). Menu-table
+    # reference rows / transparency footers are exempt inside the guard.
+    try:
+        from analysis.tenor_guard import ticket_tenor_violations
+        try:
+            from analysis.position_tiers import core_union as _tg_core_union
+            _tg_core = _tg_core_union(config or {})
+        except Exception:
+            _tg_core = set((config or {}).get("core_positions") or [])
+        try:
+            _tg_cap = int(((config or {}).get("roll") or {})
+                          .get("max_action_tenor_days", 120))
+        except (TypeError, ValueError):
+            _tg_cap = 120
+        _tg_offenders = ticket_tenor_violations(
+            "\n".join(lines), max_action_tenor_days=_tg_cap,
+            core_tickers=_tg_core)
+        if _tg_offenders:
+            lines.append("## 🔴 Tenor-Cap Violation Check")
+            lines.append("")
+            lines.append(
+                f"_{len(_tg_offenders)} actionable ticket(s) carry an STO leg "
+                f"past the {_tg_cap}d action tenor cap (core ×3) — rule #14; "
+                f"do NOT place these as rendered:_"
+            )
+            for _o in _tg_offenders[:10]:
+                lines.append(f"- `{_o[:160]}`")
+            lines.append("")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] tenor-cap sweep failed: {_e}", file=_sys.stderr)
+
     lines.extend(render_inconsistencies(flagged_inconsistencies))
+
+    # Task #40 fix 9 / task #43 fix 1: detect user-executed rolls from the
+    # position diff ONCE — shared by the "Since Yesterday" panel (ready-to-
+    # paste directive templates) and the Fable advisor prompt (falsification
+    # evidence against stale "never rolls" pattern notes). Fail-open:
+    # missing snapshots → None, both consumers degrade gracefully.
+    _executed_rolls = None
+    try:
+        from analysis.briefing_diff import detect_executed_rolls
+        _executed_rolls = detect_executed_rolls(
+            (aging_info or {}).get("prev_positions"),
+            snapshot_data.get("positions"))
+    except Exception:
+        _executed_rolls = None
 
     # Insert "Since Yesterday" diff panel (best-effort — silent on first run)
     try:
@@ -485,7 +823,10 @@ def aggregate_briefing(
         # instead of "likely executed".
         today_so_far = "\n".join(lines)
         recon_for_diff = (aging_info or {}).get("reconciliation") if aging_info else None
-        diff_panel = render_diff_panel(today_so_far, yesterday_md, recon_status=recon_for_diff)
+        diff_panel = render_diff_panel(today_so_far, yesterday_md,
+                                       recon_status=recon_for_diff,
+                                       executed_rolls=_executed_rolls,
+                                       today_iso=date_str)
         if diff_panel:
             # Insert near the top, after the header but before market context
             # For simplicity, append at the end before manifest
@@ -498,6 +839,12 @@ def aggregate_briefing(
     # fail-closed when no FMP key is configured (no fabricated values). Runs as a
     # post-pass over the assembled briefing, mirroring the RSI annotate pattern.
     # See scripts/analysis/intrinsic_value.py.
+    #
+    # snap_root is shared by this block AND the FINVIZ annotation block below,
+    # so it MUST be defined unconditionally here. It used to be assigned inside
+    # `if rec_tickers and fmp_key:` — a latent NameError in the FINVIZ block
+    # whenever the FMP branch didn't run (no key / no rec tickers).
+    snap_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
     try:
         import os as _os
         from analysis import intrinsic_value as _iv
@@ -524,6 +871,12 @@ def aggregate_briefing(
                     known.add(str(r["ticker"]).upper())
             for t in (config.get("core_positions") or []):
                 known.add(str(t).upper())
+            # 2026-08-04: Tier A names are "core" too (position_tiers union).
+            try:
+                from analysis.position_tiers import core_union as _cu_known
+                known.update(_cu_known(config))
+            except Exception:
+                pass
             if scout_payload:
                 for th in (scout_payload.get("themes") or {}).values():
                     for a in (th.get("anchors") or []):
@@ -568,7 +921,6 @@ def aggregate_briefing(
             fmp_key = _os.getenv("FMP_API_KEY")
             fv_map: dict = {}
             if rec_tickers and fmp_key:
-                snap_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
                 fv_map = _iv.get_fair_values(
                     sorted(rec_tickers),
                     cache_path=snap_root / "intrinsic_value_cache.json",
@@ -702,6 +1054,36 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] tier-badge annotation failed: {_e}", file=_sys.stderr)
 
+    # ── Same-cycle vintage guard ──────────────────────────────────────────
+    # Never mix pre-gap technicals with live quotes on one card. When a name's
+    # live quote has moved > vintage_guard.max_intraday_move_pct (default 5%)
+    # from the close the technicals were computed at, strip stale "✅ RSI
+    # favourable" promotions (tag the RSI pre-gap instead — never fabricate a
+    # live RSI) and recompute 200-SMA distances at live spot on LT-verdict
+    # reads. Fail-open: any error → briefing ships untagged.
+    try:
+        from analysis import vintage_guard as _vg
+        # Rule #46 (PLTR 2026-08-04): positions provide the broker-price
+        # fallback when a name's yfinance quote is missing — a missing quote
+        # must never fail-open into a trusted favourable RSI badge.
+        _vg_flags = _vg.compute_flags(
+            snapshot_data.get("quotes") or {},
+            snapshot_data.get("technicals") or {},
+            config if isinstance(config, dict) else None,
+            positions=snapshot_data.get("positions") or [],
+        )
+        if _vg_flags:
+            md_text = "\n".join(lines)
+            md_text, _vg_stats = _vg.annotate_briefing(md_text, _vg_flags)
+            lines = md_text.split("\n")
+            _vg_footer = _vg.footer(_vg_flags, config if isinstance(config, dict) else None)
+            if _vg_footer:
+                lines.append(_vg_footer)
+                lines.append("")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] vintage-guard annotation failed: {_e}", file=_sys.stderr)
+
     # Challenge / Counterpoint layer — the briefing's built-in devil's advocate.
     # Stress-tests every Action List item from multiple perspectives (consistency
     # vs the position's own advisor, opportunity cost, tenor, tax, concentration,
@@ -763,6 +1145,11 @@ def aggregate_briefing(
         _known_ch = (set(_rsi_by) | set(_weights)
                      | {(o.get("underlying") or "").upper() for o in (options_reviews or [])}
                      | {str(t).upper() for t in (config.get("core_positions") or [])})
+        try:
+            from analysis.position_tiers import core_union as _cu_ch
+            _known_ch |= _cu_ch(config)
+        except Exception:
+            pass
         _known_ch.discard("")
 
         _ctx = {
@@ -781,9 +1168,77 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] recommendation challenger failed: {_e}", file=_sys.stderr)
 
+    # ── 💰 Money Plan (2026-08-04) — "what makes me money today" ─────────
+    # Rendered at the VERY TOP of the briefing (above Stalled Items): banks,
+    # deploys, net cash, coverage-after, month-to-date pace, blocked money.
+    # Only actionable composed items count; MTD is MATCHED per-contract
+    # realized P/L from snapshot position diffs (never the raw option
+    # cash-flow — rule #43 follow-up) or "n/a (ledger pending)" (rule #19).
+    # Fail-open: any error → no panel, briefing ships.
+    money_plan_json: dict = {}
+    try:
+        from render.money_plan import build_money_plan
+        _mp_lines, money_plan_json = build_money_plan(
+            date_str=date_str,
+            action_list_lines=action_list_lines,
+            options_reviews=options_reviews,
+            new_ideas=new_ideas,
+            playbook=rotation_playbook_json,
+            analytics=analytics,
+            snapshot_data=snapshot_data,
+            config=config,
+            attribution=(benchmark_report_json or {}).get("attribution"),
+            long_term_opportunities=long_term_opportunities,
+            aging_info=aging_info,
+            snapshot_dir=snapshot_dir,
+        )
+        # Task #41 — 👻 "Wheel vs Ghost" bullet: the options program's
+        # measured net contribution (real − ghost NAV). Appended before the
+        # panel's trailing blank; skipped when unmeasurable (fail-open).
+        try:
+            from render.ghost_panel import ghost_money_plan_line
+            _gl = ghost_money_plan_line(_ghost_report)
+            if _gl and _mp_lines:
+                _g_idx = len(_mp_lines)
+                while _g_idx > 0 and _mp_lines[_g_idx - 1] == "":
+                    _g_idx -= 1
+                _mp_lines.insert(_g_idx, _gl)
+                if isinstance(money_plan_json.get("lines"), list):
+                    money_plan_json["lines"].append(_gl[2:])
+        except Exception:
+            pass
+        if _mp_lines:
+            lines[0:0] = _mp_lines
+    except Exception as _mp_e:
+        import sys as _sys
+        print(f"[aggregate] money plan failed (non-fatal): {_mp_e}",
+              file=_sys.stderr)
+
     lines.extend(render_manifest(str(snapshot_dir)))
 
     briefing_markdown = "\n".join(lines)
+
+    # 2026-08-05 defect 4: capacity tags are PRESENTATION, not data — cached
+    # candidates carry generation-time coverage ratios that go stale. Re-tag
+    # every rendered DEFERRED tag from the CURRENT run's gate state.
+    try:
+        from analysis.capacity_gate import retag_capacity_lines
+        briefing_markdown = retag_capacity_lines(
+            briefing_markdown, analytics, config)
+    except Exception as _rt_e:
+        import sys as _sys
+        print(f"[aggregate] capacity re-tag failed (non-fatal): {_rt_e}",
+              file=_sys.stderr)
+
+    # 2026-08-05 defect 3: the header count must reflect the FINAL composed
+    # action list — recount numbered items after every composer/post-pass.
+    try:
+        from render.panels import sync_action_item_count
+        briefing_markdown = sync_action_item_count(briefing_markdown)
+    except Exception as _sc_e:
+        import sys as _sys
+        print(f"[aggregate] action-count sync failed (non-fatal): {_sc_e}",
+              file=_sys.stderr)
 
     # Pre-flight verifier — master gate orchestrator. Runs:
     #   1. Broker-position reconciler (catches stale snapshot data)
@@ -801,7 +1256,23 @@ def aggregate_briefing(
     briefing_markdown = pf.rendered_briefing
 
     # ── Fable review — LAST STEP before returning ─────────────────────
-    _review_lines = _run_fable_review_cascade(briefing_markdown, snapshot_dir, config)
+    # Exit-cost anatomy summary (analysis/exit_cost.py) rides along as
+    # position context so the advisor reasons about intrinsic vs panic-IV
+    # extrinsic vs spread on underwater short puts, not headline P&L.
+    # Fail-open: any error → no context, review runs unchanged.
+    _exit_ctx = None
+    try:
+        from analysis.exit_cost import build_fable_context
+        _exit_ctx = build_fable_context(
+            options_reviews, snapshot_data, config=config,
+            equity_reviews=equity_reviews, today=date_str,
+        ) or None
+    except Exception as _e:
+        print(f"[aggregate] exit-cost fable context failed (non-fatal): {_e}",
+              file=sys.stderr)
+    _review_lines = _run_fable_review_cascade(briefing_markdown, snapshot_dir,
+                                              config, position_context=_exit_ctx,
+                                              executed_rolls=_executed_rolls)
     if _review_lines:
         briefing_markdown = briefing_markdown.rstrip() + "\n" + "\n".join(_review_lines)
 
@@ -823,6 +1294,25 @@ def aggregate_briefing(
         # Task #16 — benchmark tracking + P/L attribution (webapp Benchmark
         # tab reads this). {} when disabled or unavailable this cycle.
         "benchmark_report": benchmark_report_json,
+        # Task #41 — 👻 ghost portfolio (options-stripped counterfactual
+        # NAV). GhostReport.to_dict(); {} when unavailable this cycle.
+        "ghost_portfolio": ghost_report_json,
+        # Task #20 — CSP rotations (close lower-yield held CSP → open
+        # higher-yield candidate, coverage-neutral or better). [] when none
+        # qualify or the step failed (fail-open).
+        "csp_rotations": csp_rotations_json,
+        # Task #21 — rotations blocked by exactly ONE gate, with the gate,
+        # detail, and unblock path. Informational only (never qualified).
+        "csp_rotation_near_misses": csp_rotation_near_json,
+        # Task #22 — Actionable Rotation Playbook (close all freeable
+        # winners → conviction-ranked redeploy). {} when below the freed
+        # floor, disabled, or the step failed (fail-open).
+        "rotation_playbook": rotation_playbook_json,
+        # 2026-08-04 — 💰 Money Plan rollup (banks/deploys/net cash/coverage
+        # after/MTD/blocked money). {} when nothing was measurable or the
+        # panel failed this cycle (fail-open). The webapp renders this at
+        # the top of the briefing page.
+        "money_plan": money_plan_json,
     }
     # Step 7.5: per-action aging — tomorrow's run reads this back for
     # reconciliation (each: {key, kind, ident, summary, first_flagged,

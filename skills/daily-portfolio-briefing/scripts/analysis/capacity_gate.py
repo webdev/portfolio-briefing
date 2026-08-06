@@ -18,9 +18,21 @@ capacity-gated on missing data.
 
 from __future__ import annotations
 
+import re
+
 DEFERRED_TAG = "⏸ Deferred (capacity gated)"
 
 _DEFAULT_MIN_COVERAGE = 0.50
+
+# Matches any rendered DEFERRED tag regardless of the ratio/floor baked in at
+# generation time — cached candidates (scout/LTO caches, 24h) carry their
+# GENERATION-time ratio, which goes stale (2026-08-05 defect 4: a PLTR card
+# said "stress coverage 0.18×" while the run's header measured 0.28×).
+_RENDERED_TAG_RE = re.compile(
+    re.escape(DEFERRED_TAG)
+    + r" — stress coverage \d+(?:\.\d+)?× < \d+(?:\.\d+)?× floor; "
+      r"shown for planning, not a green light \(rule #41\)"
+)
 
 
 def coverage_ratio_from(analytics) -> float | None:
@@ -103,3 +115,46 @@ def capacity_deferred_tag(analytics, config: dict | None = None) -> str | None:
         f"{DEFERRED_TAG} — stress coverage {ratio:.2f}× < {floor:.2f}× floor; "
         f"shown for planning, not a green light (rule #41)"
     )
+
+
+def retag_capacity_lines(markdown: str, analytics,
+                         config: dict | None = None) -> str:
+    """Re-render every DEFERRED capacity tag from the CURRENT run's gate state
+    (2026-08-05 defect 4).
+
+    Observed: a PLTR candidate card carried "⏸ Deferred (capacity gated) —
+    stress coverage 0.18× < 0.50× floor" while the run's header measured
+    0.28× — the tag was baked into a cached candidate at its generation time.
+    The tag is PRESENTATION, not data: this compose-time post-pass rewrites
+    every rendered tag with today's measured ratio.
+
+      - gates still closed → fresh tag with the current ratio/floor;
+      - gates OPEN this run → the stale tag is replaced with an honest
+        "capacity gate OPEN this run" note (the card still needs today's
+        other gates re-checked — never silently promoted to green-lit);
+      - current ratio unresolvable → markdown untouched (fail-open; never
+        rewrite a tag with nothing).
+    """
+    try:
+        if not markdown or _RENDERED_TAG_RE.search(markdown) is None:
+            return markdown
+        ratio = coverage_ratio_from(analytics)
+        if ratio is None:
+            return markdown
+        floor = min_coverage_ratio(config)
+        if ratio < floor:
+            fresh = (
+                f"{DEFERRED_TAG} — stress coverage {ratio:.2f}× < "
+                f"{floor:.2f}× floor; shown for planning, not a green light "
+                f"(rule #41)"
+            )
+        else:
+            fresh = (
+                f"{DEFERRED_TAG.replace('(capacity gated)', '(stale tag)')} — "
+                f"capacity gate OPEN this run: stress coverage {ratio:.2f}× ≥ "
+                f"{floor:.2f}× floor; re-validate this ticket against today's "
+                f"gates before acting (rule #41)"
+            )
+        return _RENDERED_TAG_RE.sub(fresh, markdown)
+    except Exception:  # noqa: BLE001 — presentation sync must never break the ship
+        return markdown

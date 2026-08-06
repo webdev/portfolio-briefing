@@ -86,6 +86,71 @@ def test_handles_briefing_without_action_list():
     assert r.stubbed_actions == 0
 
 
+# ── Task #43 fix 3 (2026-07-31): non-executable kinds are exempt ──────────
+
+def test_hold_for_basis_not_flagged():
+    """Observed (2026-07-31): the Live-Data Verification header listed
+    'HOLD FOR BASIS QCOM / HOLD FOR BASIS PLTR / HOLD FOR BASIS PLTR' as
+    'lacking live E*TRADE chain attribution'. A HOLD item carries no order
+    — there is nothing to verify at a broker."""
+    md = """
+## Today's Action List
+
+6. **HOLD FOR BASIS** QCOM_PUT_185_20261218 — assignment acceptable (exit-cost verdict); no roll ticket
+   - _Roll skipped: assignment basis $144.37 is 4.3% below market — holding for basis._
+7. **HOLD FOR BASIS** PLTR_PUT_130_20270115 — assignment acceptable (exit-cost verdict); no roll ticket
+"""
+    r = verify_live_data(md)
+    assert r.verified is True
+    assert r.stubbed_actions == 0
+    assert not any("HOLD FOR BASIS" in f for f in r.flagged_lines)
+
+
+def test_roll_deferred_and_demoted_not_flagged():
+    """ROLL DEFERRED (earnings block) and ⏸-tagged demotions are analysis
+    only — 'analysis only, no order' — never an executable ticket."""
+    md = """
+## Today's Action List
+
+3. ⏸ **ROLL DEFERRED (earnings block)** LITE_PUT_700_20260918 — Diagonal down-and-out: −$2,100 net debit — analysis only, no order
+   - Reference legs (NOT an order): BTC 2× $700P ...
+4. 🚨⏸ **URGENT — ROLL DEFERRED (earnings block)** QCOM_PUT_185_20261218 — analysis only, no order
+"""
+    r = verify_live_data(md)
+    assert r.verified is True
+    assert r.stubbed_actions == 0
+
+
+def test_close_into_recovery_not_flagged():
+    """CLOSE variants (CLOSE INTO RECOVERY etc.) price off the held
+    position's own quote — the CLOSE-family exemption covers them."""
+    md = """
+## Today's Action List
+
+2. **CLOSE INTO RECOVERY** LITE_PUT_700_20260918 — recovered to ~breakeven (+2.0% of premium) before the Aug 12 print; buy-to-close 2× limit $34.10 (≈ $6,820), GTC
+"""
+    r = verify_live_data(md)
+    assert r.verified is True
+    assert r.stubbed_actions == 0
+
+
+def test_executable_roll_without_chain_still_flagged():
+    """The exemption widening must NOT leak to executable tickets: an
+    EXECUTE ROLL (incl. the URGENT — EXECUTE ROLL variant) without live
+    chain attribution stays flagged."""
+    md = """
+## Today's Action List
+
+1. **EXECUTE ROLL** GOOG_CALL_450 — Diagonal up-and-out: +$1,200 net credit
+   - Order: Buy-to-Close 4×; Sell-to-Open 4× (no chain quotes rendered)
+2. 🚨 **URGENT — EXECUTE ROLL** MU_PUT_950_20261218 — Diagonal down-and-out
+   - Order: Buy-to-Close 1×; Sell-to-Open 1× (no chain quotes rendered)
+"""
+    r = verify_live_data(md)
+    assert r.verified is False
+    assert r.stubbed_actions == 2
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

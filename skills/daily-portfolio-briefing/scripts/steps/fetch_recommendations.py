@@ -5,6 +5,8 @@ Calls recommendation-list-fetcher to get BUY/SELL/HOLD list from Google Sheet.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 import os
 import subprocess
 import sys
@@ -40,7 +42,7 @@ def fetch_recommendations(snapshot_dir: Path) -> list:
         else:
             print(f"  Recommendation skill not configured; skipping (no template at {template})")
             with open(output_path, "w") as f:
-                json.dump({"recommendations": [], "skipped": "no_config"}, f)
+                json.dump({"recommendations": [], "skipped": "no_config"}, f, default=json_default)
             return []
 
     # Invoke the recommendation-list-fetcher CLI
@@ -61,12 +63,12 @@ def fetch_recommendations(snapshot_dir: Path) -> list:
             print(f"  Recommendation fetch failed (exit {result.returncode}); continuing without")
             print(f"    stderr: {result.stderr.strip()[:200]}")
             with open(output_path, "w") as f:
-                json.dump({"recommendations": [], "skipped": "fetch_failed"}, f)
+                json.dump({"recommendations": [], "skipped": "fetch_failed"}, f, default=json_default)
             return []
     except subprocess.TimeoutExpired:
         print("  Recommendation fetch timed out; continuing without")
         with open(output_path, "w") as f:
-            json.dump({"recommendations": [], "skipped": "timeout"}, f)
+            json.dump({"recommendations": [], "skipped": "timeout"}, f, default=json_default)
         return []
 
     # Load the JSON the fetcher produced and pluck out recommendations

@@ -587,9 +587,18 @@ import re as _re
 
 
 _ACTION_LINE_RE = _re.compile(
-    r"^\s*(?P<n>\d+)\.\s+\*\*(?P<kind>[A-Z][A-Z _]+)\*\*\s+(?P<rest>.+)",
+    r"^\s*(?P<n>\d+)\.\s+\*\*(?P<kind>[A-Z][A-Z _—-]+)\*\*\s+(?P<rest>.+)",
     _re.IGNORECASE,
 )
+
+# Render-label → internal-kind aliases. "PULLBACK CSP" was renamed to
+# "CSP — PAID-TO-WAIT" on every render surface (2026-08-04) but the internal
+# kind stays PULLBACK_CSP — without this alias the header would fall out of
+# the capital plan entirely (kind_raw "CSP_—_PAID-TO-WAIT" matches nothing).
+_KIND_ALIASES = {
+    "CSP_—_PAID-TO-WAIT": "PULLBACK_CSP",
+    "CSP_-_PAID-TO-WAIT": "PULLBACK_CSP",
+}
 
 
 def _money(s: str) -> float:
@@ -607,6 +616,7 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
     if not m:
         return None
     kind_raw = m.group("kind").strip().upper().replace(" ", "_")
+    kind_raw = _KIND_ALIASES.get(kind_raw, kind_raw)
     rest = m.group("rest").strip()
     # First word/group of capitals after kind that looks like a ticker
     ticker_m = _re.search(r"\b([A-Z]{1,6})(?:_PUT|_CALL|\b)", rest)

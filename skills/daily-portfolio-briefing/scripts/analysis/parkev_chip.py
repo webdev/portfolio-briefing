@@ -124,6 +124,17 @@ def parkev_chip_for_ticker(ticker: str, recs_by_ticker: dict | None) -> str:
 # ─── Markdown annotator — mirrors rsi_discipline.annotate_action_lines ───
 import re
 
+try:
+    from analysis import line_exclusions
+except ImportError:  # pragma: no cover - path fallback for standalone runs
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    try:
+        from analysis import line_exclusions
+    except ImportError:
+        import line_exclusions  # type: ignore
+
 # Match a header line that introduces an actionable item with a ticker:
 #   "1. **CLOSE** AMD_PUT_420_20261218 — ..."
 #   "- **AMZN** @ $227.72 — 2.3% (+8.0%) → **HOLD**"
@@ -168,6 +179,14 @@ def _is_annotatable_header(line: str) -> bool:
     if _ALREADY_HAS_CHIP(line):
         return False
     if not line or not line.strip():
+        return False
+    # Rule-#27 exclusion list (shared with position_tiers / intrinsic_value):
+    # labelled sub-lines ("- **Triggers:**", "- **Rationale:**",
+    # "- **Yield/Cost:**", "- **Source:**", ...) and continuation glyph lines
+    # describe the parent card — they must NEVER get their own chip. The
+    # 2026-07-30 briefing leaked `🅿️ no rec · 🔵 Tier C` onto exactly these
+    # lines via the bare-token fallback ("LT" / "TRADE" / "LEAP").
+    if line_exclusions.is_excluded_line(line):
         return False
     # Sub-bullet / indented continuation — never annotate.
     # Two or more leading spaces means this is nested content.
@@ -226,6 +245,10 @@ _NON_TICKER_TOKENS = frozenset({
     "S", "R",  # support / resistance single letters that show up in S: / R:
     "P", "C",  # PUT/CALL shorthand sometimes
     "A", "B", "K", "M", "T",  # K/M/T suffixes; single-letter false positives
+    # Briefing vocabulary that leaked as tickers on sub-lines (2026-07-30):
+    # "⚠ LT verdict" → LT, "E*TRADE" → TRADE, "Stock-replacement LEAP" → LEAP,
+    # "TOP STOCK" chip → STOCK, "S/R" → SR.
+    "LT", "LEAP", "TRADE", "STOCK", "SR",
 })
 
 

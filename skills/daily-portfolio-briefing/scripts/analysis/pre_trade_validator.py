@@ -108,14 +108,43 @@ def _proposed_obligation(ctx: PreTradeContext) -> float:
     return float(ctx.strike) * _opt_qty(ctx) * 100.0
 
 
-def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None) -> list[TradeValidation]:
+def validate_proposed_trade(
+    ctx: PreTradeContext,
+    config: Optional[dict] = None,
+    projected_state: Optional[dict] = None,
+) -> list[TradeValidation]:
     """Run all discipline rules against a proposed trade.
 
     Returns a list of findings sorted by severity (BLOCK first, then WARN,
     then OK). An empty-or-OK-only list means the trade passes all checks.
+
+    ``projected_state`` (bug #23 — rotation playbook Phase 2): when provided,
+    the three PORTFOLIO-STATE gates (CASH_FLOOR, ENTRY_GATES_CLOSED,
+    EXPIRATION_BUCKET_*) evaluate against the PROJECTED post-Phase-1 values
+    instead of the pre-close snapshot in ``ctx``. Keys read (all optional):
+      nlv              — projected NLV (falls back to ctx.nlv)
+      cash             — projected cash ($)
+      cash_pct         — projected cash as fraction of NLV (wins over cash)
+      coverage_ratio   — projected stress-coverage ratio
+      obligation_by_expiration — projected per-date put obligation map
+    Fail-open: a MISSING key silences that gate rather than falling back to
+    the stale pre-close value (using the pre-close value is the exact bug this
+    parameter fixes). Position-shape gates (earnings, overlap, RSI, S/R,
+    tier, naked-call, roll-risk) are NEVER affected by projected_state.
+    ``projected_state=None`` → behavior identical to before this parameter
+    existed.
     """
     cfg = config or {}
     findings: list[TradeValidation] = []
+    has_projection = isinstance(projected_state, dict)
+    proj = projected_state if has_projection else {}
+    # Effective NLV for portfolio-state gates only.
+    nlv_eff = ctx.nlv
+    if has_projection and proj.get("nlv") is not None:
+        try:
+            nlv_eff = float(proj["nlv"])
+        except (TypeError, ValueError):
+            nlv_eff = ctx.nlv
 
     # ─────────────────────────────────────────────────────────────────────
     # Rule 1: Earnings window (CLAUDE.md hard rule)
@@ -142,17 +171,66 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
             ))
 
     # ─────────────────────────────────────────────────────────────────────
+    # Rule 1b: Earnings date UNKNOWN — fail CLOSED for new opens (rule #43)
+    # ─────────────────────────────────────────────────────────────────────
+    # The RDDT case (2026-07-31): the earnings calendar returned nothing for
+    # a single-stock name that historically prints inside the proposed
+    # window, so Rule 1 silently passed and the playbook shipped the ticket
+    # with no earnings annotation at all. A missing date is not evidence of
+    # no earnings — surface a WARN so the user verifies at the broker before
+    # placing. ETFs exempt (no print). New opens only; existing-position
+    # management never enters this SELL_OPEN branch.
+    if ctx.action == "SELL_OPEN" and ctx.earnings_date is None:
+        _earn_exempt = False
+        try:
+            from analysis.earnings_unknown import is_earnings_exempt
+        except ImportError:
+            try:
+                from earnings_unknown import is_earnings_exempt  # type: ignore
+            except ImportError:
+                is_earnings_exempt = None  # type: ignore
+        if is_earnings_exempt is not None:
+            _earn_exempt = is_earnings_exempt(ctx.ticker, cfg)
+        if not _earn_exempt:
+            findings.append(TradeValidation(
+                severity=SEV_WARN,
+                reason=(
+                    f"earnings date unavailable from calendar — verify no "
+                    f"{ctx.ticker} print before {ctx.expiration} at the "
+                    f"broker before placing"
+                ),
+                detail=(
+                    f"Neither the snapshot earnings calendar nor the fallback "
+                    f"source produced an earnings date for {ctx.ticker}. The "
+                    f"earnings-window rule cannot evaluate, and rich IV on a "
+                    f"beaten-down single stock is often pre-earnings premium "
+                    f"(the RDDT Sep 04 '26 case). Confirm at the broker that "
+                    f"no print lands before {ctx.expiration} before placing."
+                ),
+                rule_id="EARNINGS_DATE_UNKNOWN",
+            ))
+
+    # ─────────────────────────────────────────────────────────────────────
     # Rule 2: Entry gates (stress coverage)
     # ─────────────────────────────────────────────────────────────────────
     sc_min = float(cfg.get("entry_gate_min_coverage", 0.50))
+    # Bug #23: with a projection, the gate reads ONLY the projected ratio —
+    # a missing projected value silences the gate (fail-open), never falls
+    # back to the stale pre-close ratio.
+    coverage_eff = proj.get("coverage_ratio") if has_projection else ctx.stress_coverage
+    try:
+        coverage_eff = float(coverage_eff) if coverage_eff is not None else None
+    except (TypeError, ValueError):
+        coverage_eff = None
     if (ctx.action == "SELL_OPEN" and ctx.option_type == "PUT"
-            and ctx.stress_coverage is not None and ctx.stress_coverage < sc_min):
+            and coverage_eff is not None and coverage_eff < sc_min):
+        proj_note = " (projected post-close)" if has_projection else ""
         findings.append(TradeValidation(
             severity=SEV_BLOCK,
-            reason=f"ENTRY GATES CLOSED — stress coverage {ctx.stress_coverage:.2f}× < {sc_min:.2f}× floor",
+            reason=f"ENTRY GATES CLOSED — stress coverage {coverage_eff:.2f}× < {sc_min:.2f}× floor{proj_note}",
             detail=(
                 f"System gate: no new put obligations until stress coverage rebuilds "
-                f"to {sc_min:.2f}×. Current coverage {ctx.stress_coverage:.2f}× means "
+                f"to {sc_min:.2f}×. Current coverage {coverage_eff:.2f}× means "
                 f"a 10-20% market drop would land the book in cash-call territory."
             ),
             rule_id="ENTRY_GATES_CLOSED",
@@ -162,36 +240,60 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
     # Rule 3: Cash floor (post-margin-call discipline)
     # ─────────────────────────────────────────────────────────────────────
     cash_floor = float(cfg.get("cash_floor_pct", 0.05))
-    if (ctx.action == "SELL_OPEN" and ctx.nlv > 0):
+    # Bug #23: with a projection, the gate reads ONLY projected cash/cash_pct
+    # (fail-open when neither key is present).
+    cash_pct_nlv = None
+    cash_display = ctx.cash
+    if has_projection:
+        p_pct = proj.get("cash_pct")
+        p_cash = proj.get("cash")
+        try:
+            if p_pct is not None:
+                cash_pct_nlv = float(p_pct)
+                cash_display = float(p_cash) if p_cash is not None else (
+                    cash_pct_nlv * nlv_eff if nlv_eff > 0 else ctx.cash)
+            elif p_cash is not None and nlv_eff > 0:
+                cash_display = float(p_cash)
+                cash_pct_nlv = cash_display / nlv_eff
+        except (TypeError, ValueError):
+            cash_pct_nlv = None
+    elif ctx.nlv > 0:
         cash_pct_nlv = ctx.cash / ctx.nlv
-        if cash_pct_nlv < cash_floor:
-            findings.append(TradeValidation(
-                severity=SEV_BLOCK,
-                reason=f"Cash floor breached — {cash_pct_nlv*100:.1f}% NLV < {cash_floor*100:.0f}% floor",
-                detail=(
-                    f"Cash position ${ctx.cash:,.0f} is too thin to absorb a normal-day "
-                    f"mark-to-market move without margin-call risk (the Friday Jun 5 "
-                    f"experience). Defer new put obligation until cash rebuilds."
-                ),
-                rule_id="CASH_FLOOR",
-            ))
+    if (ctx.action == "SELL_OPEN" and cash_pct_nlv is not None
+            and cash_pct_nlv < cash_floor):
+        proj_note = " (projected post-close)" if has_projection else ""
+        findings.append(TradeValidation(
+            severity=SEV_BLOCK,
+            reason=f"Cash floor breached — {cash_pct_nlv*100:.1f}% NLV < {cash_floor*100:.0f}% floor{proj_note}",
+            detail=(
+                f"Cash position ${cash_display:,.0f} is too thin to absorb a normal-day "
+                f"mark-to-market move without margin-call risk (the Friday Jun 5 "
+                f"experience). Defer new put obligation until cash rebuilds."
+            ),
+            rule_id="CASH_FLOOR",
+        ))
 
     # ─────────────────────────────────────────────────────────────────────
     # Rule 4: Expiration-bucket concentration impact
     # ─────────────────────────────────────────────────────────────────────
     new_obligation = _proposed_obligation(ctx)
-    if new_obligation > 0 and ctx.nlv > 0:
+    # Bug #23: with a projection, the bucket math reads the PROJECTED
+    # per-date obligation map (closes subtracted). Missing map → gate
+    # silenced (fail-open) rather than re-blocking on pre-close buckets.
+    bucket_map = (proj.get("obligation_by_expiration") if has_projection
+                  else ctx.obligation_by_expiration)
+    if new_obligation > 0 and nlv_eff > 0 and isinstance(bucket_map, dict):
         crit_pct = float(cfg.get("bucket_critical_pct", 0.30))
         warn_pct = float(cfg.get("bucket_warning_pct", 0.20))
-        current_bucket = float(ctx.obligation_by_expiration.get(ctx.expiration, 0.0) or 0.0)
+        current_bucket = float(bucket_map.get(ctx.expiration, 0.0) or 0.0)
         projected = current_bucket + new_obligation
-        proj_pct = projected / ctx.nlv
+        proj_pct = projected / nlv_eff
         if proj_pct >= crit_pct:
             findings.append(TradeValidation(
                 severity=SEV_BLOCK,
                 reason=f"{ctx.expiration} bucket → {proj_pct*100:.1f}% NLV (critical ≥{crit_pct*100:.0f}%)",
                 detail=(
-                    f"Current bucket: ${current_bucket:,.0f} ({current_bucket/ctx.nlv*100:.1f}% NLV). "
+                    f"Current bucket: ${current_bucket:,.0f} ({current_bucket/nlv_eff*100:.1f}% NLV). "
                     f"Adding ${new_obligation:,.0f} → ${projected:,.0f} ({proj_pct*100:.1f}% NLV). "
                     f"A single-Friday cluster ≥{crit_pct*100:.0f}% is the critical line. "
                     f"De-cluster instead — pick a different expiration."
@@ -320,30 +422,53 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
             and ctx.spot and ctx.sr_payload):
         supports = (ctx.sr_payload or {}).get("supports") or []
         if supports:
-            # Find a support level within ±5% of the strike — that's an anchored entry.
-            anchored = False
+            # Task #31 sharpening: proximity alone isn't an anchor — check
+            # TOUCH COUNT. A ≥2-touch cluster within ±5% of the strike is a
+            # real anchor; a 1-touch level (e.g. bare 52w-low) is a weak
+            # floor and says so precisely; nothing within 5% = a float.
+            multi_anchored = False
+            single_anchor_price = None
             for s in supports:
                 try:
                     sp = float(s.get("price", 0))
                     if sp <= 0:
                         continue
+                    touches = s.get("touches")
+                    touches = int(touches) if isinstance(touches, (int, float)) else 1
                     if abs(sp - ctx.strike) / ctx.strike <= 0.05:
-                        anchored = True
-                        break
+                        if touches >= 2:
+                            multi_anchored = True
+                            break
+                        if single_anchor_price is None:
+                            single_anchor_price = sp
                 except (TypeError, ValueError):
                     continue
-            if not anchored:
-                # Strike isn't near a support cluster — not a hard block, but worth noting.
-                findings.append(TradeValidation(
-                    severity=SEV_WARN,
-                    reason=f"Strike ${ctx.strike} not anchored to support cluster",
-                    detail=(
+            if not multi_anchored:
+                # Not a hard block, but worth noting — with the precise case.
+                if single_anchor_price is not None:
+                    reason = (f"Strike ${ctx.strike} anchored only to a "
+                              f"1-touch cluster at ${single_anchor_price:g}")
+                    detail = (
+                        f"The only support near {ctx.ticker}'s ${ctx.strike} strike is a "
+                        f"1-touch level at ${single_anchor_price:g} — a price the chart "
+                        f"visited once (often just the 52w low), not a tested floor. "
+                        f"The cleanest CSP entries anchor to a ≥2-touch cluster — if "
+                        f"assigned, you own at a level buyers have actually defended."
+                    )
+                else:
+                    reason = (f"Strike ${ctx.strike} not anchored to support cluster "
+                              f"(no ≥2-touch support cluster within 5%)")
+                    detail = (
                         f"None of {ctx.ticker}'s identified support clusters sit within "
                         f"5% of the ${ctx.strike} strike. The cleanest CSP entries pick a "
                         f"strike at or just above a strong support — if assigned, you "
                         f"own at a real chart level. Without that anchor, assignment "
                         f"happens at an arbitrary price."
-                    ),
+                    )
+                findings.append(TradeValidation(
+                    severity=SEV_WARN,
+                    reason=reason,
+                    detail=detail,
                     rule_id="STRIKE_NOT_AT_SUPPORT",
                 ))
 
@@ -446,7 +571,12 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
             min_otm_pct = float(cc_set.get("min_otm_pct", 4.0) or 4.0)
             cov_cap_pct = int(cc_set.get("coverage_cap_pct", 100) or 0)
 
-            if not bool(cc_set.get("enabled", True)):
+            # Rule-#43 fix: gate through is_cc_enabled_for_tier (whitelist-
+            # aware) rather than the raw `enabled` flag. With the production
+            # config's `tier_a.enabled: true` + `willing_to_write_cc_on:
+            # [NVDA, MSFT]`, the raw flag green-lit EVERY Tier A name (the
+            # AMZN bug); the helper requires whitelist membership.
+            if not _pt.is_cc_enabled_for_tier(tier, cfg, ticker=ctx.ticker):
                 findings.append(TradeValidation(
                     severity=SEV_BLOCK,
                     reason=(
@@ -456,15 +586,22 @@ def validate_proposed_trade(ctx: PreTradeContext, config: Optional[dict] = None)
                     detail=(
                         f"{ctx.ticker} is classified Tier {tier} in CLAUDE.md hard rule "
                         f"#29. The system never recommends CCs on Tier A — capping a "
-                        f"conviction compounder defeats the long-term thesis. If you want "
-                        f"to write a CC here anyway, do it manually and explicitly."
+                        f"conviction compounder defeats the long-term thesis. Opt in "
+                        f"via covered_call_tiers.tier_a.willing_to_write_cc_on if you "
+                        f"want the strict-envelope write on this name."
                     ),
                     rule_id="COVERED_CALL_TIER_VIOLATION",
                 ))
             else:
                 # Tier-enabled: check the proposed contract against the
-                # tier's max_delta / min_otm_pct.
+                # tier's rsi_floor / max_delta / min_otm_pct.
                 violations = []
+                _tier_rsi_floor = int(cc_set.get("rsi_floor", 0) or 0)
+                if (_tier_rsi_floor and _tier_rsi_floor < 900
+                        and ctx.rsi is not None and ctx.rsi < _tier_rsi_floor):
+                    violations.append(
+                        f"needs RSI ≥ {_tier_rsi_floor} (now {ctx.rsi:.0f})"
+                    )
                 if (ctx.spot and ctx.spot > 0 and ctx.strike > 0):
                     otm_pct_actual = (ctx.strike - ctx.spot) / ctx.spot * 100.0
                     if otm_pct_actual < min_otm_pct:
@@ -707,6 +844,26 @@ def build_context_from_snapshot(
                     pass
             break
 
+    # Rule #46 (PLTR 2026-08-04): the RSI rules must receive the LIVE /
+    # recomputed RSI, never the stale snapshot value, on new-open validation.
+    # The observed card carried "Trade-validator: ✅ GOOD TRADE" next to
+    # "RSI 48 🟢 pullback" while the live RSI was ~70-75 (a hard block) —
+    # PLTR had gapped +29% after the technicals close. Fail-open: any error
+    # keeps the snapshot value.
+    rsi_val = tech.get("rsi_14")
+    try:
+        from analysis.vintage_guard import resolve_new_open_rsi
+        _res = resolve_new_open_rsi(
+            tkr, technicals,
+            quotes=snapshot_data.get("quotes"),
+            positions=positions,
+            config=snapshot_data.get("_config"),
+        )
+        if _res.get("status") == "live" and _res.get("rsi") is not None:
+            rsi_val = _res["rsi"]
+    except Exception:
+        pass
+
     return PreTradeContext(
         ticker=tkr,
         strike=float(strike),
@@ -716,7 +873,7 @@ def build_context_from_snapshot(
         quantity=quantity,
         limit_price=limit_price,
         spot=tech.get("spot") or tech.get("price"),
-        rsi=tech.get("rsi_14"),
+        rsi=rsi_val,
         sma_50=tech.get("sma_50"),
         sma_200=tech.get("sma_200"),
         iv_rank=tech.get("iv_rank"),

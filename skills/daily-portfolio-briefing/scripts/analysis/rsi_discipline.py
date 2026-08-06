@@ -60,6 +60,14 @@ DEFAULT_THRESHOLDS = {
         "block_above": 70.0,          # overbought — don't chase a new equity buy
         "caution_above": 60.0,        # extended — warn (prefer a deeper pullback)
     },
+    # Extended-band demotion for NEW put-sales (rule #43 batch, 2026-07-31
+    # AMZN card): RSI 60-70 = "extended — wait for a pullback to enter"
+    # (asymmetric framework, hard rule #11 + "Everything actionable"). A new
+    # put-sale in this band is demoted to a "⏸ CSPs — wait for a pullback"
+    # subsection — full ticket shown (rule #24), never a numbered green-lit
+    # rec. Set to null in briefing.yaml to disable. The >70 hard block is
+    # unchanged and takes precedence.
+    "put_extended_wait_band": [60.0, 70.0],
 }
 
 
@@ -75,6 +83,16 @@ def load_thresholds(config: dict | None) -> dict:
         for key, val in (user.get(side) or {}).items():
             if val is not None and key in merged[side]:
                 merged[side][key] = float(val)
+    # Nullable: `put_extended_wait_band: null` disables the extended-band
+    # demotion of new put-sales entirely (the >70 hard block stays).
+    if "put_extended_wait_band" in user:
+        band = user["put_extended_wait_band"]
+        try:
+            merged["put_extended_wait_band"] = (
+                [float(band[0]), float(band[1])] if band else None
+            )
+        except (TypeError, ValueError, IndexError):
+            merged["put_extended_wait_band"] = None
     return merged
 
 
@@ -240,6 +258,39 @@ def assess(rsi: float | None, side: str, thresholds: dict | None = None) -> RsiA
     return RsiAssessment(rsi, side, zone, action, label, reason, tag(rsi, side, th))
 
 
+def put_extended_wait(rsi: float | None, thresholds: dict | None = None) -> str | None:
+    """Extended-band demotion check for NEW put-sales (single source of truth).
+
+    When ``rsi`` sits in the ``put_extended_wait_band`` (default 60-70), a new
+    put-sale rec (LT_CSP / LONG_DATED_CSP / PULLBACK_CSP / income opportunity /
+    candidate CSP entry) must NOT render as a numbered actionable rec — it
+    demotes to a "⏸ CSPs — wait for a pullback" subsection with the full
+    ticket still shown (hard rule #24). Returns the ⏸ reason string, or None
+    when: RSI unknown (fail-open), the band is disabled (config null), or RSI
+    is outside the band. The ≥70 hard block (``assess``/``hook``) is separate
+    and unchanged — this band is half-open [lo, hi) so the two never overlap.
+
+    Origin (rule #43, 2026-07-31 briefing): AMZN LONG DATED CSP rendered as
+    numbered rec #6 with "RSI 66 🟡 extended" — annotated but still green-lit,
+    selling a put into a +13.7% earnings-gap green streak.
+    """
+    th = thresholds or DEFAULT_THRESHOLDS
+    band = th.get("put_extended_wait_band", DEFAULT_THRESHOLDS["put_extended_wait_band"])
+    if not band or rsi is None:
+        return None
+    try:
+        lo, hi = float(band[0]), float(band[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    r = float(rsi)
+    if lo <= r < hi:
+        return (
+            f"⏸ RSI {r:.0f} extended — selling puts into a green streak sets the "
+            f"strike against an inflated spot; wait for RSI 35-55 / a red day."
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Lookup + rendered-line helpers (used by the renderers)
 # ---------------------------------------------------------------------------
@@ -254,16 +305,49 @@ def rsi_for(ticker: str | None, technicals: dict | None) -> float | None:
     return None
 
 
+def market_state(rsi: float | None) -> str:
+    """Side-agnostic market-state word for an RSI value.
+
+    Used by strategy explainers (e.g. the "CSP — PAID-TO-WAIT" card) that must
+    state the stock's CURRENT state plainly — separate from the side-aware
+    entry-band language ("pullback zone — favourable") which describes the
+    ENTRY BAND, not the market. The observed confusion (2026-08-04): George
+    read "PULLBACK CSP NVDA" as "NVDA is in a pullback now" when NVDA sat at
+    RSI 53 — a neutral tape. Bands mirror the "Everything actionable" rule:
+    ≥70 overbought · 60-70 extended · 50-60 neutral · 35-50 pullback ·
+    25-35 oversold · <25 falling knife.
+    """
+    if rsi is None:
+        return "unknown"
+    r = float(rsi)
+    if r >= 70:
+        return "overbought"
+    if r >= 60:
+        return "extended"
+    if r >= 50:
+        return "neutral"
+    if r >= 35:
+        return "pullback"
+    if r >= 25:
+        return "oversold"
+    return "falling knife"
+
+
 def first_known_ticker(text: str, tickers: list[str]) -> str | None:
     """Return the first known ticker mentioned in ``text``.
 
     ``tickers`` should be pre-sorted longest-first so GOOGL matches before GOOG.
-    Boundaries treat anything outside ``[A-Z0-9]`` as a separator, so the
+    Boundaries treat anything outside ``[A-Za-z0-9]`` as a separator, so the
     ticker is found inside an option contract token like ``NVDA_PUT_195`` while
-    GOOG still won't match inside GOOGL.
+    GOOG still won't match inside GOOGL. The boundary is case-INSENSITIVE on
+    purpose: with an uppercase-only boundary, single-letter ticker ``T``
+    matched the capital T of prose words like "Triggers"/"Time" and attached
+    AT&T's data to other tickers' cards (the 2026-07-30 MSFT FV bug — DCF $257
+    / PT $25 are T's values). A ticker followed or preceded by a lowercase
+    letter is part of an English word, not a ticker mention.
     """
     for tk in tickers:
-        if re.search(rf"(?<![A-Z0-9]){re.escape(tk)}(?![A-Z0-9])", text):
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(tk)}(?![A-Za-z0-9])", text):
             return tk
     return None
 
@@ -350,13 +434,14 @@ def hook(side: str | None, rsi: float | None, thresholds: dict | None = None) ->
 _REC_LINE_PATTERNS = [
     re.compile(r"\bSELL TO OPEN\b", re.I),
     re.compile(r"\bPULLBACK CSP\b"),
+    re.compile(r"\bCSP — PAID-TO-WAIT\b"),         # renamed PULLBACK CSP label
     re.compile(r"\bNEW CSP\b"),
     re.compile(r"\bCSP ENTRY\b", re.I),
     re.compile(r"\bREADY TO WRITE\b", re.I),
     re.compile(r"BUY ~\$"),                        # equity add
     re.compile(r"\bSELL \d+×"),                    # covered call / strangle write
     re.compile(r"^\s*\d+\.\s+\*\*(CLOSE|EXECUTE ROLL|DEFENSIVE|HEDGE|TRIM|REVIEW CORE|"
-               r"PULLBACK CSP|NEW CSP)\*\*"),
+               r"PULLBACK CSP|CSP — PAID-TO-WAIT|NEW CSP)\*\*"),
 ]
 
 
@@ -379,7 +464,10 @@ def audit_missing_rsi(md: str, context_lines: int = 3) -> list[str]:
         stripped = line.strip()
         if stripped.startswith("## "):
             # Section boundary — exclude the Capital Plan rollup.
-            in_excluded_section = "Capital Plan" in stripped
+            # Rollup sections are exempt: their items are detailed (with
+            # RSI) elsewhere in the briefing. Capital Plan + Money Plan.
+            in_excluded_section = ("Capital Plan" in stripped
+                                   or "Money Plan" in stripped)
         if in_excluded_section:
             continue
         if stripped.startswith("_"):       # italic transparency / footer note

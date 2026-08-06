@@ -105,6 +105,13 @@ def check_earnings_conflict(
         - level (str): "none", "warn", or "block"
         - days_to_earnings (int | None): days from as_of to earnings
         - message (str): human-readable explanation
+        - spans_expiration (bool): True when the earnings print falls ON or
+          BEFORE the contract's expiration (the contract SPANS the print).
+          New-open put/call surfaces must treat this as a hard BLOCK
+          regardless of how many days away the print is ("never sell puts
+          through earnings") — see format_new_open_block().
+        - earnings_date (str | None): the ticker's earnings date (YYYY-MM-DD)
+          when known, for human-readable rendering.
     """
     # Parse expiration date
     exp_date = parse_earnings_date(expiration)
@@ -114,6 +121,8 @@ def check_earnings_conflict(
             "level": "none",
             "days_to_earnings": None,
             "message": "Invalid expiration date format",
+            "spans_expiration": False,
+            "earnings_date": None,
         }
 
     # Normalize as_of to a date — call sites in render/panels.py pass strings.
@@ -124,6 +133,8 @@ def check_earnings_conflict(
             "level": "none",
             "days_to_earnings": None,
             "message": "Invalid as_of date",
+            "spans_expiration": False,
+            "earnings_date": None,
         }
     as_of = as_of_date  # rest of this function expects a date
 
@@ -136,6 +147,8 @@ def check_earnings_conflict(
             "level": "none",
             "days_to_earnings": None,
             "message": "No earnings date found",
+            "spans_expiration": False,
+            "earnings_date": None,
         }
 
     # Parse the actual earnings date
@@ -149,6 +162,8 @@ def check_earnings_conflict(
             "level": "none",
             "days_to_earnings": days_to_earnings,
             "message": f"Earnings already passed ({days_to_earnings} days ago)",
+            "spans_expiration": False,
+            "earnings_date": earnings_str,
         }
 
     # Case 2: Earnings is well after option expires (>5 days after expiration)
@@ -159,6 +174,8 @@ def check_earnings_conflict(
             "level": "none",
             "days_to_earnings": days_to_earnings,
             "message": f"Earnings {days_to_earnings} days away, after expiration",
+            "spans_expiration": False,
+            "earnings_date": earnings_str,
         }
 
     # Case 3: Earnings within 14 days of as_of AND before/on expiration
@@ -169,16 +186,29 @@ def check_earnings_conflict(
             "level": "block",
             "days_to_earnings": days_to_earnings,
             "message": f"BLOCK: Imminent earnings {days_to_earnings}d away, expires {(exp_date - as_of).days}d",
+            "spans_expiration": True,
+            "earnings_date": earnings_str,
         }
 
-    # Case 4: Earnings before expiration but >14 days away AND within 1-5 days before exp
-    # This is IV-crush risk but not imminent → WARN
+    # Case 4: Earnings before/on expiration but >14 days from as_of.
+    # The contract SPANS the print. Phrasing bug (2026-08-04 NVDA card):
+    # the old message rendered the raw signed delta — "⚠️ Earnings 22d away,
+    # -9d before expiration" — which reads as nonsense. Say it in human terms:
+    # the print lands N days BEFORE the contract expires.
     if 1 <= days_to_earnings <= (exp_date - as_of).days and earnings_date <= exp_date:
+        days_before_exp = (exp_date - earnings_date).days
+        if days_before_exp > 0:
+            span_txt = f"prints {days_before_exp}d BEFORE expiry"
+        else:
+            span_txt = "prints ON expiry day"
         return {
             "conflict": True,
             "level": "warn",
             "days_to_earnings": days_to_earnings,
-            "message": f"⚠️ Earnings {days_to_earnings}d away, {days_after_exp}d before expiration",
+            "message": (f"⚠️ Earnings {days_to_earnings}d away — {span_txt} — "
+                        f"contract spans earnings"),
+            "spans_expiration": True,
+            "earnings_date": earnings_str,
         }
 
     # Case 5: Earnings well after expiration
@@ -187,7 +217,33 @@ def check_earnings_conflict(
         "level": "none",
         "days_to_earnings": days_to_earnings,
         "message": f"Earnings {days_to_earnings} days away, after expiration",
+        "spans_expiration": False,
+        "earnings_date": earnings_str,
     }
+
+
+def format_new_open_block(ticker: str, check_result: dict, expiration: str) -> str:
+    """One-line 🚫 BLOCK (EARNINGS_WINDOW) message for a NEW-open short option
+    whose contract spans the earnings print.
+
+    Domain hard rule: NEVER sell puts (or calls) through earnings on a new
+    open — regardless of how many days away the print is. Example output for
+    the observed 2026-08-04 NVDA card (prints Aug 26, contract Sep 04):
+
+        🚫 BLOCK (EARNINGS_WINDOW) — NVDA prints Aug 26, inside the Sep 04
+        contract — pick a pre-print expiry or wait for post-print
+
+    Only real dates are rendered (rule #19) — when a date can't be parsed the
+    phrase degrades to generic wording, never a fabricated date.
+    """
+    earn = parse_earnings_date(check_result.get("earnings_date"))
+    exp = parse_earnings_date(expiration)
+    earn_txt = earn.strftime("%b %d") if earn else "inside the contract window"
+    exp_txt = exp.strftime("%b %d") if exp else str(expiration or "?")
+    return (
+        f"🚫 BLOCK (EARNINGS_WINDOW) — {ticker} prints {earn_txt}, inside the "
+        f"{exp_txt} contract — pick a pre-print expiry or wait for post-print"
+    )
 
 
 def format_earnings_badge(check_result: dict) -> str:

@@ -197,11 +197,11 @@ def _compute_funding_hint(snapshot_data: dict) -> dict:
     }
 
 try:
-    from analysis import rsi_discipline
+    from analysis import iv_honesty, rsi_discipline
     from analysis.put_overlap_check import check_strike_overlap as _check_strike_overlap
 except ImportError:  # pragma: no cover - path fallback for standalone runs
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from analysis import rsi_discipline
+    from analysis import iv_honesty, rsi_discipline
     from analysis.put_overlap_check import check_strike_overlap as _check_strike_overlap
 
 
@@ -320,7 +320,15 @@ def generate_long_term_opportunities_step(
     # Core names get a higher target so the 1.5× TRIM trigger doesn't fire
     # at 7.5% NLV (which is normal for mega-cap conviction holdings).
     target_weights_cfg = (config or {}).get("target_weights", {}) or {}
-    core_tickers_set = set((config or {}).get("core_positions", []) or [])
+    # 2026-08-04 (PLTR): core = core_positions ∪ Tier A. PLTR (Tier A, not
+    # on core_positions) shipped a "TRIM PLTR — 10.6% NLV" while Risk Alerts
+    # said "within Tier A bounds (cap 22%)" — the union makes the TRIM
+    # filter and the core target weight agree with the tier framework.
+    try:
+        from analysis.position_tiers import core_union as _core_union
+        core_tickers_set = _core_union(config or {})
+    except Exception:
+        core_tickers_set = set((config or {}).get("core_positions", []) or [])
     default_core_target = float((config or {}).get("core_target_weight_pct", 12.0))
     default_target = float((config or {}).get("default_target_weight_pct", 5.0))
 
@@ -381,8 +389,25 @@ def generate_long_term_opportunities_step(
     # target" trigger should defer to that for core names.
     filtered: list = []
     for op in op_dicts:
-        if op.get("kind") == "TRIM" and op.get("ticker") in core_tickers_set:
-            continue
+        if op.get("kind") == "TRIM":
+            _t_trim = op.get("ticker")
+            if _t_trim in core_tickers_set:
+                continue
+            # 2026-08-04: explicit Tier B income names defer to their tier
+            # cap (concentration_cap_for_tier, 12% default) — the drift
+            # alert reads the tier cap, so the TRIM generator must agree
+            # (rule #29). Tier C keeps legacy behavior. Fail-open.
+            try:
+                from analysis.position_tiers import (
+                    TIER_B, concentration_cap_for_tier, tier_for,
+                )
+                if tier_for(_t_trim, config) == TIER_B:
+                    _w_trim = float((positions_by_ticker.get(_t_trim) or {})
+                                    .get("weight_pct") or 0)
+                    if _w_trim <= concentration_cap_for_tier(TIER_B, config):
+                        continue
+            except Exception:
+                pass
         filtered.append(op)
     op_dicts = filtered
 
@@ -717,6 +742,20 @@ def generate_long_term_opportunities_step(
                          "rule_id": f.rule_id, "detail": f.detail}
                         for f in findings
                     ]
+                    # Rule #43 (RDDT): an UNKNOWN earnings date is a WARN,
+                    # not a silent pass — surface it ON the card so the
+                    # ticket can't read as earnings-clean when the calendar
+                    # simply had nothing.
+                    if any(f.rule_id == "EARNINGS_DATE_UNKNOWN"
+                           for f in findings):
+                        triggers = op.setdefault("trigger_reasons", [])
+                        if not any("earnings unverified" in str(x)
+                                   for x in triggers):
+                            triggers.insert(0, (
+                                f"⚠ earnings unverified — no {ticker} "
+                                f"earnings date from the calendar; verify "
+                                f"no print before {exp_d} at the broker "
+                                f"before placing"))
                     # If any BLOCK fires, demote the rec — it's not safely actionable.
                     if _ptv.has_blockers(findings):
                         block_reasons = "; ".join(
@@ -754,6 +793,17 @@ def generate_long_term_opportunities_step(
                 op["skip_reason"] = a.reason
                 op["kind_when_skipped"] = (op.get("kind") or "").upper()
                 op["kind"] = "SKIPPED_RSI" if side == "buy" else "SKIPPED_LT_CSP"
+            elif side == "put":
+                # Extended-band demotion (rule #43, AMZN 2026-07-31): RSI
+                # 60-70 = "extended — wait for a pullback." The rec keeps its
+                # full ticket (chain enrichment still runs) but the renderer
+                # moves it into the "⏸ CSPs — wait for a pullback" subsection
+                # instead of a numbered actionable rec. Config-nullable via
+                # rsi_discipline.put_extended_wait_band.
+                w = rsi_discipline.put_extended_wait(_rsi_of(op.get("ticker")), rsi_th)
+                if w:
+                    op["rsi_wait"] = True
+                    op["rsi_wait_reason"] = w
 
     for op in op_dicts:
         rsi = _rsi_of(op.get("ticker"))
@@ -774,7 +824,9 @@ def generate_long_term_opportunities_step(
     _enrich_long_dated_dates(op_dicts, chains, target_dte_csp=75, target_dte_leap=365)
     # Pull REAL premium/bid/ask from live yfinance chains for each LT_CSP so
     # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
-    _enrich_with_live_premiums(op_dicts)
+    _enrich_with_live_premiums(
+        op_dicts, iv_ranks=iv_ranks, technicals=technicals, config=config,
+    )
 
     # Universal capacity-gate DEFERRED tag (hard rules #24 / #41, audit
     # 2026-07-03 finding #7): when stress coverage sits below the 0.50×
@@ -795,6 +847,19 @@ def generate_long_term_opportunities_step(
     except ImportError:
         pass
 
+    # Rule #43 (GOOG 2026-07-31): every LONG_DATED_CSP card carries the
+    # equity-stacking read the Rotation Playbook enforces — the LTO section
+    # must never recommend a short put the playbook two sections later
+    # hard-skips for equity concentration, without saying so on the card.
+    _annotate_equity_stacking(op_dicts, snapshot_data, config)
+
+    # Rule #43 (GOOG 2026-08-03): a fully-gated card must not hold a numbered
+    # "Trade:" slot. Marks reference_demoted on cards whose disqualifiers
+    # overcome the numbered-Trade-card framing; the renderer moves them to
+    # the unnumbered "📎 Shown for reference" subsection (rule #24 — full
+    # ticket preserved, never hidden).
+    _mark_reference_demotions(op_dicts, snapshot_data, config)
+
     # Compute a funding-hint footer so the Skipped section can tell the user
     # how much cash they could free by closing their high-capture short puts
     # today (the path back to deploying the suppressed ADD recs). Stashed
@@ -807,6 +872,138 @@ def generate_long_term_opportunities_step(
             "funding": funding,
         })
     return op_dicts
+
+
+def _annotate_equity_stacking(
+    op_dicts: list,
+    snapshot_data: dict,
+    config: dict | None,
+) -> None:
+    """Rule #43 (GOOG 2026-07-31) — annotate every LONG_DATED_CSP card with
+    the equity-stacking read from the shared ``analysis.equity_stacking``
+    module (the same gate the Rotation Playbook enforces).
+
+    Observed defect: the LTO section rendered "💎 6. LONG DATED CSP · GOOG —
+    SELL 1× GOOG $330P" with ✅ RSI favourable and NO concentration context,
+    while the playbook hard-skipped the identical trade ("⛔ GOOG $330P
+    skipped — holds 15.9% NLV in GOOG equity (≥ 10% NLV hard-skip)").
+
+    ≥10% NLV held → prominent ⛔ hard-skip-zone annotation; 5-10% → modest
+    ⚠ warning; <5% → nothing. The card stays visible either way (hard rule
+    #24) — it just can't carry ✅-favorable framing without the context.
+    Fail-open: missing positions/NLV data → no annotation.
+    """
+    try:
+        from analysis.equity_stacking import (
+            equity_pct_by_ticker, stacking_card_annotation)
+    except ImportError:
+        return
+    try:
+        balance = (snapshot_data or {}).get("balance") or {}
+        nlv = float(balance.get("accountValue") or balance.get("netValue") or 0)
+        eq_pcts = equity_pct_by_ticker(
+            (snapshot_data or {}).get("positions") or [], nlv)
+        if not eq_pcts:
+            return
+        es_cfg = (((config or {}).get("rotation_playbook") or {})
+                  .get("equity_stacking") or {})
+        for op in op_dicts:
+            kind = (op.get("kind_when_skipped") or op.get("kind") or "").upper()
+            if kind != "LONG_DATED_CSP":
+                continue
+            tk = (op.get("ticker") or "").upper()
+            note = stacking_card_annotation(tk, eq_pcts.get(tk), es_cfg)
+            if not note:
+                continue
+            triggers = op.setdefault("trigger_reasons", [])
+            if not any("equity-stacking" in str(x) or "equity concentration"
+                       in str(x) for x in triggers):
+                triggers.insert(0, note)
+    except Exception as e:
+        print(f"  [warn] equity-stacking annotation failed (non-fatal): {e}",
+              file=sys.stderr)
+
+
+def _mark_reference_demotions(
+    op_dicts: list,
+    snapshot_data: dict,
+    config: dict | None,
+) -> None:
+    """Rule #43 (GOOG 2026-08-03) — fully-gated cards lose the numbered
+    "Trade:" slot.
+
+    Observed defect: "### 💎 6. LONG DATED CSP · GOOG — Trade: SELL 1× GOOG
+    $330P..." rendered as a numbered opportunity while carrying FOUR
+    disqualifiers (⛔ equity-stacking hard-skip at 16.2% NLV, ⏸ capacity
+    gated, RSI 48 ⚠ pre-gap stale on a +8.8% move, thin-premium reconsider).
+    The annotations don't overcome the numbered-Trade-card framing — George
+    read it as a recommendation to sell a put on a green day.
+
+    A surviving new-open card (LONG_DATED_CSP / ADD) is demoted to the
+    unnumbered "📎 Shown for reference — not actionable today" subsection
+    when ANY of:
+      (a) the equity-stacking ⛔ hard-skip fired on the card;
+      (b) the vintage guard stale-tagged the RSI that was its qualifying
+          trigger (ticker moved past vintage_guard.max_intraday_move_pct
+          since the RSI was computed — the promote/keep read is stale);
+      (c) ≥2 independent hard gates fired. The capacity gate counts here
+          but NEVER demotes alone — deferred-for-capacity cards keep their
+          numbered planning value (rules #24 / #41).
+
+    Config: ``lto_reference_demotion: {enabled, stale_rsi_demotes,
+    hard_skip_demotes}`` (all default true). The per-gate toggles disable
+    the single-gate demotion path (a)/(b); the ≥2 combination rule (c)
+    still counts a fired gate factually. Fail-open: any error → no card
+    is ever demoted on missing data.
+    """
+    cfg = ((config or {}).get("lto_reference_demotion") or {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if not cfg.get("enabled", True):
+        return
+    stale_rsi_demotes = bool(cfg.get("stale_rsi_demotes", True))
+    hard_skip_demotes = bool(cfg.get("hard_skip_demotes", True))
+    try:
+        try:
+            from analysis import vintage_guard as _vg
+            vg_flags = _vg.compute_flags(
+                (snapshot_data or {}).get("quotes") or {},
+                (snapshot_data or {}).get("technicals") or {},
+                config if isinstance(config, dict) else None,
+            )
+        except Exception:
+            vg_flags = {}
+        for op in op_dicts:
+            kind = (op.get("kind") or "").upper()
+            if kind not in ("LONG_DATED_CSP", "ADD"):
+                continue
+            if op.get("skip_reason") or op.get("rsi_wait"):
+                continue  # already demoted by a stronger surface
+            triggers = [str(t) for t in (op.get("trigger_reasons") or [])]
+            gates: list[tuple[str, str]] = []
+            if any("⛔ equity-stacking hard-skip" in t for t in triggers):
+                gates.append(("hard_skip", "equity-stacking hard-skip"))
+            flag = vg_flags.get((op.get("ticker") or "").upper())
+            if flag and any("RSI" in t for t in triggers):
+                gates.append((
+                    "stale_rsi",
+                    f"stale qualifying RSI (spot moved "
+                    f"{flag['move_pct']:+.1f}% since computation)",
+                ))
+            if op.get("capacity_deferred"):
+                gates.append(("capacity", "capacity gated"))
+            fired = {g for g, _ in gates}
+            demote = (
+                ("hard_skip" in fired and hard_skip_demotes)
+                or ("stale_rsi" in fired and stale_rsi_demotes)
+                or len(gates) >= 2
+            )
+            if demote:
+                op["reference_demoted"] = True
+                op["reference_reason"] = " + ".join(lbl for _, lbl in gates)
+    except Exception as e:
+        print(f"  [warn] reference-demotion marking failed (non-fatal): {e}",
+              file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -905,7 +1102,12 @@ def _enrich_long_dated_dates(
         op["target_dte"] = actual_dte
 
 
-def _enrich_with_live_premiums(op_dicts: list) -> None:
+def _enrich_with_live_premiums(
+    op_dicts: list,
+    iv_ranks: dict | None = None,
+    technicals: dict | None = None,
+    config: dict | None = None,
+) -> None:
     """Fetch real put-chain bid/mid/ask via the etrade-chain-fetcher skill.
 
     Per project rule: chain data for tradeable recommendations MUST come from
@@ -1056,13 +1258,26 @@ def _enrich_with_live_premiums(op_dicts: list) -> None:
                 f"~{annualized:.0f}% annualized · ${collateral:,.0f} cash collateral · "
                 f"_Source: {'Live E*TRADE chain' if source_tag == 'etrade_live' else source_tag}_"
             )
-        # Also update rationale's "fat premium" framing if the actual premium is thin
-        if op.get("rationale") and "fat premium" in op["rationale"] and premium_total < 500:
-            op["rationale"] = op["rationale"].replace(
-                "= fat premium",
-                f"= ${premium_total:.0f} premium (thinner than the rule-of-thumb estimate — "
-                "reconsider unless you specifically want this strike)"
+        # Post-gap IV-rank honesty (rule #43, AMZN 2026-07-31): cross-check any
+        # "fat premium" claim against the DELIVERED annualized yield. Claimed-fat
+        # (IV rank ≥ 60) + delivered-thin (< 20% annualized) → honest gap-aware
+        # text + the universal reconsider note; otherwise the legacy < $500
+        # absolute-thin check (the NFLX path) still applies. Single source of
+        # truth: analysis/iv_honesty.py. Fail-open on missing data.
+        if op.get("rationale") and "fat premium" in op["rationale"]:
+            _t = (op.get("ticker") or "").upper()
+            _iv = (iv_ranks or {}).get(_t) or (iv_ranks or {}).get(op.get("ticker"))
+            _tech = (technicals or {}).get(_t) or (technicals or {}).get(op.get("ticker"))
+            rewritten = iv_honesty.rewrite_fat_premium(
+                op["rationale"],
+                iv_rank=_iv,
+                annualized_pct=annualized,
+                premium_total=premium_total,
+                tech_entry=_tech if isinstance(_tech, dict) else None,
+                config=config,
             )
+            if rewritten:
+                op["rationale"] = rewritten
         # Stash for downstream consumers (capital-planner, etc.)
         op["live_premium_per_share"] = premium_per_share
         op["live_bid"] = bid
@@ -1135,6 +1350,20 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
     skipped = [op for op in opportunities if (op.get("kind") or "").startswith("SKIPPED")
                or (op.get("kind") or "") == "DEFERRED_ADD_HAS_CSP"]
 
+    # Extended-band demotion (rule #43): rsi_wait recs never render as numbered
+    # actionable recs — they move to a "⏸ CSPs — wait for a pullback"
+    # subsection below, full ticket shown (hard rule #24, never hidden).
+    rsi_wait_ops = [op for op in active if op.get("rsi_wait")]
+    active = [op for op in active if not op.get("rsi_wait")]
+
+    # Reference demotion (rule #43, GOOG 2026-08-03): fully-gated cards
+    # (equity-stacking hard-skip / stale qualifying RSI / ≥2 hard gates)
+    # never hold a numbered "Trade:" slot. They render unnumbered at the
+    # END of the section with the full ticket preserved (rule #24). Pulling
+    # them out BEFORE enumerate() keeps the numbered slots gap-free.
+    reference_ops = [op for op in active if op.get("reference_demoted")]
+    active = [op for op in active if not op.get("reference_demoted")]
+
     lines = [
         "## 🔭 Long-Term Opportunities (3-12mo horizon)",
         "",
@@ -1173,6 +1402,38 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
         if op.get("source"):
             lines.append(f"- **Source:** {op['source']}")
         lines.append("")
+
+    # ⏸ CSPs — wait for a pullback (rule #43): extended-band (RSI 60-70) new
+    # put-sales. Full ticket rendered (rule #24) with the ⏸ reason — shown for
+    # planning, never a numbered green-lit rec. The >70 hard block is separate
+    # (those land in Skipped).
+    if rsi_wait_ops:
+        lines.append("### ⏸ CSPs — wait for a pullback")
+        lines.append("")
+        lines.append("_New put-sales with RSI 60-70 (extended). Full ticket shown — "
+                     "never hidden — but selling into a green streak sets the strike "
+                     "against an inflated spot. Re-check on a red day / RSI 35-55._")
+        lines.append("")
+        for op in rsi_wait_ops:
+            emoji = {"LONG_DATED_CSP": "💎"}.get(op.get("kind", ""), "•")
+            lines.append(
+                f"#### ⏸ {emoji} {op.get('kind', '?').replace('_', ' ')} · "
+                f"`{op.get('ticker', '?')}` — wait for a pullback"
+            )
+            lines.append("")
+            if op.get("rsi_wait_reason"):
+                lines.append(f"- **{op['rsi_wait_reason']}**")
+            if op.get("concrete_trade"):
+                lines.append(f"- **Trade (when RSI cools):** {op['concrete_trade']}")
+            if op.get("trigger_reasons"):
+                lines.append(f"- **Triggers:** {'; '.join(op['trigger_reasons'])}")
+            if op.get("rationale"):
+                lines.append(f"- **Rationale:** {op['rationale']}")
+            if op.get("yield_or_cost"):
+                lines.append(f"- **Yield/Cost:** {op['yield_or_cost']}")
+            if op.get("source"):
+                lines.append(f"- **Source:** {op['source']}")
+            lines.append("")
 
     # Footer: surface skipped recs, but GROUP and RANK them so the user can
     # see which are worth re-considering vs which are redundant. The
@@ -1253,6 +1514,41 @@ def render_long_term_opportunities(opportunities: list) -> list[str]:
             for c in funding_hint.get("top3", []):
                 lines.append(f"  - `{c['symbol']}` — frees ${c['freed_cash']:,.0f} + locks ${c['locked_profit']:,.0f} "
                              f"({c['capture_pct']*100:.0f}% captured)")
+            lines.append("")
+
+    # 📎 Shown for reference (rule #43, GOOG 2026-08-03): fully-gated cards.
+    # Unnumbered, at the END of the section, with a one-line reason and the
+    # full ticket preserved (rule #24) — planning value without the
+    # numbered-Trade-card framing that reads as a recommendation.
+    if reference_ops:
+        lines.append("### 📎 Shown for reference — not actionable today")
+        lines.append("")
+        lines.append("_These cards carry hard disqualifiers (equity-stacking "
+                     "hard-skip, stale qualifying RSI, or stacked gates) that "
+                     "overcome the trade framing. Full ticket kept for planning "
+                     "— this is NOT a recommendation to place today._")
+        lines.append("")
+        for op in reference_ops:
+            emoji = {
+                "ADD": "📈", "LONG_DATED_CSP": "💎",
+            }.get(op.get("kind", ""), "•")
+            lines.append(
+                f"#### 📎 {emoji} {op.get('kind', '?').replace('_', ' ')} · "
+                f"`{op.get('ticker', '?')}` — reference only"
+            )
+            lines.append("")
+            if op.get("reference_reason"):
+                lines.append(f"- **Why not actionable:** {op['reference_reason']}")
+            if op.get("concrete_trade"):
+                lines.append(f"- **Trade (reference only):** {op['concrete_trade']}")
+            if op.get("trigger_reasons"):
+                lines.append(f"- **Triggers:** {'; '.join(op['trigger_reasons'])}")
+            if op.get("rationale"):
+                lines.append(f"- **Rationale:** {op['rationale']}")
+            if op.get("yield_or_cost"):
+                lines.append(f"- **Yield/Cost:** {op['yield_or_cost']}")
+            if op.get("source"):
+                lines.append(f"- **Source:** {op['source']}")
             lines.append("")
 
     return lines

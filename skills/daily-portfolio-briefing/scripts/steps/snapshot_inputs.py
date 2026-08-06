@@ -17,6 +17,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import yfinance as yf  # noqa: E402  (already a dependency)
@@ -25,6 +26,7 @@ from .fetch_earnings import fetch_earnings_dates
 from .fetch_ytd_pnl import fetch_ytd_options_pnl_auto
 from analysis import support_resistance as sr_mod
 from analysis import technical_indicators as ti_mod
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 
 # Persistent OHLC cache (task #9) — optional import; any failure means the
 # uncached yfinance path below is used, exactly as before. Fail-open.
@@ -46,6 +48,102 @@ def load_portfolio_fixture(fixture_path: str) -> dict:
     """Load the user's holdings from JSON fixture (replaces E*TRADE positions API in v1)."""
     with open(fixture_path) as f:
         return json.load(f)
+
+
+def _safe_float(v) -> float:
+    """NaN/None-safe float coercion — non-finite or unparseable values → 0.0."""
+    try:
+        f = float(v) if v is not None else 0.0
+        return f if math.isfinite(f) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# Reconciliation threshold: computed-vs-broker NLV divergence above this
+# fraction fires a 🔴 data-integrity warning (rendered under the header NLV
+# line and in the Live-Data policer panel).
+_NLV_RECONCILIATION_PCT = 0.01
+
+
+def _coerce_jsonable(v):
+    """Recursively coerce adapter numerics to JSON-native types.
+
+    The E*TRADE adapter (pyetrade) returns ``Decimal`` for balance fields
+    (totalAccountValue, cash, buying power, ...). Any Decimal that leaks
+    into snapshot_data eventually lands in briefing_json where a plain
+    ``json.dump`` raises ``TypeError`` — the 2026-08-04 live-run failure.
+    Coerce at the boundary so snapshot_data is JSON-native throughout.
+    """
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, dict):
+        return {k: _coerce_jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_coerce_jsonable(x) for x in v]
+    return v
+
+
+def _compose_balance(
+    base_balance: dict,
+    long_market_value: float,
+    option_market_value: float,
+) -> dict:
+    """Compose the snapshot balance dict, preferring the broker's own NLV.
+
+    Root cause of the 2026-08-04 bug: `accountValue` was recomputed as
+    long_market_value + cash — EQUITY longs only — which silently dropped
+    short-option mark-to-market liabilities (~$65K of short marks). The
+    briefing rendered "Portfolio NLV: $1,149,562" while the broker's own
+    Portfolios page showed Net Account Value $1,082,940.74 in the same
+    session. Broker truth beats reconstruction (rules #10/#19):
+
+    - When E*TRADE's `totalAccountValue` is present (live adapter always
+      returns it), USE IT as `accountValue`.
+    - The computed value (cash + long MV + SIGNED option marks — short
+      options carry negative marketValue in the broker payload) is kept as
+      `computedAccountValue` for cross-checking, and is the fallback when
+      the broker figure is unavailable (fixtures without it). Fail-open.
+    - When both are available and diverge by more than 1%, a
+      `nlv_reconciliation` record with `warning: True` is attached so the
+      render layer surfaces both numbers — never silently ship a
+      reconstructed NLV that disagrees with broker truth.
+    """
+    # Boundary coercion: the live adapter returns Decimal for SEVERAL
+    # balance fields (totalAccountValue, cash, netCash, buying power, ...).
+    # Coerce the whole dict before it's spread into the snapshot balance —
+    # a Decimal here killed the 2026-08-04 run at the Step 10 json.dump.
+    base_balance = {k: _coerce_jsonable(v) for k, v in (base_balance or {}).items()}
+
+    cash = _safe_float(base_balance.get("cash", 0))
+    computed_nlv = round(long_market_value + option_market_value + cash, 2)
+    broker_nlv = _safe_float(base_balance.get("totalAccountValue", 0))
+
+    balance = {
+        **base_balance,
+        "longMarketValue": round(long_market_value, 2),
+        "optionMarketValue": round(option_market_value, 2),
+        "computedAccountValue": computed_nlv,
+    }
+
+    if broker_nlv > 0:
+        # Broker truth wins.
+        balance["accountValue"] = round(broker_nlv, 2)
+        delta = round(computed_nlv - broker_nlv, 2)
+        pct = abs(delta) / broker_nlv
+        balance["nlv_reconciliation"] = {
+            "broker_nlv": round(broker_nlv, 2),
+            "computed_nlv": computed_nlv,
+            "delta": delta,
+            "pct": round(pct * 100, 2),
+            "warning": pct > _NLV_RECONCILIATION_PCT,
+            "using": "broker",
+        }
+    else:
+        # No broker figure (fixture without totalAccountValue) — fall back
+        # to the computed value, which now includes signed option marks.
+        balance["accountValue"] = computed_nlv
+
+    return balance
 
 
 def _fetch_price_history(ticker: str, days: int = 252) -> "yf.Ticker | None":
@@ -233,6 +331,10 @@ def _full_technicals(ticker: str) -> dict | None:
             "spot": round(spot, 2),
             "support_resistance": sr_data,
             "deep": deep_data,
+            # Last ~6 closes (chronological) from the SAME OHLC pull — lets
+            # analysis/iv_honesty.detect_recent_gap flag an earnings gap that
+            # inflates the realized-vol IV-rank proxy (rule #43). No extra fetch.
+            "recent_closes": [round(float(c), 4) for c in closes.tail(6).tolist()],
         }
     except Exception as e:
         print(f"    [warn] technicals fetch for {ticker}: {e}", file=sys.stderr)
@@ -414,6 +516,31 @@ def _parallel_market_data_fetch(
                     iv_ranks[sym] = value["iv_rank"]
             elif kind == "earn":
                 earnings_calendar[sym] = value
+
+    # Rule #43 (RDDT 2026-07-31): yfinance returning NO earnings date for a
+    # single-stock name is common (recent IPOs, sparse coverage) — try FMP
+    # as a secondary source before the date is declared unknown downstream.
+    # Fail-closed inside fmp_next_earnings (no FMP_API_KEY / error → None,
+    # memoized per process); ETFs skipped (no print to look up).
+    missing = [s for s in earnings_symbols if s not in earnings_calendar]
+    if missing:
+        try:
+            from analysis.earnings_unknown import (
+                fmp_next_earnings, is_earnings_exempt)
+            filled = 0
+            for sym in missing:
+                if is_earnings_exempt(sym):
+                    continue
+                d = fmp_next_earnings(sym)
+                if d:
+                    earnings_calendar[sym] = d
+                    filled += 1
+            if filled:
+                print(f"    [info] FMP earnings fallback filled {filled} "
+                      f"date(s) missing from yfinance", file=sys.stderr)
+        except Exception as e:
+            print(f"    [warn] FMP earnings fallback failed: {e}",
+                  file=sys.stderr)
 
     return quotes, iv_ranks, technicals, earnings_calendar
 
@@ -700,12 +827,7 @@ def snapshot_inputs(
     # `decimal.InvalidOperation` on `nlv_d > 0`. Skip non-finite prices
     # with a warning so the NLV computes from the resolvable positions —
     # callers downstream still see a real number to gate on.
-    def _safe(v):
-        try:
-            f = float(v) if v is not None else 0.0
-            return f if math.isfinite(f) else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+    _safe = _safe_float
 
     skipped: list[str] = []
     long_market_value = 0.0
@@ -724,13 +846,25 @@ def snapshot_inputs(
         print(f"    [warn] NLV excludes {len(skipped)} position(s) with no usable price: {', '.join(skipped)}",
               file=sys.stderr)
 
-    cash = _safe(base_balance.get("cash", 0))
-    balance = {
-        **base_balance,
-        "longMarketValue": round(long_market_value, 2),
-        "accountValue": round(long_market_value + cash, 2),
-        "asOf": datetime.utcnow().isoformat() + "Z",
-    }
+    # Signed option market value — short options carry NEGATIVE marketValue
+    # in the E*TRADE payload (the broker screen's negative "Value $" rows).
+    # Dropping these was the 2026-08-04 NLV bug: $1,149,562 rendered vs the
+    # broker's own $1,082,940.74 (Δ ≈ sum of |short option marks|).
+    option_market_value = 0.0
+    for pos in refreshed_positions:
+        if pos.get("assetType") == "OPTION":
+            option_market_value += _safe(pos.get("marketValue"))
+
+    balance = _compose_balance(base_balance, long_market_value, option_market_value)
+    balance["asOf"] = datetime.utcnow().isoformat() + "Z"
+    _rec = balance.get("nlv_reconciliation") or {}
+    if _rec.get("warning"):
+        print(
+            f"    [warn] NLV reconciliation: computed ${_rec['computed_nlv']:,.0f} "
+            f"vs broker ${_rec['broker_nlv']:,.0f} — Δ ${_rec['delta']:+,.0f} "
+            f"({_rec['pct']:.1f}%); using the broker figure",
+            file=sys.stderr,
+        )
 
     # Live option chains: held expirations + up to 3 future expirations per
     # underlying so the wheel-roll-advisor can enumerate roll candidates with
@@ -765,33 +899,33 @@ def snapshot_inputs(
 
     # Persist
     with open(snapshot_dir / "accounts.json", "w") as f:
-        json.dump(accounts, f, indent=2)
+        json.dump(accounts, f, indent=2, default=json_default)
     with open(snapshot_dir / "positions.json", "w") as f:
-        json.dump(refreshed_positions, f, indent=2)
+        json.dump(refreshed_positions, f, indent=2, default=json_default)
     with open(snapshot_dir / "balance.json", "w") as f:
-        json.dump(balance, f, indent=2)
+        json.dump(balance, f, indent=2, default=json_default)
     with open(snapshot_dir / "quotes.json", "w") as f:
-        json.dump(quotes, f, indent=2)
+        json.dump(quotes, f, indent=2, default=json_default)
     with open(snapshot_dir / "iv_ranks.json", "w") as f:
-        json.dump(iv_ranks, f, indent=2)
+        json.dump(iv_ranks, f, indent=2, default=json_default)
     with open(snapshot_dir / "technicals.json", "w") as f:
-        json.dump(technicals, f, indent=2)
+        json.dump(technicals, f, indent=2, default=json_default)
     with open(snapshot_dir / "open_orders.json", "w") as f:
-        json.dump(open_orders, f, indent=2)
+        json.dump(open_orders, f, indent=2, default=json_default)
     with open(snapshot_dir / "theses.json", "w") as f:
-        json.dump(theses, f, indent=2)
+        json.dump(theses, f, indent=2, default=json_default)
 
     chains_dir = snapshot_dir / "chains"
     chains_dir.mkdir(parents=True, exist_ok=True)
     for key, value in chains.items():
         with open(chains_dir / f"{key}.json", "w") as f:
-            json.dump(value, f, indent=2)
+            json.dump(value, f, indent=2, default=json_default)
 
     # Persist earnings calendar and YTD P&L
     with open(snapshot_dir / "earnings.json", "w") as f:
-        json.dump(earnings_calendar, f, indent=2)
+        json.dump(earnings_calendar, f, indent=2, default=json_default)
     with open(snapshot_dir / "ytd_pnl.json", "w") as f:
-        json.dump(ytd_pnl, f, indent=2)
+        json.dump(ytd_pnl, f, indent=2, default=json_default)
 
     print(f"  Snapshot complete: {len(refreshed_positions)} positions, {len(chains)} option chains, NLV ${balance['accountValue']:,.0f}")
 
@@ -809,12 +943,16 @@ def snapshot_inputs(
             "fetched_at": now_iso,
             "fresh": etrade_live,
         },
-        "quotes": {"source": "yfinance", "fetched_at": now_iso, "fresh": True},
+        # requested/fetched: quote-fetch coverage (rule #46 — the 2026-08-04
+        # PLTR bug shipped on a 22/36 cycle; the live-data policer surfaces
+        # coverage < 90% so silent quote gaps are visible in the briefing).
+        "quotes": {"source": "yfinance", "fetched_at": now_iso, "fresh": True,
+                   "requested": len(quote_symbols), "fetched": len(quotes)},
         "chains": {"source": "etrade_live" if etrade_live else "yfinance",
                    "fetched_at": now_iso, "fresh": True},
         "iv_ranks": {"source": "yfinance_252d", "fetched_at": now_iso, "fresh": True},
         "technicals": {"source": "yfinance_730d", "fetched_at": now_iso, "fresh": True},
-        "earnings_calendar": {"source": "yfinance",
+        "earnings_calendar": {"source": "yfinance+fmp_fallback",
                               "fetched_at": now_iso, "fresh": True},
         "broker_positions": {
             "source": "etrade_live" if etrade_live else (

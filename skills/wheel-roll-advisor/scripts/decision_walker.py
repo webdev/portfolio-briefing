@@ -21,6 +21,11 @@ class DerivedState:
     entry_price: float
     strike_price: float
     underlying_price: float
+    # True when the delta came from the broker/chain; False when derive_state
+    # estimated it from moneyness. Rows with a `delta_min` gate use this to
+    # decide between the delta test and the price-band fallback (never gate
+    # on a fabricated delta — CLAUDE.md #19).
+    delta_measured: bool = False
 
 
 @dataclass
@@ -51,6 +56,7 @@ def derive_state(
 
     # Delta is optional; estimate from moneyness if not provided
     raw_delta = position.get("delta")
+    delta_measured = raw_delta is not None
     if raw_delta is None:
         if strike > 0 and underlying_price > 0:
             ratio = underlying_price / strike
@@ -159,6 +165,7 @@ def derive_state(
         entry_price=entry,
         strike_price=strike,
         underlying_price=underlying_price,
+        delta_measured=delta_measured,
     )
 
 
@@ -219,6 +226,33 @@ def row_matches(row: Dict[str, Any], state: DerivedState) -> bool:
         elif row_regime != state.iv_regime:
             return False
     
+    # Genuine strike-test gate (TSM 2026-07-30 bug): a row may declare
+    # `delta_min` to require that the strike is actually being TESTED, not
+    # merely inside the walker's 8% NEAR_ATM band. Mirrors the task #38
+    # strike-tested guardrail (guardrails.py::check_strike_tested):
+    #   - MEASURED delta (broker/chain) → require |delta| >= delta_min;
+    #   - delta only estimated from moneyness → price fallback: spot must be
+    #     within `delta_fallback_band_pct` (default 3%) of the strike on the
+    #     OTM side, or past it. Never gate on the fabricated delta estimate.
+    # A 6%-above-strike δ-0.10 put (TSM $380P, spot $402.92) must NOT match.
+    if "delta_min" in row:
+        delta_min = float(row.get("delta_min") or 0)
+        if getattr(state, "delta_measured", False):
+            if abs(state.delta) < delta_min:
+                return False
+        else:
+            band = float(row.get("delta_fallback_band_pct", 0.03) or 0.03)
+            strike = state.strike_price
+            spot = state.underlying_price
+            if strike <= 0 or spot <= 0:
+                return False  # can't verify a test → don't match
+            if "CALL" in (state.position_type or "").upper():
+                if spot < strike * (1 - band):
+                    return False
+            else:
+                if spot > strike * (1 + band):
+                    return False
+
     # Profit bounds
     profit_min = row.get("profit_min")
     profit_max = row.get("profit_max")

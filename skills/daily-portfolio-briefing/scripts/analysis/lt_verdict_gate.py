@@ -53,6 +53,34 @@ def _tech_for(ticker: str, snapshot_data: dict) -> dict:
     return tech if isinstance(tech, dict) else {}
 
 
+def _live_spot(ticker: str, snapshot_data: dict) -> float | None:
+    """Live quote for the ticker from the snapshot's quotes dict, or None.
+
+    Same-cycle vintage guard (2026-07-30 MSFT bug): the deep read's
+    ``vs_sma200_pct`` is computed from the previous yfinance close, so on a
+    big gap day the gate judged the trend at a price 15% away from where the
+    stock actually traded. The live quote (fetched this cycle) is strictly
+    more current than the technicals' close; the SMA itself is historical and
+    unaffected by the gap.
+    """
+    if not isinstance(snapshot_data, dict):
+        return None
+    quotes = snapshot_data.get("quotes")
+    if not isinstance(quotes, dict):
+        return None
+    q = quotes.get((ticker or "").upper()) or quotes.get(ticker)
+    if not isinstance(q, dict):
+        return None
+    for k in ("lastTrade", "last", "price"):
+        try:
+            v = float(q.get(k))
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _is_fresh_strong_buy(parkev_rec: dict | None) -> tuple[bool, str]:
     """True when the rec qualifies for the tier ≥4 + ≤14d fresh-BUY override.
 
@@ -118,12 +146,26 @@ def check_lt_verdict_gate(
     if verdict not in BLOCKED_VERDICTS:
         return result
 
-    # Spot vs 200-SMA: prefer the deep read's measured vs_sma200_pct, then
-    # a direct spot/sma_200 comparison. Missing both → fail-open.
-    vs_200 = deep.get("vs_sma200_pct")
+    # Spot vs 200-SMA. Preference order (same-cycle vintage guard):
+    #   1. LIVE quote vs the historical 200-SMA — the technicals' close can be
+    #      a full gap stale on a big-move day (2026-07-30: MSFT deep read said
+    #      -9.8% vs 200-SMA off a $390.54 close while the live quote was
+    #      $450.21, +4.5% ABOVE the $431 SMA).
+    #   2. The deep read's measured vs_sma200_pct.
+    #   3. A direct (stale) spot/sma_200 comparison.
+    # Missing all three → fail-open.
+    vs_200 = None
+    sma_200 = deep.get("sma_200") or tech.get("sma_200")
+    live = _live_spot(ticker, snapshot_data)
+    try:
+        if live is not None and sma_200 is not None and float(sma_200) > 0:
+            vs_200 = (live - float(sma_200)) / float(sma_200) * 100.0
+    except (TypeError, ValueError):
+        vs_200 = None
+    if vs_200 is None:
+        vs_200 = deep.get("vs_sma200_pct")
     if vs_200 is None:
         spot = deep.get("spot") or tech.get("spot")
-        sma_200 = deep.get("sma_200") or tech.get("sma_200")
         try:
             if spot is not None and sma_200 is not None and float(sma_200) > 0:
                 vs_200 = (float(spot) - float(sma_200)) / float(sma_200) * 100.0

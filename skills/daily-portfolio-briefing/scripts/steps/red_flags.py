@@ -236,7 +236,14 @@ def compute_red_flags(
     # 4. Concentration over single-name cap (non-core)
     # ----------------------------------------------------------------
     config = (snapshot_data.get("_config") or {})
-    core = set((config.get("core_positions") or []))
+    # 2026-08-04 (PLTR): core = core_positions ∪ Tier A — a Tier A name
+    # "within Tier A bounds" per the drift alert must not simultaneously
+    # trip the non-core concentration red flag.
+    try:
+        from analysis.position_tiers import core_union as _core_union
+        core = _core_union(config)
+    except Exception:
+        core = set((config.get("core_positions") or []))
     cap = float(config.get("concentration_cap_pct", 10)) / 100.0
     concentrated_noncore: list[tuple[str, float]] = []
     for er in (equity_reviews or []):

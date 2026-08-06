@@ -5,6 +5,8 @@ Reads active directives, evaluates triggers, transitions expired ones.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 import yaml
 from pathlib import Path
 from datetime import datetime
@@ -48,8 +50,8 @@ def load_directives(snapshot_dir: Path) -> tuple:
     # Write to snapshot
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     with open(snapshot_dir / "directives_active.json", "w") as f:
-        json.dump(directives_active, f, indent=2)
+        json.dump(directives_active, f, indent=2, default=json_default)
     with open(snapshot_dir / "directives_expired_today.json", "w") as f:
-        json.dump(directives_expired, f, indent=2)
+        json.dump(directives_expired, f, indent=2, default=json_default)
 
     return directives_active, directives_expired

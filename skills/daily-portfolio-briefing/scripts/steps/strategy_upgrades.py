@@ -132,6 +132,35 @@ def _find_put_strike_by_delta(chain: dict, target_delta: float = 0.20, tolerance
     return candidates[0]
 
 
+def _tier_cap_ratio(symbol: str, params: dict | None, default_ratio: float) -> float:
+    """Tier-aware concentration cap as a 0..1 ratio (rule #29).
+
+    Explicit Tier A/B names use `concentration_cap_for_tier` (a deliberate
+    conviction call loosens the cap); core names (core_positions ∪ Tier A)
+    use at least the core soft cap. Everything else — and any config without
+    a `position_tiers` block — keeps `default_ratio` (legacy 10%), so the
+    framework stays a no-op until config opts in. 2026-08-04 (PLTR): render
+    paths still hardcoding the 10% cap contradicted the tier-aware drift
+    alert on the same run.
+    """
+    try:
+        from analysis.position_tiers import (
+            TIER_A, TIER_B, concentration_cap_for_tier, core_union, tier_for,
+        )
+        cap = default_ratio
+        sym = (symbol or "").upper()
+        if (params or {}).get("position_tiers"):
+            tier = tier_for(sym, params)
+            if tier in (TIER_A, TIER_B):
+                cap = max(cap, concentration_cap_for_tier(tier, params) / 100.0)
+        if sym in core_union(params or {}):
+            core_cap = float((params or {}).get("core_concentration_cap_pct", 18)) / 100.0
+            cap = max(cap, core_cap)
+        return cap
+    except Exception:
+        return default_ratio
+
+
 def _check_concentration(existing_weight_pct: float, new_collateral: float, nlv: float, cap: float = 0.10) -> dict:
     """Check if adding new collateral would breach concentration cap."""
     if nlv <= 0:
@@ -412,7 +441,9 @@ def compute_strategy_upgrades(
         put_collateral = strike * 100 * call_qty
 
         current_weight_pct = (qty * price) / nlv
-        conc_check = _check_concentration(current_weight_pct, put_collateral, nlv, concentration_cap)
+        conc_check = _check_concentration(
+            current_weight_pct, put_collateral, nlv,
+            _tier_cap_ratio(symbol, params, concentration_cap))
 
         # Compute premium
         mid = (put_strike_data.get("bid", 0) + put_strike_data.get("ask", 0)) / 2
@@ -639,11 +670,14 @@ def compute_strategy_upgrades(
         tier = position_tiers.tier_for(symbol, params)
         cc_settings = position_tiers.cc_settings_for_tier(tier, params)
 
-        # Tier A holdings get NO CC recommendation. Emit a transparency
-        # record into a separate section so the user can see the position
-        # was considered and deliberately left uncapped — never an actionable
-        # SELL_OPEN ticket.
-        if not position_tiers.is_cc_enabled_for_tier(tier, params):
+        # Tier A holdings get NO CC recommendation unless the ticker is on
+        # the `willing_to_write_cc_on` opt-in list (rule #34). Emit a
+        # transparency record into a separate section so the user can see the
+        # position was considered and deliberately left uncapped — never an
+        # actionable SELL_OPEN ticket. Rule-#43 fix: the ticker MUST be
+        # passed — without it the per-name opt-in can't gate, and the old
+        # tier-wide `enabled: true` short-circuit green-lit AMZN.
+        if not position_tiers.is_cc_enabled_for_tier(tier, params, ticker=symbol):
             upgrades.append({
                 "type": "tier_a_no_cc",
                 "underlying": symbol,
@@ -654,7 +688,9 @@ def compute_strategy_upgrades(
                 "rationale": (
                     f"{symbol} is classified Tier A (LT core compounder) — "
                     f"no covered-call recommendations. Holding {int(qty)} shares "
-                    f"uncapped to preserve full upside on a long-term position."
+                    f"uncapped to preserve full upside on a long-term position. "
+                    f"Opt in via covered_call_tiers.tier_a.willing_to_write_cc_on "
+                    f"to enable the strict-envelope write."
                 ),
             })
             continue
@@ -836,23 +872,74 @@ def compute_strategy_upgrades(
         tier_rsi_floor = int(cc_settings.get("rsi_floor", 0) or 0)
         if tier_rsi_floor and rsi_val is not None and rsi_val < tier_rsi_floor:
             tier_violations.append(
-                f"RSI {rsi_val:.0f} < Tier {tier} floor ({tier_rsi_floor})"
+                f"needs RSI ≥ {tier_rsi_floor} (now {rsi_val:.0f})"
             )
         if otm_pct_actual is not None and otm_pct_actual < tier_min_otm_pct:
             tier_violations.append(
-                f"strike {otm_pct_actual:.1f}% OTM < Tier {tier} floor "
-                f"({tier_min_otm_pct:.0f}% OTM)"
+                f"needs ≥{tier_min_otm_pct:.0f}% OTM "
+                f"(proposed {otm_pct_actual:.1f}%)"
             )
         if (cc_delta is not None
                 and abs(float(cc_delta)) > tier_max_delta + 1e-6):
             tier_violations.append(
-                f"delta {abs(float(cc_delta)):.2f} > Tier {tier} cap "
-                f"({tier_max_delta:.2f})"
+                f"needs delta ≤ {tier_max_delta:.2f} "
+                f"(measured {abs(float(cc_delta)):.2f})"
             )
         if actual_dte > tier_max_dte:
             tier_violations.append(
-                f"DTE {actual_dte} > Tier {tier} cap ({tier_max_dte}d)"
+                f"needs DTE ≤ {tier_max_dte}d (proposed {actual_dte}d)"
             )
+
+        # Rule-#43 fix: for the strict Tier A opt-in envelope and the Tier B
+        # conservative envelope, ANY violation demotes the write out of the
+        # actionable "✅ READY TO WRITE" list into the wait list — shown with
+        # the specific unmet conditions, never hidden (rule #24). Observed
+        # bug (2026-07-31 briefing): MSFT (Tier A opt-in) rendered
+        # "✅ READY TO WRITE" at RSI 74 / 11.7% OTM against the RSI ≥ 75 /
+        # ≥20% OTM envelope. Tier C is deliberately exempt — its envelope
+        # matches the legacy discipline already enforced elsewhere.
+        tier_envelope_wait = bool(
+            tier in (position_tiers.TIER_A, position_tiers.TIER_B)
+            and tier_violations
+        )
+
+        # Belt-and-suspenders (rule #43): run the pre-trade validator's
+        # Rule 13 (COVERED_CALL_TIER_VIOLATION) against the proposed
+        # contract and surface its finding on the card if it fires.
+        # Fail-open: any import/validation error → no finding, the
+        # generator-side envelope above remains the primary gate.
+        tier_validator_finding = None
+        try:
+            from analysis import pre_trade_validator as _ptv
+            _exp_for_ctx = date.today() + timedelta(days=max(int(actual_dte), 0))
+            _ctx = _ptv.PreTradeContext(
+                ticker=symbol,
+                strike=float(target_strike),
+                expiration=_exp_for_ctx,
+                option_type="CALL",
+                action="SELL_OPEN",
+                quantity=int(contracts_writable),
+                spot=price,
+                rsi=rsi_val,
+                sr_payload=(
+                    {"proposed_delta": abs(float(cc_delta))}
+                    if cc_delta is not None else None
+                ),
+                nlv=float(nlv),
+                held_shares=int(qty),
+                position_tier=tier,
+            )
+            _findings = _ptv.validate_proposed_trade(_ctx, config=params)
+            for _f in _findings:
+                if _f.rule_id == "COVERED_CALL_TIER_VIOLATION":
+                    tier_validator_finding = {
+                        "severity": _f.severity,
+                        "reason": _f.reason,
+                        "rule_id": _f.rule_id,
+                    }
+                    break
+        except Exception:  # pragma: no cover — fail-open by design
+            tier_validator_finding = None
 
         # When the chain fetcher snapped to an S/R cluster, surface it so the
         # rendered card can say "δ 0.24 · at $230 resistance (Mar high + 50-SMA,
@@ -862,8 +949,12 @@ def compute_strategy_upgrades(
         upgrade = {
             "type": "write_covered_call",
             "underlying": symbol,
-            "tier": tier,                       # 'A' (won't reach here), 'B', or 'C'
+            "tier": tier,                       # 'A' (opt-in only), 'B', or 'C'
             "tier_violations": tier_violations, # list of tier-discipline misses
+            # Rule #43: A/B envelope violation → demoted to the wait list
+            "tier_envelope_wait": tier_envelope_wait,
+            # Rule 13 belt-and-suspenders finding (or None)
+            "tier_validator": tier_validator_finding,
             "tier_max_delta": tier_max_delta,
             "tier_min_otm_pct": tier_min_otm_pct,
             "tier_rsi_floor": tier_rsi_floor,
@@ -944,8 +1035,8 @@ def compute_strategy_upgrades(
         cost = shares_to_buy * price
         post_buy_weight = (qty + shares_to_buy) * price / nlv if nlv > 0 else 0
 
-        # Skip if would breach concentration cap
-        if post_buy_weight > concentration_cap:
+        # Skip if would breach concentration cap (tier-aware — rule #29)
+        if post_buy_weight > _tier_cap_ratio(symbol, params, concentration_cap):
             continue
 
         # RSI discipline — completing a sub-lot BUYS shares, so route through
@@ -995,7 +1086,9 @@ def compute_strategy_upgrades(
         # "enable covered calls after completion" income projection on Tier A
         # holdings (where CCs are forbidden by policy, CLAUDE.md hard rule #29).
         _sublot_tier = position_tiers.tier_for(symbol, params)
-        _cc_enabled_after_lot = position_tiers.is_cc_enabled_for_tier(_sublot_tier, params)
+        _cc_enabled_after_lot = position_tiers.is_cc_enabled_for_tier(
+            _sublot_tier, params, ticker=symbol
+        )
 
         upgrade = {
             "type": "sublot_completion",

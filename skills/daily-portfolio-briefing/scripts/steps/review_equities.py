@@ -5,6 +5,8 @@ For each held equity, apply decision matrix to generate recommendation tag.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 from pathlib import Path
 
 
@@ -78,7 +80,7 @@ def review_equities(
 
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     with open(snapshot_dir / "equity_reviews.json", "w") as f:
-        json.dump(equity_reviews, f, indent=2)
+        json.dump(equity_reviews, f, indent=2, default=json_default)
 
     print(f"  Reviewed {len(equity_reviews)} equity positions")
     return equity_reviews

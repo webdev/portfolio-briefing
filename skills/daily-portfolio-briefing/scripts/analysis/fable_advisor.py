@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import date as _date_cls, datetime, timezone
@@ -154,6 +155,21 @@ Boundaries (hard):
   - **Respect standing directives.** If a note says "deferring AMD
     until X", DO NOT flag AMD as ignored. Score of continuity: you
     should recognize deferrals George has documented.
+  - **Pattern notes must survive contact with today's facts.** Before
+    repeating any recurring pattern note from <recent-reviews> (e.g.
+    "you have never executed a roll"), re-validate it against today's
+    briefing and any `<executed-rolls-this-session>` block. A
+    contradicted note is FALSIFIED: retire it with a one-line dated
+    correction ("Roll-avoidance note retired 2026-07-31 — user executed
+    7 rolls this week") and never repeat it in later reviews. Every
+    pattern note you carry forward must name its evidence and the
+    evidence date.
+  - **Count recurring patterns in SESSIONS with dates, never inferred
+    weeks.** Reviews can run daily or several times a day — "flagged in
+    12 sessions since Jul 3" is measurable from <recent-reviews>;
+    "thirty-third week" from a per-session counter is fabricated
+    duration. If you cannot date the first occurrence from
+    <recent-reviews>, do not number the pattern at all.
   - **No categorical market predictions.** Setups precede outcomes
     probabilistically. Never "SPY will drop" — instead "this setup
     historically precedes drawdowns."
@@ -334,16 +350,107 @@ def _write_memory_with_new_review(
         print(f"[fable-advisor] memory write failed: {e}", file=sys.stderr)
 
 
+# Matches the stale pattern-note phrasings the memory has actually carried
+# ("You have never executed a roll", "never executed a single roll",
+# "Roll-avoidance pattern — Nth week").
+_NEVER_ROLLS_PAT = re.compile(
+    r"never (?:executed|execute[sd]?) a (?:single )?roll|roll[- ]avoidance",
+    re.IGNORECASE,
+)
+
+
+def _roll_falsification_note(
+    recent_reviews: list[dict[str, str]] | None,
+    executed_rolls: list[dict] | None,
+    today_str: str,
+) -> str | None:
+    """Deterministic system correction (task #43 fix 1, 2026-07-31).
+
+    When the position diff detected executed rolls AND any past review in
+    memory carries a now-falsified "never rolls" / roll-avoidance pattern
+    note, return a one-line dated correction to append to TODAY's
+    auto-managed memory entry — so the falsification survives in memory
+    even if the LLM's prose doesn't retire the note itself. Never touches
+    the user's Notes section. None when there is nothing to correct."""
+    if not executed_rolls:
+        return None
+    if not any(_NEVER_ROLLS_PAT.search(e.get("text") or "")
+               for e in recent_reviews or []):
+        return None
+    names = sorted({str(r.get("underlying") or "?") for r in executed_rolls})
+    return (
+        f"_[system correction {today_str}: {len(executed_rolls)} executed "
+        f"roll(s) detected this session ({', '.join(names)}) — the standing "
+        f"\"never rolls\" / roll-avoidance pattern note is falsified; retire "
+        f"it and do not repeat it.]_"
+    )
+
+
 # ─── LLM call ──────────────────────────────────────────────────────────
+
+
+def _format_executed_roll(roll: dict) -> str:
+    """One evidence line per detected roll — measured fields only, `?` on
+    anything missing (never a fabricated leg)."""
+    und = roll.get("underlying") or "?"
+    t = ((roll.get("type") or "?")[:1]).upper()
+
+    def _leg(strike, exp) -> str:
+        try:
+            s = f"${float(strike):g}{t}"
+        except (TypeError, ValueError):
+            s = f"$?{t}"
+        return f"{s} {exp or '?'}"
+
+    return (f"- {und}: {_leg(roll.get('old_strike'), roll.get('old_exp'))} "
+            f"→ {_leg(roll.get('new_strike'), roll.get('new_exp'))}")
+
+
+def _executed_rolls_block(executed_rolls: list[dict] | None) -> str:
+    """Tagged evidence block for rolls the user EXECUTED this session
+    (task #43 fix 1, 2026-07-31).
+
+    Observed: the same review said 'Roll-avoidance pattern — thirty-third
+    week. You have never executed a roll.' AND 'NVDA roll detected.' —
+    while the position diff had detected 7 executed rolls that week
+    (META ×2, QCOM ×2, MU, VRT, NVDA). The prompt must hand the advisor
+    the falsifying evidence explicitly, with the retire instruction.
+    Empty/None → empty string (no block, no fabricated evidence)."""
+    if not executed_rolls:
+        return ""
+    entries = "\n".join(_format_executed_roll(r) for r in executed_rolls)
+    return (
+        "<executed-rolls-this-session>\n"
+        "The user HAS executed rolls. These were detected from the broker "
+        "position diff this cycle:\n"
+        f"{entries}\n"
+        "Any standing memory pattern-note claiming the user \"never rolls\" "
+        "/ \"has never executed a roll\" is now FALSIFIED — retire it in "
+        "your memory update with a one-line dated correction; do not "
+        "repeat it.\n"
+        "</executed-rolls-this-session>\n\n"
+    )
 
 
 def _build_user_message(
     briefing_text: str,
     user_notes: str,
     recent_reviews: list[dict[str, str]],
+    position_context: str | None = None,
+    executed_rolls: list[dict] | None = None,
 ) -> str:
-    """Assemble the user message with the three tagged sections the
-    system prompt references."""
+    """Assemble the user message with the tagged sections the system
+    prompt references.
+
+    `position_context` (optional) is deterministic per-position analysis the
+    pipeline computed this cycle — currently the exit-cost anatomy of
+    ITM/underwater short puts (analysis/exit_cost.py) — so Fable's review
+    can reason about intrinsic vs panic-IV extrinsic vs spread instead of
+    reacting to headline P&L. Omitted entirely when empty.
+
+    `executed_rolls` (optional) is the position-diff roll detection from
+    analysis/briefing_diff.detect_executed_rolls — falsification evidence
+    against stale "never rolls" pattern notes. Omitted entirely when empty."""
     notes_block = user_notes.strip() or "(no standing directives)"
 
     if recent_reviews:
@@ -354,9 +461,18 @@ def _build_user_message(
         reviews_block = ("(no prior reviews — this is your first daily "
                          "review for this client)")
 
+    context_block = ""
+    if position_context and position_context.strip():
+        context_block = (
+            f"<position-context>\n{position_context.strip()}\n"
+            f"</position-context>\n\n"
+        )
+
     return (
         f"<user-notes>\n{notes_block}\n</user-notes>\n\n"
         f"<recent-reviews>\n{reviews_block}\n</recent-reviews>\n\n"
+        f"{_executed_rolls_block(executed_rolls)}"
+        f"{context_block}"
         f"<todays-briefing>\n{briefing_text}\n</todays-briefing>"
     )
 
@@ -443,6 +559,8 @@ def generate_advisor_review(
     config: dict | None = None,
     memory_path: str | Path | None = None,
     today: _date_cls | None = None,
+    position_context: str | None = None,
+    executed_rolls: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Generate the advisor-style review over a finished briefing.
 
@@ -452,6 +570,16 @@ def generate_advisor_review(
         config: full config dict (reads `fable_advisor` section).
         memory_path: override for memory file location (tests).
         today: override for today's date (tests).
+        position_context: optional deterministic per-position analysis
+            (exit-cost anatomy summary) appended as a tagged section so the
+            review reasons about intrinsic/extrinsic/spread on underwater
+            short puts.
+        executed_rolls: optional list of rolls the user executed this
+            session (analysis/briefing_diff.detect_executed_rolls output).
+            Fed to the prompt as falsification evidence against stale
+            "never rolls" pattern notes, and — when memory carries such a
+            note — appended to today's memory entry as a deterministic
+            system correction (task #43 fix 1).
 
     Returns dict with:
         - status: "ok" | "disabled" | "no_api_key" | "api_error" | "empty_briefing"
@@ -524,7 +652,9 @@ def generate_advisor_review(
     input_briefing = briefing_markdown[:max_input]
     truncated = len(briefing_markdown) > max_input
 
-    user_message = _build_user_message(input_briefing, user_notes, recent_reviews)
+    user_message = _build_user_message(input_briefing, user_notes,
+                                       recent_reviews, position_context,
+                                       executed_rolls)
 
     started_at = time.time()
     ok, payload = _call_anthropic(
@@ -610,10 +740,18 @@ def generate_advisor_review(
         _cache(snapshot_dir, result)
         return result
 
-    # SUCCESS — write today's review back to memory
+    # SUCCESS — write today's review back to memory. When the position
+    # diff falsified a standing "never rolls" pattern note, a deterministic
+    # dated system correction rides along in TODAY's auto-managed entry
+    # (task #43 fix 1) — the user's Notes section is never touched.
     today_str = (today or _date_cls.today()).isoformat()
+    memory_text = review_text
+    _correction = _roll_falsification_note(recent_reviews, executed_rolls,
+                                           today_str)
+    if _correction:
+        memory_text = review_text.rstrip() + "\n\n" + _correction
     _write_memory_with_new_review(
-        mem_path, parsed_memory, review_text, today_str, keep_n
+        mem_path, parsed_memory, memory_text, today_str, keep_n
     )
 
     result = {

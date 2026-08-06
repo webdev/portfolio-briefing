@@ -482,15 +482,22 @@ def age_actions(today_actions: list, state: dict, reconciliation: dict,
 # Rendering
 # ---------------------------------------------------------------------------
 
-def render_stalled_panel(aged: dict) -> list[str]:
+def render_stalled_panel(aged: dict, suppressed=None) -> list[str]:
     """Render the "## ⛔ Stalled Items" section for items ≥ STALLED_DAYS days.
 
     Returns [] when nothing is stalled. By design this panel goes at the VERY
     TOP of the briefing, above the header — stalled items are the first thing
     the operator sees.
+
+    ``suppressed`` (bug #25): optional set of action keys held by a standing
+    directive (``aging_info["directive_suppressed"]``). Those items are
+    SKIPPED — the user is following a documented directive, not ignoring the
+    recommendation, so promoting them to the stalled panel is wrong.
     """
+    suppressed = set(suppressed or ())
     stalled = [(k, v) for k, v in (aged or {}).items()
-               if int(v.get("days_flagged", 0) or 0) >= STALLED_DAYS]
+               if int(v.get("days_flagged", 0) or 0) >= STALLED_DAYS
+               and k not in suppressed]
     if not stalled:
         return []
     stalled.sort(key=lambda kv: -int(kv[1].get("days_flagged", 0) or 0))
@@ -514,6 +521,54 @@ def render_stalled_panel(aged: dict) -> list[str]:
         )
     lines.append("")
     return lines
+
+
+# ── Action-list priority weighting ─────────────────────────────────────────
+# Priority = obligation_at_risk × urgency_class; staleness is a TIEBREAKER,
+# not the primary key. (2026-07-29 bug: IREN ROLL_OUT — $4.7K collateral,
+# ⏳ 6 days — ranked #1 all week purely on staleness while META's $115K
+# loss-stopped, earnings-day CLOSEs sat at #4-5.)
+
+_URGENT_MARKER_RE = re.compile(
+    r"🚨|URGENT|LOSS[ _-]?STOP|CLOSE NOW", re.IGNORECASE)
+_EARNINGS_DAYS_RE = re.compile(
+    r"earnings[^\n]{0,60}?(\d+)\s*d\b", re.IGNORECASE)
+_DOLLAR_AMT_RE = re.compile(r"\$\s*-?([\d,]+(?:\.\d+)?)")
+
+
+def _urgency_class(block_text: str) -> int:
+    """3 = loss-stop / URGENT / earnings ≤2d; 2 = earnings ≤7d; 1 = default
+    (including merely-stalled items — staleness is not urgency)."""
+    if _URGENT_MARKER_RE.search(block_text):
+        return 3
+    m = _EARNINGS_DAYS_RE.search(block_text)
+    if m:
+        try:
+            d = int(m.group(1))
+        except ValueError:
+            return 1
+        if d <= 2:
+            return 3
+        if d <= 7:
+            return 2
+    return 1
+
+
+def _obligation_at_risk(block_text: str, ident: str) -> float:
+    """Dollar scale of the position the action concerns. Contract idents
+    give strike × 100 (per-contract obligation — the reliable, deterministic
+    read); otherwise the largest dollar figure in the block; fallback $1K so
+    urgency alone can still differentiate."""
+    c = _parse_contract(ident or "")
+    if c and c.get("strike"):
+        return float(c["strike"]) * 100.0
+    amts = []
+    for a in _DOLLAR_AMT_RE.findall(block_text):
+        try:
+            amts.append(float(a.replace(",", "")))
+        except ValueError:
+            continue
+    return max(amts) if amts else 1000.0
 
 
 def _split_action_blocks(items: list[str]) -> tuple[list[list[str]], list[str]]:
@@ -570,6 +625,23 @@ def apply_aging_to_action_items(items: list[str], aging_info: dict) -> list[str]
             seen.add(a["key"])
             today_actions.append(a)
 
+    # Fix 4 (2026-08-04): synthetic actions — items vacated from the numbered
+    # list (hedge-nag) whose aging clock must keep ticking and whose
+    # ⛔ Stalled Items entry must remain. They join today's actions for
+    # aging/state/JSON-export purposes but have no rendered block.
+    for sa in (aging_info.get("synthetic_actions") or []):
+        if not isinstance(sa, dict):
+            continue
+        key = sa.get("key") or action_key(sa.get("kind", ""), sa.get("ident", ""))
+        if key and key not in seen:
+            seen.add(key)
+            today_actions.append({
+                "key": key,
+                "kind": normalize_kind(sa.get("kind", "")),
+                "ident": normalize_ident(sa.get("ident", "")),
+                "summary": sa.get("summary", ""),
+            })
+
     updated_state, aged = age_actions(
         today_actions, aging_info.get("state") or {},
         aging_info.get("reconciliation") or {}, today_iso,
@@ -589,29 +661,32 @@ def apply_aging_to_action_items(items: list[str], aging_info: dict) -> list[str]
         for k, v in aged.items()
     ]
 
-    # Annotate blocks
-    annotated: list[tuple[bool, list[str]]] = []  # (is_tier1, block)
+    # Annotate blocks + compute priority = obligation_at_risk × urgency_class
+    annotated: list[tuple[float, int, list[str]]] = []  # (priority, days, block)
     for b, key in zip(blocks, block_keys):
         info = aged.get(key) if key else None
-        if not info:
-            annotated.append((False, b))
-            continue
-        days = int(info.get("days_flagged", 0) or 0)
+        days = int(info.get("days_flagged", 0) or 0) if info else 0
         block = list(b)
-        if days >= TIER1_DAYS:
-            block[0] = block[0].rstrip() + f"  ⏳ IGNORED {days} DAYS"
-        if days >= PROMPT_DAYS:
-            block.append(
-                "   - **⛔ DECISION REQUIRED:** Execute today, or file a "
-                "directive (DEFER/OVERRIDE with reason) — this item will not "
-                "silently repeat."
-            )
-        annotated.append((days >= TIER1_DAYS, block))
+        if info:
+            if days >= TIER1_DAYS:
+                block[0] = block[0].rstrip() + f"  ⏳ IGNORED {days} DAYS"
+            if days >= PROMPT_DAYS:
+                block.append(
+                    "   - **⛔ DECISION REQUIRED:** Execute today, or file a "
+                    "directive (DEFER/OVERRIDE with reason) — this item will not "
+                    "silently repeat."
+                )
+        block_text = "\n".join(b)  # un-annotated text (⏳ tag must not affect scoring)
+        ident = (key or "").partition(":")[2]
+        priority = _obligation_at_risk(block_text, ident) * _urgency_class(block_text)
+        annotated.append((priority, days, block))
 
-    # Stable reorder: Tier-1 aged items first, then the rest in original
-    # priority order (the renderer's order already encodes priority).
-    ordered = ([blk for t1, blk in annotated if t1]
-               + [blk for t1, blk in annotated if not t1])
+    # Stable reorder: highest (obligation × urgency) first; staleness
+    # (days_flagged) is the tiebreaker, then the renderer's original order
+    # (which already encodes category priority). A stalled $4.7K roll must
+    # never outrank a loss-stopped $115K close just because it's older.
+    ordered = [blk for _p, _d, blk in
+               sorted(annotated, key=lambda t: (-t[0], -t[1]))]
 
     out: list[str] = []
     for i, blk in enumerate(ordered[:HEADLINE_CAP], start=1):
@@ -705,4 +780,7 @@ def build_aging_context(today_iso: str, snapshot_root: Path, state_path: Path,
         "state": load_state(state_path),
         "state_path": str(state_path),
         "reconciliation": reconciliation,
+        # Task #40 fix 9: the previous day's positions list rides along so
+        # the Since-Yesterday panel can detect user-executed rolls.
+        "prev_positions": prev_positions,
     }

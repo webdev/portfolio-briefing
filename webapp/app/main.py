@@ -453,6 +453,14 @@ def _wire_routes(app: FastAPI) -> None:
             # the Ideas tab never shows ONLY a capacity-blocked placeholder.
             merged_ideas = ideas.build_merged_ideas(briefing)
 
+            # Rule #43 UX (GOOG $345P, 2026-08-04): the tab badge counts
+            # ONLY actionable ideas; waiting/gated cards render in muted
+            # sections so a demoted ticket never reads as a rec.
+            ideas_groups = ideas.group_merged_ideas(merged_ideas)
+            ideas_actionable_count, ideas_gated_count = (
+                ideas.ideas_badge_counts(merged_ideas)
+            )
+
             # Task #17 — the Strategy tab is retired. CC/collar proposals
             # attach to the Options tab (inline affordance on the matching
             # option card, or a "Strategy proposals" subsection); sub-lot
@@ -495,6 +503,9 @@ def _wire_routes(app: FastAPI) -> None:
                     neighbor_dates=neighbor_dates,
                     counterpoint_keys=set(cmap.keys()),
                     merged_ideas=merged_ideas,
+                    ideas_groups=ideas_groups,
+                    ideas_actionable_count=ideas_actionable_count,
+                    ideas_gated_count=ideas_gated_count,
                     strategy_attached=strategy_attached,
                     strategy_standalone=strategy_standalone,
                     strategy_affordance_label=unified_card.strategy_affordance_label,

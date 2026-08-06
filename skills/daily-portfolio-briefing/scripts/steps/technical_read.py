@@ -213,7 +213,12 @@ def render_technical_read_sections(
     technicals = (snapshot_data or {}).get("technicals") or {}
     positions = (snapshot_data or {}).get("positions") or []
     equity, puts, calls = _position_states(positions)
-    core = {str(t).upper() for t in ((config or {}).get("core_positions") or [])}
+    # 2026-08-04 (PLTR): core = core_positions ∪ Tier A (position_tiers).
+    try:
+        from analysis.position_tiers import core_union as _core_union
+        core = _core_union(config or {})
+    except Exception:
+        core = {str(t).upper() for t in ((config or {}).get("core_positions") or [])}
 
     shown: set = set()
 

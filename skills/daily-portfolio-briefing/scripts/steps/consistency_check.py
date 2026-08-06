@@ -5,6 +5,8 @@ Compare today's recommendations to yesterday's. Flag flips without triggers.
 """
 
 import json
+
+from analysis.json_utils import json_default  # belt-and-suspenders: Decimal/date/Path/set-safe dumps (2026-08-04)
 from pathlib import Path
 
 
@@ -42,8 +44,8 @@ def check_consistency(
 
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     with open(snapshot_dir / "consistency_report.json", "w") as f:
-        json.dump(consistency_report, f, indent=2)
+        json.dump(consistency_report, f, indent=2, default=json_default)
     with open(snapshot_dir / "inconsistencies.json", "w") as f:
-        json.dump(flagged_inconsistencies, f, indent=2)
+        json.dump(flagged_inconsistencies, f, indent=2, default=json_default)
 
     return consistency_report, flagged_inconsistencies

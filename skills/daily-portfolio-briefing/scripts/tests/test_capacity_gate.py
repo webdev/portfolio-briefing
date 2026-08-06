@@ -164,7 +164,7 @@ def _render_pullback(monkeypatch, analytics):
 def test_pullback_csp_tagged_when_coverage_below_floor(monkeypatch):
     md = _render_pullback(monkeypatch,
                           {"stress_coverage": {"coverage_ratio": 0.16}})
-    assert "**PULLBACK CSP** VRT" in md       # still fully rendered (rule #24)
+    assert "**CSP — PAID-TO-WAIT** VRT" in md  # still fully rendered (rule #24)
     assert DEFERRED_TAG in md
     assert "0.16" in md
 
@@ -172,7 +172,7 @@ def test_pullback_csp_tagged_when_coverage_below_floor(monkeypatch):
 def test_pullback_csp_untagged_when_coverage_healthy(monkeypatch):
     md = _render_pullback(monkeypatch,
                           {"stress_coverage": {"coverage_ratio": 0.85}})
-    assert "**PULLBACK CSP** VRT" in md
+    assert "**CSP — PAID-TO-WAIT** VRT" in md
     assert DEFERRED_TAG not in md
 
 

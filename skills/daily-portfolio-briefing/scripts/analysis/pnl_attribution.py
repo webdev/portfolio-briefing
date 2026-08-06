@@ -15,9 +15,12 @@ Buckets (per period; economic reads, inferred):
   option_premium_net  cash from newly opened short options (premiumReceived)
                       minus estimated buyback cost of closed shorts (prior
                       mark); expired-worthless shorts cost nothing to close
-  option_mtm          Δ mark on short options held across both snapshots
-                      (informational — the pipeline NLV = cash + equity MV
-                      excludes option marks, so this does NOT feed ΔNLV)
+  option_mtm          Δ mark on short options held across both snapshots.
+                      Since the 2026-08-04 NLV correction (and the
+                      recompute_nlv_history.py migration of older
+                      snapshots), NLV includes signed option marks — so the
+                      option-mark delta DOES feed ΔNLV and is part of the
+                      explained change in the residual reconciliation below.
   assignment_pnl      detected put assignments: shares × (spot − strike).
                       Estimate; also keeps that contract's premium.
   hedge_pnl           long options (protective puts / LEAPs): Δ mark on held
@@ -54,9 +57,13 @@ from analysis.benchmark_tracker import (
     SNAPSHOT_TOLERANCE_DAYS,
     _coerce_date,
     _DATE_DIR_RE,
+    balance_nlv,
+    balance_option_inclusive,
     clean_nlv_history,
-    load_nlv_history,
+    effective_rebase_date,
+    load_nlv_history_meta,
     nearest_value,
+    rebase_dates_from_config,
 )
 
 BUCKET_KEYS = [
@@ -209,10 +216,11 @@ def compute_attribution(current_snapshot: dict, prior_snapshot: dict,
 
         cur_bal = (current_snapshot or {}).get("balance") or {}
         pri_bal = (prior_snapshot or {}).get("balance") or {}
-        pa.nlv_start = _f(pri_bal.get("accountValue"),
-                          _f(pri_bal.get("longMarketValue")) + _f(pri_bal.get("cash")))
-        pa.nlv_end = _f(cur_bal.get("accountValue"),
-                        _f(cur_bal.get("longMarketValue")) + _f(cur_bal.get("cash")))
+        # 2026-08-05 defect 1: prefer accountValue_corrected (option-mark-
+        # inclusive recompute) so pre-correction inflated NLVs never mix
+        # with broker-true NLVs inside one period.
+        pa.nlv_start = _f(balance_nlv(pri_bal))
+        pa.nlv_end = _f(balance_nlv(cur_bal))
         pa.nlv_change = pa.nlv_end - pa.nlv_start
         cash_change = _f(cur_bal.get("cash")) - _f(pri_bal.get("cash"))
 
@@ -352,11 +360,31 @@ def compute_attribution(current_snapshot: dict, prior_snapshot: dict,
         b["interest_dividends"] = cash_change - inferred_cash
 
         # ── Residual vs pipeline ΔNLV ────────────────────────────────────
-        # Pipeline NLV = cash + equity MV (positions), so:
-        #   ΔNLV(balance) − [cash_change + Δequity_MV(positions)]
-        # is pure balance-vs-positions inconsistency (skipped prices,
-        # rounding, account-scope drift). Should be ~0; large = bug.
-        pa.unattributed = pa.nlv_change - (cash_change + delta_equity_mv)
+        # When BOTH endpoint NLVs are option-mark-inclusive (broker-true era
+        # or migrated via accountValue_corrected), the explained change is
+        #   cash_change + Δequity_MV + Δoption_MV(positions)
+        # — omitting the option-mark delta was the 2026-08-05 defect: the
+        # briefing showed "Unattributed (residual): -$65,345 ⚠️ (large
+        # residual — balance vs positions disagree; investigate)" purely
+        # because the start NLV excluded short-option marks while the end
+        # NLV included them. Legacy (both-exclusive) periods keep the old
+        # formula; a MIXED period gets an explicit note — never silent.
+        delta_option_mv = (
+            sum(_option_mark(p) for p in cur_op.values())
+            - sum(_option_mark(p) for p in pri_op.values())
+        )
+        cur_inclusive = balance_option_inclusive(cur_bal)
+        pri_inclusive = balance_option_inclusive(pri_bal)
+        explained = cash_change + delta_equity_mv
+        if cur_inclusive and pri_inclusive:
+            explained += delta_option_mv
+        elif cur_inclusive != pri_inclusive:
+            pa.notes.append(
+                "NLV conventions differ across this period (one endpoint "
+                "excludes option marks) — residual includes the option-mark "
+                "gap; run scripts/recompute_nlv_history.py to correct the "
+                "older snapshot")
+        pa.unattributed = pa.nlv_change - explained
         return pa
     except Exception as e:  # noqa: BLE001 — fail-open
         pa.notes.append(f"attribution failed: {e}")
@@ -425,21 +453,39 @@ def _cash_drag(snapshot_root: Path, dates_in_period: list[date],
 
 def build_attribution_report(snapshot_root: Path, as_of=None,
                              spy_closes: dict | None = None,
-                             min_snapshots: int = 2) -> AttributionReport:
+                             min_snapshots: int = 2,
+                             config: dict | None = None) -> AttributionReport:
     """Daily / 30d / since-month-end / YTD attribution from the snapshot
-    store. Fail-open: 'unavailable' report on any error."""
+    store. Fail-open: 'unavailable' report on any error.
+
+    ``config`` is the benchmark_tracking section — reads ``nlv_rebase_dates``
+    (belt-and-suspenders: only fires when the NLV-correction migration could
+    not cover the full history)."""
     try:
         as_of_d = _coerce_date(as_of) or date.today()
         dates = [d for d in _snapshot_dates(snapshot_root) if d <= as_of_d]
         report = AttributionReport(status="ok", as_of=as_of_d)
+        hist_all, uncorrected = load_nlv_history_meta(snapshot_root)
+        hist_all = {d: v for d, v in hist_all.items() if d <= as_of_d}
+        # Configured rebase (2026-08-04 NLV correction): applies ONLY when an
+        # uncorrectable pre-rebase snapshot remains in the series.
+        rb = effective_rebase_date(hist_all, uncorrected,
+                                   rebase_dates_from_config(config))
+        if rb is not None:
+            dropped_rb = sum(1 for d in hist_all if d < rb)
+            hist_all = {d: v for d, v in hist_all.items() if d >= rb}
+            dates = [d for d in dates if d >= rb]
+            report.note = (f"NLV rebase applied at {rb.isoformat()} — "
+                           f"{dropped_rb} uncorrectable pre-correction "
+                           f"snapshot(s) excluded")
         # Exclude history before an NLV discontinuity (deposit / account-scope
         # change) — attribution across such a break is garbage. Same guard as
         # the benchmark side; visible via the note, never silent.
-        cleaned, disc_note = clean_nlv_history(
-            {d: v for d, v in load_nlv_history(snapshot_root).items() if d <= as_of_d})
+        cleaned, disc_note = clean_nlv_history(hist_all)
         if disc_note:
             dates = [d for d in dates if d in cleaned]
-            report.note = disc_note
+            report.note = ((report.note + "; " if report.note else "")
+                           + disc_note)
         if len(dates) < min_snapshots:
             report.status = "insufficient_history"
             report.note = f"only {len(dates)} snapshot(s) — need ≥ {min_snapshots}"

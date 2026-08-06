@@ -121,6 +121,12 @@ benchmark_tracking:
   enabled: true                # ON by default — this is core to the strategy
   benchmark_ticker: SPY        # tunable to VOO, VTI, QQQ etc.
   min_snapshots_for_report: 5  # skip if too little history
+  # 2026-08-04 NLV correction: history through 2026-08-03 stored accountValue
+  # WITHOUT short-option marks. scripts/recompute_nlv_history.py writes
+  # accountValue_corrected alongside the original; a rebase date below fires
+  # ONLY for any uncorrectable prefix (belt and suspenders — no-op when the
+  # migration covered the full history).
+  nlv_rebase_dates: ["2026-08-04"]
   # windows:                   # optional override of the default windows
   #   - {name: "30d", days: 30}
   #   - {name: "90d", days: 90}
@@ -194,6 +200,13 @@ concentration_cap_pct: 10
 core_concentration_cap_pct: 18
 core_runaway_cap_pct: 22
 
+# 2026-08-04 fix 4 — hedge-nag resolution: after this many consecutive
+# IGNORED sessions, the HEDGE action vacates the numbered action list
+# (it stops outranking money actions). It remains in ⛔ Stalled Items and
+# the 💰 Money Plan as a standing question, with ready-to-paste directive
+# templates (defer-until-coverage / hedge-now-at-half-size).
+hedge_nag_days: 14
+
 # Long-term-opportunity-advisor target weights:
 #   default_target_weight_pct — non-core (5%). LT TRIM triggers at 1.5× = 7.5%
 #   core_target_weight_pct    — core (12%). LT TRIM triggers at 1.5× = 18%
@@ -243,6 +256,90 @@ wheel:
 # harvest long-dated time-value premium. Core names may extend 3× longer.
 roll:
   max_action_tenor_days: 120             # reject action-list rolls longer than this (non-core)
+  # Task #40 fix 2 (2026-07-30): churn guard — no roll recommendation on a
+  # contract opened within this many TRADING days (VRT $280P filled 2:23 PM,
+  # re-roll recommended 2:54 PM). Loss-stop/crash guardrails are exempt —
+  # safety always wins. Age measured from prior snapshots' position lists;
+  # unmeasurable age never fires the guard (fail-open).
+  min_position_age_days: 5
+  # Task #40 fix 5: debit-to-collateral sanity cap — a proposed roll debit
+  # above this fraction of the NEW leg's collateral demotes the roll to a
+  # Watch note (IREN: $652 debit on $3,700 collateral = 18%); the exit-cost
+  # verdict proposes the alternative (close / take assignment).
+  max_debit_pct_of_collateral: 0.08
+
+# Task #43 defect 3 (2026-07-31, AMD $420P): standing hold directives whose
+# release conditions predate an earnings print are PAUSED (not deleted) when
+# earnings are within this many days AND capture ≥ 25% — the CLOSE surfaces
+# with a "directive paused" note so the user decides before the binary.
+# Directives containing the phrase "through earnings" are exempt.
+directives:
+  earnings_release_days: 7
+
+# Task #40 fix 4 (2026-07-30, LITE $700P): when a roll is earnings-blocked
+# AND the position has recovered to better than max_loss_pct of premium AND
+# earnings are ≤ 14d away → surface CLOSE INTO RECOVERY (exit flat, remove
+# the binary, re-enter post-print). Outranks the ROLL_DONT_CLOSE exit-cost
+# verdict — that verdict optimizes premium mechanics, not event risk.
+recovery_close:
+  max_loss_pct: 0.05          # "recovered" = loss ≤ 5% of premium received
+
+# Strike-tested discipline (task #38, 2026-07-30 — the MU $950P Jul-22 miss:
+# a put being TESTED at low profit fell to DEFAULT_HOLD; a week later the
+# roll cost $4,700). The wheel-roll-advisor's GUARDRAIL_STRIKE_TESTED covers
+# DTE ≥ 21 (see wheel-roll-advisor/references/wheel_parameters.yaml →
+# strike_tested); below that, the action list forces the decision. Every key
+# has an in-code default.
+strike_tested:
+  forced_decision_dte: 21     # tested short puts at/below this DTE get a ⛔ mandatory decision item
+
+# Credit-window indicator (task #38) — classify each held short put's
+# same-or-lower-strike roll economics (open / closing / debit_only / unknown)
+# from the advisor's priced candidates; render in the Watch panel and alert
+# on open→closing / open→debit_only transitions vs the previous briefing.
+credit_window:
+  closing_threshold_per_share: 0.50   # credit/share at/above → window OPEN
+  max_tenor_days: 365                 # ignore candidates extending beyond this
+
+# Exit-cost anatomy (2026-07-29 LITE $700P lesson) — before surfacing a
+# buy-to-close on an ITM/underwater short put, decompose the buyback into
+# intrinsic / extrinsic / spread from the live chain and say whether closing,
+# rolling, or assignment is the cheaper exit. Closing at IV highs pays away
+# panic premium; a roll-down-and-out is IV-neutral. Fail-closed: no chain
+# quote this cycle → "verify at broker", never a fabricated number. Verdicts
+# never override the loss-stop guardrail (no bare HOLD when it fired).
+# See scripts/analysis/exit_cost.py. Every key has an in-code default.
+exit_cost:
+  enabled: true
+  # Task #37 fix 1: the verdict DRIVES the action list — CLOSE_CLEAN /
+  # CLOSE_AFTER_CRUSH / CLOSE_URGENT convert a composed EXECUTE ROLL into a
+  # plain CLOSE ticket (rule #14: defer to the position's own advisor).
+  # Set false to restore annotate-only behavior.
+  verdict_drives_action: true
+  # 2026-08-04 fix 1: ONE-VOICE rule — a card carries exactly ONE
+  # recommendation. A profitable take-profit CLOSE whose verdict is
+  # ROLL_DONT_CLOSE resolves to TAKE PROFIT VIA ROLL-DOWN (two-leg ticket)
+  # or, when no credit-positive roll-down is priced, HOLD — GTC at the
+  # 50%-capture price — never a CLOSE headline contradicted by an inline
+  # "ROLL, don't close" verdict (the VRT $280P card). Kill switch.
+  one_voice: true
+  extrinsic_clean_pct: 0.15     # extrinsic < 15% of mid → CLOSE_CLEAN (cheap exit)
+  extrinsic_pumped_pct: 0.30    # extrinsic > 30% of mid → ROLL_DONT_CLOSE candidate
+  iv_elevated_rank: 60          # IV rank at/above this counts as "elevated"
+  wide_spread_pct: 0.08         # spread > 8% of mid → work a GTC limit at mid
+  wide_spread_abs: 2.00         # spread > $2.00/share → work a GTC limit at mid
+  min_dte_for_roll: 21          # roll-don't-close needs at least this much runway
+
+# Close-winner dollar action floor (rule #43 micro-fix, 2026-08-04 — the
+# observed "CLOSE AMZN_CALL_330_20260904 — +30% ($+27)" card: a
+# recommendation to bank twenty-seven dollars; commissions/spread eat a
+# meaningful fraction and it occupies an action slot). A take-profit CLOSE
+# whose banked profit is below this floor demotes to a Watch-panel note
+# ("let it decay or close at your convenience"). Exceptions that ALWAYS
+# surface regardless of the floor: pre-print closes (earnings ≤ 2d),
+# loss-stops, CLOSE_URGENT/recovery verdicts, gamma-week (DTE ≤ 10) closes
+# on short puts. Set 0 to disable the floor.
+close_winner_min_dollars: 100
 
 # Covered-call strike selection — DELTA-FIRST (volatility-adaptive). The same
 # delta sits further OTM on a high-IV name (more headroom) and closer on a
@@ -289,6 +386,23 @@ rsi_discipline:
     favored_above: 60           # extended → rich premium, favored to write
     caution_below: 60           # mid-range → warn (caps upside cheaply)
     block_below: 35             # oversold → suppress new covered calls
+  # RSI 60-70 on a NEW put-sale (LT_CSP / PULLBACK CSP / income opportunity /
+  # candidate CSP) demotes it to a "⏸ CSPs — wait for a pullback" subsection —
+  # full ticket shown (rule #24), never a numbered actionable rec. Set to null
+  # to disable (the >70 hard block above is unchanged). Rule #43, 2026-07-31.
+  put_extended_wait_band: [60, 70]
+
+# Post-gap IV-rank honesty (rule #43, AMZN 2026-07-31): the IV rank is a
+# 252-day REALIZED-vol percentile — a recent earnings gap inflates it while
+# implied premium crushes post-print. When a rec's rationale claims "fat
+# premium" at rank ≥ min_rank but the DELIVERED annualized yield (from the
+# actual quoted premium) is below min_yield_for_fat_claim, the claim is
+# rewritten honestly (gap-aware) + the reconsider note fires. Fail-open on
+# missing data. See scripts/analysis/iv_honesty.py.
+iv_gap_check:
+  min_rank: 60                  # only cross-check "fat" claims at/above this rank
+  min_yield_for_fat_claim: 0.20 # delivered annualized yield below 20% = thin
+  gap_threshold_pct: 8          # |1d/2d move| ≥ 8% within last 3 sessions = gap
 
 # Intrinsic value — attach a fair-value read (FMP DCF + analyst price-target
 # consensus) to EVERY single-stock recommendation. ETFs are labelled
@@ -299,6 +413,27 @@ intrinsic_value:
   enabled: true
   ttl_hours: 24                 # cache fair values for a day (FMP free-tier friendly)
   etf_tickers: []               # extra ETFs to treat as baskets (merged with defaults)
+
+# Same-cycle vintage guard — never mix pre-gap technicals with live quotes on
+# one card. When a name's live quote has moved more than max_intraday_move_pct
+# from the close its technicals were computed at (yfinance previous close),
+# stale "RSI favourable" promotions are stripped (RSI tagged pre-gap, never
+# recomputed/fabricated) and 200-SMA distances are recomputed at live spot.
+vintage_guard:
+  enabled: true
+  max_intraday_move_pct: 0.05   # 5% intraday move vs technicals' close
+
+# Rule #43 (GOOG 2026-08-03) — LTO reference demotion. A fully-gated LTO/CSP
+# card (equity-stacking ⛔ hard-skip, stale qualifying RSI per the vintage
+# guard, or ≥2 independent hard gates) loses its numbered "Trade:" slot and
+# moves to the unnumbered "📎 Shown for reference — not actionable today"
+# subsection at the END of the LTO section (full ticket preserved, rule #24).
+# Capacity gate alone NEVER demotes — deferred-for-capacity cards keep their
+# numbered planning value (rules #24 / #41).
+lto_reference_demotion:
+  enabled: true
+  stale_rsi_demotes: true
+  hard_skip_demotes: true
 
 # Position tier framework (CLAUDE.md hard rule #29) — controls how
 # aggressively the system writes covered calls and manages concentration
@@ -349,7 +484,10 @@ covered_call_tiers:
   tier_a:
     # STRICT mode (the original Tier A gate): fires only when the name is
     # genuinely overbought (RSI ≥ 75). Prevents capping rebounds.
-    enabled: false
+    # ENABLED 2026-07-07 per user request (task #19) — combined with the
+    # per-name opt-in below, only NVDA and MSFT are eligible under this
+    # punitive envelope; META/GOOG/SPY/AMZN remain untouched.
+    enabled: true
     rsi_floor: 75
     min_otm_pct: 20.0
     max_delta: 0.10
@@ -360,8 +498,9 @@ covered_call_tiers:
 
     # Per-name opt-in list — REQUIRED for a specific Tier A name to be
     # eligible under either strict or engineered mode below.
-    # Example: [MSFT, META] allows conservative CCs on those two names.
-    willing_to_write_cc_on: []
+    # 2026-07-07: NVDA + MSFT — user's rally names where he's willing to
+    # write when they're genuinely stretched (rule #34).
+    willing_to_write_cc_on: [NVDA, MSFT]
 
     # ENGINEERED mode (task #47): the "smart middle ground" that fires
     # even when RSI < 75, provided the strike is REBOUND-PROOF — above
@@ -377,7 +516,11 @@ covered_call_tiers:
     # Rationale: "smart CC on a Tier A compounder in drawdown — collect
     # rich premium at zero rebound-cap risk."
     engineered:
-      enabled: false            # opt in per-user; keeps old behavior as default
+      # ENABLED 2026-07-07 per user request (task #19) — the "smart middle
+      # ground" that catches Tier A compounders in real drawdown with rich
+      # IV. Only fires on names in willing_to_write_cc_on (currently NVDA,
+      # MSFT) — so META/GOOG/SPY are still hard-blocked.
+      enabled: true
       rsi_floor: 40             # not falling-knife
       min_drawdown_pct: 10.0    # rebound room exists
       min_iv_rank: 70           # premium worth the trade
@@ -418,6 +561,97 @@ concentration_caps:
   tier_b_max_pct: 12.0
   tier_c_max_pct: 8.0
   default_max_pct: 10.0
+
+# Task #22 — Actionable Rotation Playbook: close all freeable winner CSPs
+# (>=30% capture, not directive-held) and redeploy the freed collateral into
+# conviction-ranked deferred CSP candidates. Rendered after CSP Rotations.
+rotation_playbook:
+  enabled: true
+  min_freed_collateral_usd: 30000     # skip playbook if less than this available
+  max_opens: 8                        # cap the number of new entries
+  deploy_target_pct: 0.90             # aim to deploy 90% of freed, keep 10% cushion
+  # Task #27: floor lowered 6 -> 4 so a fresh tier-2 borderline BUY + Medium
+  # (2x2x1 = 4) qualifies; no-rec names (score <= 3) stay below the floor.
+  min_conviction_score: 4             # skip candidates below this score
+  diversify_max_same_ticker: 1        # max entries per underlying (default 1)
+  # Rule #39 playbook exception: a FRESH (<=14d) Parkev BUY with High
+  # conviction may override the LT-verdict gate — admitted with the -3
+  # score penalty and a visible warning, never silently. Set false to
+  # disable the exception entirely (strict rule #39).
+  lt_override_fresh_high_conviction: true
+  # Task #27 widening of the exception: fresh Parkev BUY-variant with
+  # (High + tier>=3) OR (Medium + tier>=3 + drawdown>=30%) overrides —
+  # still with the -3 penalty and the visible warning. Set false to revert
+  # to the strict High-only exception (kill switch).
+  lt_override_medium_conviction: true
+  # Task #27: pre-trade validator WARN findings (e.g. STRIKE_NOT_AT_SUPPORT)
+  # annotate the candidate as warnings instead of affecting selection.
+  # BLOCK findings still hard-exclude regardless of this flag.
+  treat_warn_as_annotation: true
+  # Rule #43 (RDDT 2026-07-31): a single-stock candidate with NO measured
+  # earnings date takes this conviction penalty + a loud "⚠ earnings
+  # unverified" flag (demotion, never exclusion — data absence is not
+  # evidence of earnings, but IV 90 on a drawdown name is often exactly
+  # pre-earnings premium). ETFs exempt.
+  earnings_unknown_penalty: 2
+  # Rule #43 (AMZN 2026-08-03): Phase 2 final gate battery — yield floors.
+  # A candidate delivering less than 12% annualized OR premium below 0.5% of
+  # collateral is excluded ("premium doesn't pay for the risk"); the same
+  # battery vintage-checks the snapshot RSI against the live quote (>5% move
+  # → stale; upward + unverifiable live RSI → fail-safe exclude) and applies
+  # the standard RSI hook (>70 hard block, 60-70 extended-wait), and rewrites
+  # gap-inflated IV-rank claims (revoking the +1 conviction bonus).
+  playbook_min_annualized_yield: 0.12
+  playbook_min_premium_pct_of_collateral: 0.005
+  # allow_stacking_with_held: false   # re-admit same-name (non-overlap) stacks
+  # Task #28: coverage-adaptive deployment cap. The playbook's deploy ceiling
+  # is a function of PROJECTED post-Phase-1 stress coverage — at crisis
+  # coverage the correct behavior is closes-heavy, opens-light (save the
+  # freed cash to actually improve coverage, don't cycle it right back into
+  # new obligation). When adaptive_deploy_bands is set, it overrides the flat
+  # deploy_target_pct and acts as a HARD deployment ceiling.
+  # Set adaptive_deploy_bands: null (or remove) to fall back to flat behavior.
+  adaptive_deploy_bands:
+    - {below: 0.20, cap_pct: 0.30, label: "crisis coverage — prioritize cushion"}
+    - {below: 0.50, cap_pct: 0.50, label: "defensive coverage — half cushion"}
+    - {below: null, cap_pct: 0.90, label: "healthy coverage — normal deployment"}
+  # Task #29: bucket diversification (soft) — prefer spreading Phase 2 opens
+  # across expiration Fridays; warn hard when one Friday dominates anyway.
+  bucket_diversification:
+    max_bucket_pct_of_deploy: 0.60  # warn if a single Friday holds >60% of deployed
+    tie_break_prefer_diverse: true  # among tied-score candidates, prefer a new bucket
+    hard_cap_pct: null              # optional HARD cap vs deploy budget (e.g. 0.80); null disables
+  # Task #30: equity-stacking penalty — a new short put on a name whose
+  # EQUITY the user already holds concentrates single-name risk. Bands are
+  # fractions of NLV held in the underlying's equity; >= hard_skip_pct is a
+  # HARD SKIP (surfaced in the warnings footer, never silent).
+  # force_include: [NVDA]  # per-ticker kill switch: downgrades hard-skip to -3
+  equity_stacking:
+    modest_band_pct: [0.02, 0.05]     # -1 + "modest equity concentration" tag
+    concerning_band_pct: [0.05, 0.10] # -3 + "stacks equity concentration" tag
+    hard_skip_pct: 0.10               # >=10% NLV held -> hard skip
+    modest_penalty: 1
+    concerning_penalty: 3
+  # Task #31: support-quality gate — proximity alone isn't an anchor. A strike
+  # at/below a >=2-touch support cluster is clean (below-support is
+  # protective); anchored only to a 1-touch level (e.g. bare 52w-low) or
+  # floating >5% from any cluster takes -2. Missing S/R -> no penalty.
+  support_quality:
+    min_touches_for_strong: 2
+    at_support_band_pct: 0.05      # ±5% of strike counts as "at" a cluster
+    below_support_band_pct: 0.15   # strike up to 15% BELOW a cluster = protected
+    single_touch_penalty: 2
+    floats_penalty: 2
+  # Task #32: smooth freshness decay for the Parkev-rec multiplier (replaces
+  # the old 3-band step: <=14d 2.0 / <=30d 1.0 / else 0.5). age_days null
+  # (no rec) -> the multiplier is not applied at all (tier x conviction only).
+  freshness_bands:
+    - {max_days: 7, multiplier: 2.5}     # very fresh — analyst just spoke up
+    - {max_days: 14, multiplier: 2.0}    # fresh — still current
+    - {max_days: 21, multiplier: 1.5}    # recent — moderate weight
+    - {max_days: 30, multiplier: 1.0}    # month-old — baseline
+    - {max_days: 60, multiplier: 0.5}    # fading — decayed weight
+    - {max_days: null, multiplier: 0.25} # stale — near-zero credit
 
 # Output
 output:

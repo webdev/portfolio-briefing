@@ -961,3 +961,278 @@ def test_render_risk_alerts_tier_b_breach_fires_warning():
     assert "MU" in md
     assert "BREACH" in md
     assert "Tier B" in md
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule #43 fix (2026-07-31) — Tier A covered-call envelope not enforced on the
+# Strategy Upgrades "READY TO WRITE" surface.
+#
+# Observed briefing output (~line 1753, 2026-07-31):
+#   **AMZN — 100 shares (no CC yet, 2.6% NLV)** ✅ READY TO WRITE ✅ RSI favourable
+#     - SELL 1× AMZN $305C ... (28 DTE, 13.9% OTM, δ 0.10) ... $110
+#   **MSFT — 241 shares (no CC yet, 10.6% NLV)** ✅ READY TO WRITE ✅ RSI favourable
+#     - SELL 1× MSFT $515C ... (28 DTE, 11.7% OTM, δ 0.10) ... $162
+#
+# Per rules #29/#34: AMZN is Tier A and NOT on willing_to_write_cc_on
+# ([NVDA, MSFT]) → must be blocked entirely (tier_a_no_cc record). MSFT IS
+# opted-in but the strict envelope (RSI ≥ 75, ≥20% OTM, δ ≤ 0.10, ≤30 DTE,
+# ≤20% coverage) had three violations → must NOT render ✅ READY.
+# Root cause: `covered_call_tiers.tier_a.enabled: true` short-circuited
+# is_cc_enabled_for_tier for EVERY Tier A name (whitelist never checked, and
+# the call site didn't pass the ticker), and tier_violations were computed
+# but never demoted the card out of READY TO WRITE.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import timedelta as _td
+
+_TASK43_CONFIG = {
+    "max_position_pct": 0.10,
+    "position_tiers": {
+        "tier_a_core": ["NVDA", "GOOG", "MSFT", "META", "PLTR", "AMZN", "SPY", "VOO"],
+        "tier_b_income": ["MU", "SMH"],
+    },
+    "covered_call_tiers": {
+        # Production shape: enabled TRUE + per-name opt-in whitelist — the
+        # exact config that triggered the bug.
+        "tier_a": {"enabled": True, "rsi_floor": 75, "min_otm_pct": 20.0,
+                   "max_delta": 0.10, "coverage_cap_pct": 20, "max_dte": 30,
+                   "roll_up_trigger": 0.92, "tax_aware_assignment_block": True,
+                   "willing_to_write_cc_on": ["NVDA", "MSFT"]},
+        "tier_b": {"enabled": True, "rsi_floor": 70, "min_otm_pct": 10.0,
+                   "max_delta": 0.15, "coverage_cap_pct": 50, "max_dte": 30,
+                   "roll_up_trigger": 0.93, "tax_aware_assignment_block": True},
+        "tier_c": {"enabled": True, "rsi_floor": 60, "min_otm_pct": 4.0,
+                   "max_delta": 0.30, "coverage_cap_pct": 100, "max_dte": 45,
+                   "roll_up_trigger": 0.97, "tax_aware_assignment_block": False},
+    },
+}
+
+
+def _task43_snapshot():
+    return {
+        "positions": [
+            # AMZN (Tier A, NOT opted-in) — the observed bug: rendered READY.
+            {"symbol": "AMZN", "assetType": "EQUITY", "qty": 100,
+             "price": 267.80, "costBasis": 180.00},
+            # MSFT (Tier A, opted-in) — envelope must be enforced.
+            {"symbol": "MSFT", "assetType": "EQUITY", "qty": 241,
+             "price": 461.05, "costBasis": 380.00},
+            # VRT (Tier C default) — must be unaffected.
+            {"symbol": "VRT", "assetType": "EQUITY", "qty": 300,
+             "price": 130.00, "costBasis": 80.00},
+        ],
+        "balance": {"accountValue": 1_000_000, "cash": 50_000},
+        "chains": {},
+        "earnings_calendar": {},
+        "quotes": {"AMZN": {"last": 267.80}, "MSFT": {"last": 461.05},
+                   "VRT": {"last": 130.0}},
+        "technicals": {
+            "AMZN": {"rsi_14": 65},
+            "MSFT": {"rsi_14": 74},   # the measured value from the briefing
+            "VRT": {"rsi_14": 65},
+        },
+    }
+
+
+def test_amzn_tier_a_not_opted_in_no_ready_card(monkeypatch):
+    """Observed 2026-07-31: '**AMZN — 100 shares (no CC yet, 2.6% NLV)**
+    ✅ READY TO WRITE ✅ RSI favourable — SELL $305C 28 DTE, 13.9% OTM,
+    δ0.10, $110'. AMZN is Tier A and NOT in willing_to_write_cc_on
+    ([NVDA, MSFT]) → the CC must be blocked entirely and surface as the
+    tier_a_no_cc transparency record instead."""
+    exp = (date.today() + _td(days=28)).isoformat()
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=305.0, delta=0.10, mid=1.10,
+                                     expiration=exp),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    upgrades = compute_strategy_upgrades(
+        _task43_snapshot(), equity_reviews=[], options_reviews=[],
+        params=_TASK43_CONFIG,
+    )
+    amzn_writes = [
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "AMZN"
+    ]
+    assert amzn_writes == [], (
+        "AMZN (Tier A, not opted-in) must have NO write_covered_call; got: "
+        + str(amzn_writes)
+    )
+    amzn_records = [
+        u for u in upgrades
+        if u.get("type") == "tier_a_no_cc" and u.get("underlying") == "AMZN"
+    ]
+    assert len(amzn_records) == 1
+    assert "willing_to_write_cc_on" in amzn_records[0]["rationale"]
+
+    # Renderer: AMZN never appears as READY TO WRITE.
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    for line in md.splitlines():
+        if "AMZN" in line:
+            assert "READY TO WRITE" not in line, f"AMZN rendered READY: {line}"
+    assert "Tier A core holdings — no CC" in md
+
+
+def test_msft_envelope_violations_demote_with_reasons(monkeypatch):
+    """Observed 2026-07-31: '**MSFT — 241 shares (no CC yet, 10.6% NLV)**
+    ✅ READY TO WRITE ✅ RSI favourable — SELL $515C 28 DTE, 11.7% OTM,
+    δ0.10, $162'. MSFT IS opted-in via willing_to_write_cc_on, but the
+    strict Tier A envelope requires RSI ≥ 75 (measured 74) and ≥20% OTM
+    (rendered 11.7%) → the card must demote to the wait list with the
+    specific unmet conditions, never render ✅ READY."""
+    exp = (date.today() + _td(days=28)).isoformat()
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=515.0, delta=0.10, mid=1.62,
+                                     expiration=exp),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    upgrades = compute_strategy_upgrades(
+        _task43_snapshot(), equity_reviews=[], options_reviews=[],
+        params=_TASK43_CONFIG,
+    )
+    msft = next(
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "MSFT"
+    )
+    assert msft["tier"] == "A"
+    assert msft["tier_envelope_wait"] is True
+    violations = msft.get("tier_violations") or []
+    assert any("RSI" in v and "75" in v for v in violations), violations
+    assert any("OTM" in v and "20" in v for v in violations), violations
+    # δ 0.10 is AT the cap — no delta violation
+    assert not any("delta" in v for v in violations), violations
+    # Belt-and-suspenders: pre_trade_validator Rule 13 fired too
+    tv = msft.get("tier_validator")
+    assert isinstance(tv, dict) and tv.get("rule_id") == "COVERED_CALL_TIER_VIOLATION"
+
+    # Renderer: demoted out of READY, with the reasons on the card.
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    for line in md.splitlines():
+        if line.startswith("**MSFT"):
+            assert "READY TO WRITE" not in line, f"MSFT rendered READY: {line}"
+            assert "TIER ENVELOPE NOT MET" in line, line
+    assert "Tier A envelope:" in md
+    assert "needs RSI ≥ 75 (now 74)" in md
+    assert "needs ≥20% OTM (proposed 11.7%)" in md
+    assert "Pre-trade validator:" in md
+
+
+def test_msft_passes_envelope_when_all_conditions_met(monkeypatch):
+    """MSFT opted-in AND fully envelope-compliant (RSI 76, ~21.5% OTM,
+    δ0.08, 28 DTE, 1 contract vs 20% coverage cap) → renders ✅ READY TO
+    WRITE with zero violations."""
+    exp = (date.today() + _td(days=28)).isoformat()
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=560.0, delta=0.08, mid=0.95,
+                                     expiration=exp),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    snap = _task43_snapshot()
+    snap["technicals"]["MSFT"]["rsi_14"] = 76
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=_TASK43_CONFIG,
+    )
+    msft = next(
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "MSFT"
+    )
+    assert msft["tier_violations"] == []
+    assert msft["tier_envelope_wait"] is False
+    assert msft.get("tier_validator") is None
+    # 241 shares = 2 lots; 20% coverage cap → max(1, 0) = 1 contract
+    assert msft["contracts_writable"] == 1
+
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    msft_lines = [l for l in md.splitlines() if l.startswith("**MSFT")]
+    assert msft_lines and "✅ READY TO WRITE" in msft_lines[0], msft_lines
+
+
+def test_tier_c_cc_unaffected(monkeypatch):
+    """VRT (Tier C default) keeps the legacy discipline under the
+    production-shaped config: standard delta/OTM, no envelope demotion,
+    renders ✅ READY TO WRITE."""
+    exp = (date.today() + _td(days=28)).isoformat()
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=140.0, delta=0.24, mid=2.50,
+                                     expiration=exp),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    upgrades = compute_strategy_upgrades(
+        _task43_snapshot(), equity_reviews=[], options_reviews=[],
+        params=_TASK43_CONFIG,
+    )
+    vrt = next(
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "VRT"
+    )
+    assert vrt["tier"] == "C"
+    assert vrt["tier_violations"] == []
+    assert vrt["tier_envelope_wait"] is False
+    assert vrt.get("tier_validator") is None
+    assert vrt["contracts_writable"] == 3   # 100% coverage, 3 lots
+
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    vrt_lines = [l for l in md.splitlines() if l.startswith("**VRT")]
+    assert vrt_lines and "✅ READY TO WRITE" in vrt_lines[0], vrt_lines
+
+
+def test_goog_secular_wait_still_works(monkeypatch):
+    """Regression: the lt_secular_wait demotion (rule #39) that correctly
+    demoted GOOG's card in the 2026-07-31 briefing keeps working. Under the
+    fixed tier semantics GOOG (Tier A, not opted-in) is now blocked earlier
+    as tier_a_no_cc; the secular-uptrend wait mechanism itself is verified
+    on a legacy (no position_tiers) config where GOOG falls to Tier C."""
+    exp = (date.today() + _td(days=28)).isoformat()
+    fake = _FakeFetcher(
+        delta_quote=_mock_call_quote(strike=215.0, delta=0.22, mid=1.80,
+                                     expiration=exp),
+    )
+    monkeypatch.setattr(_su, "_load_chain_fetcher", lambda: (fake, None))
+
+    snap = {
+        "positions": [
+            {"symbol": "GOOG", "assetType": "EQUITY", "qty": 200,
+             "price": 196.00, "costBasis": 120.00},
+        ],
+        "balance": {"accountValue": 1_000_000, "cash": 50_000},
+        "chains": {}, "earnings_calendar": {},
+        "quotes": {"GOOG": {"last": 196.0}},
+        "technicals": {
+            "GOOG": {"rsi_14": 65,
+                     "deep": {"long_term_verdict": "secular-uptrend"}},
+        },
+    }
+
+    # (a) Legacy config — GOOG is Tier C, lt_secular_wait demotes to wait.
+    upgrades = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[],
+        params={"max_position_pct": 0.10},
+    )
+    goog = next(
+        u for u in upgrades
+        if u.get("type") == "write_covered_call" and u.get("underlying") == "GOOG"
+    )
+    assert goog["lt_secular_wait"] is True
+
+    from render.strategy_upgrades_panel import render_strategy_upgrades
+    md = "\n".join(render_strategy_upgrades(upgrades))
+    goog_lines = [l for l in md.splitlines() if l.startswith("**GOOG")]
+    assert goog_lines and "READY TO WRITE" not in goog_lines[0], goog_lines
+
+    # (b) Production config — GOOG (Tier A, not opted-in) is blocked even
+    # earlier via tier_a_no_cc, which supersedes the secular-wait demotion.
+    upgrades2 = compute_strategy_upgrades(
+        snap, equity_reviews=[], options_reviews=[], params=_TASK43_CONFIG,
+    )
+    assert [u for u in upgrades2 if u.get("type") == "write_covered_call"
+            and u.get("underlying") == "GOOG"] == []
+    assert [u for u in upgrades2 if u.get("type") == "tier_a_no_cc"
+            and u.get("underlying") == "GOOG"]

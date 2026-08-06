@@ -55,10 +55,11 @@ def test_action_list_pullback_csp_rsi_blocks_overbought():
     md = "\n".join(render_action_list(equity_reviews, [], [], analytics=None,
                                       snapshot_data=snap,
                                       date_str=date.today().isoformat()))
-    # Blocked → appears in footer, NOT as an actionable PULLBACK CSP line.
-    assert "PULLBACK CSP NVDA blocked" in md
+    # Blocked → appears in footer, NOT as an actionable CSP line.
+    # (Label renamed from "PULLBACK CSP" to "CSP — PAID-TO-WAIT", 2026-08-04.)
+    assert "CSP — PAID-TO-WAIT NVDA blocked" in md
     assert "overbought" in md
-    assert "**PULLBACK CSP** NVDA" not in md  # not an actionable header
+    assert "**CSP — PAID-TO-WAIT** NVDA" not in md  # not an actionable header
 
 
 def test_action_list_tags_new_csp_header_with_rsi():
@@ -255,3 +256,63 @@ def test_analyst_brief_tags_close_winner_with_rsi():
                                         {"regime": "NORMAL", "confidence": "HIGH"}))
     assert "CLOSE WINNERS" in md
     assert "RSI 41" in md  # MU close-winner header tagged
+
+
+# ── Bug #26 (2026-07-22) — roll STO legs must carry the underlying's RSI ──
+#
+# User symptom: "## ⚠️ RSI Coverage Check — 2 recommendation line(s) are
+# missing an RSI read: `SELL TO OPEN   1 × IREN ... $47 PUT ...`" — the roll
+# ticket's STO leg rendered without RSI even though the parent ROLL header
+# carried it (IREN 46 / NOK 36); the verifier's ±3-line window couldn't see
+# past the ROLL ANALYSIS table.
+
+
+def _roll_review_with_ticket(ticker="IREN", rsi=46.0):
+    return {
+        "contract": f"{ticker}_PUT_50_20260918", "underlying": ticker,
+        "type": "PUT", "strike": 50.0, "expiration": "2026-09-18",
+        "qty": -1, "entry_price": 10.69, "current_mid": 14.50,
+        "days_to_expiry": 58, "recommendation": "HOLD",
+        "recommended_candidate_id": "A", "if_rolling_anyway_candidate_id": "C",
+        "roll_candidates": [
+            {"id": "A", "description": "HOLD", "netDollars": 0, "notes": ""},
+            {"id": "C", "description": "roll out to Jan '27 $47P",
+             "netDollars": 90, "notes": ""},
+        ],
+        "if_rolling_anyway_ticket": {
+            "buy_to_close": {"expiration": "2026-09-18", "strike": 50.0,
+                             "limit_price": 14.50, "quantity": 1},
+            "sell_to_open": {"expiration": "2027-01-15", "strike": 47.0,
+                             "limit_price": 15.40, "quantity": 1},
+            "net_dollars_total": 90,
+        },
+    }
+
+
+def test_roll_sto_leg_carries_underlying_rsi():
+    """The STO leg line itself shows '· RSI 46' (the underlying's measured
+    value), and audit_missing_rsi no longer flags the block."""
+    from steps.per_option_commentary import render_watch_with_commentary
+
+    snap = {"technicals": {"IREN": {"rsi_14": 46.0}}, "quotes": {},
+            "earnings_calendar": {}}
+    md = "\n".join(render_watch_with_commentary(
+        [], [_roll_review_with_ticket("IREN", 46.0)], snap))
+    sto_lines = [ln for ln in md.splitlines() if "SELL TO OPEN" in ln]
+    assert sto_lines, "expected the if-rolling-anyway STO leg to render"
+    assert all("RSI 46" in ln for ln in sto_lines)
+    # The verifier is clean on this block.
+    from analysis import rsi_discipline
+    assert rsi_discipline.audit_missing_rsi(md) == []
+
+
+def test_roll_sto_leg_omits_rsi_when_unknown():
+    """No measured RSI → no fabricated number on the STO leg (rule #19)."""
+    from steps.per_option_commentary import render_watch_with_commentary
+
+    snap = {"technicals": {}, "quotes": {}, "earnings_calendar": {}}
+    md = "\n".join(render_watch_with_commentary(
+        [], [_roll_review_with_ticket("NOK")], snap))
+    sto_lines = [ln for ln in md.splitlines() if "SELL TO OPEN" in ln]
+    assert sto_lines
+    assert all("RSI" not in ln for ln in sto_lines)

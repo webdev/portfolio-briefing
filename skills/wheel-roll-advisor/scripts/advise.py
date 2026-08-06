@@ -201,7 +201,11 @@ def advise(
                         "netDollars": c.net_dollars,
                         "dteExtension": c.dte_extension,
                         "instruction": c.instruction,
-                        "current_strike": position.get("strike"),
+                        # Positions carry "strikePrice" (not "strike") — the
+                        # old lookup silently yielded None, so the ranker
+                        # couldn't detect calendars or put roll-ups.
+                        "current_strike": (position.get("strikePrice")
+                                           or position.get("strike")),
                     }
                     for c in roll_candidates
                 ]
@@ -220,10 +224,19 @@ def advise(
                     max_tenor = int(_ctx_tenor)
                 else:
                     max_tenor = 360 if is_core_flag else 120
+                # Side-aware ranking (CLAUDE.md #42): a defensive short-PUT
+                # roll must rank by risk reduction, never max credit — the
+                # 2026-07-29 briefing "✅ recommended" $50-higher put strikes
+                # (NVDA $200P→$250P, VRT $290P→$340P) because the ranker was
+                # credit-driven and side-blind.
+                _opt_type = (position.get("optionType")
+                             or ("PUT" if "PUT" in str(position.get("positionType") or "").upper()
+                                 else "CALL"))
                 best, _scores = _rank(
                     cand_dicts, spot=spot, is_core=is_core_flag,
                     embedded_tax_dollars=tax_est,
                     max_tenor_days=max_tenor,
+                    option_type=_opt_type,
                 )
                 if best is not None:
                     recommended_id = best["id"]

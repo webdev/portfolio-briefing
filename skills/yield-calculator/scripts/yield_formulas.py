@@ -106,6 +106,7 @@ def compute_roll_yield(
     net_credit_dollars: float,
     position_value: float,
     old_strike: Optional[float] = None,
+    option_type: str = "CALL",
 ) -> dict:
     """
     Yield for a calendar or diagonal roll.
@@ -118,6 +119,12 @@ def compute_roll_yield(
     net_credit_dollars: net cash flow from the roll (positive = credit, negative = debit)
     position_value: dollars at risk on the underlying (e.g. shares × spot for CC)
     old_strike: the strike being rolled FROM (for cap-buffer math)
+    option_type: "CALL" (default — legacy behavior: cap buffer above spot) or
+        "PUT". On a short PUT "cap buffer above spot" is call-language
+        nonsense — the meaningful read is the STRIKE CUSHION: how far the new
+        strike sits BELOW spot (positive = OTM cushion, negative = ITM).
+        Puts populate `strike_cushion_pct` and null out `cap_buffer_pct` so
+        the formatter can't render the wrong phrase.
     """
     qty = abs(int(contracts))
     new_collateral = new_strike * 100 * qty
@@ -129,8 +136,12 @@ def compute_roll_yield(
     net_cash_yield = _safe_div(net_credit_dollars, position_value) * 100
     net_cash_yield_ann = _annualize(net_cash_yield, new_dte)
 
-    # Headroom (new strike vs spot)
+    is_put = (option_type or "CALL").upper() == "PUT"
+
+    # Headroom (new strike vs spot) — CALL-side read.
     cap_buffer_pct = _safe_div(new_strike - spot, spot) * 100
+    # PUT-side read: strike cushion below spot (positive = OTM).
+    strike_cushion_pct = _safe_div(spot - new_strike, spot) * 100
 
     # Roll archetype detection
     if old_strike is not None and abs(new_strike - old_strike) < 0.01:
@@ -139,8 +150,12 @@ def compute_roll_yield(
         cost_per_dollar_of_protection = None
     else:
         kind = "diagonal_roll"
-        cap_buffer_change_pct = _safe_div(new_strike - (old_strike or new_strike), spot) * 100
-        if old_strike is not None and new_strike > old_strike and net_credit_dollars < 0:
+        if is_put:
+            # Put roll-down: cushion GAINED = old strike − new strike
+            cap_buffer_change_pct = _safe_div((old_strike or new_strike) - new_strike, spot) * 100
+        else:
+            cap_buffer_change_pct = _safe_div(new_strike - (old_strike or new_strike), spot) * 100
+        if old_strike is not None and new_strike > old_strike and net_credit_dollars < 0 and not is_put:
             # Diagonal up with debit: cost per $1 of new strike room
             new_room = (new_strike - old_strike) * 100 * qty
             cost_per_dollar_of_protection = abs(net_credit_dollars) / new_room if new_room else None
@@ -153,7 +168,10 @@ def compute_roll_yield(
         "all_yields": {
             "new_leg_yield_ann_pct": new_leg_yield_ann,
             "net_cash_yield_ann_pct": net_cash_yield_ann,
-            "cap_buffer_pct": cap_buffer_pct,
+            # Side-gated: only the side-appropriate metric is populated so
+            # the formatter can never render call-language on a put roll.
+            "cap_buffer_pct": None if is_put else cap_buffer_pct,
+            "strike_cushion_pct": strike_cushion_pct if is_put else None,
             "cap_buffer_change_pct": cap_buffer_change_pct,
         },
         "new_collateral": new_collateral,
@@ -325,6 +343,14 @@ def format_yield_line(yield_result: dict, prefix: str = "Yield") -> str:
         )
         if y.get("cap_buffer_pct") is not None:
             line += f" Cap buffer: {y['cap_buffer_pct']:+.1f}% above spot."
+        elif y.get("strike_cushion_pct") is not None:
+            # Put-side read (task #37 fix 4d): cushion below spot, honestly
+            # signed — negative cushion means the new strike is ITM.
+            sc = y["strike_cushion_pct"]
+            if sc >= 0:
+                line += f" Strike cushion: {sc:.1f}% below spot."
+            else:
+                line += f" Strike cushion: {abs(sc):.1f}% ABOVE spot (ITM)."
         return line
     elif kind == "collar":
         y = yield_result["all_yields"]

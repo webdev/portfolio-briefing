@@ -40,6 +40,14 @@ def _signature_for_action(item_text: str) -> str:
     if not m_type:
         return first[:80]
     kind = m_type.group(1).strip()
+    # Render-label alias (2026-08-04): "PULLBACK CSP" was renamed to
+    # "CSP — PAID-TO-WAIT" on every surface, but the INTERNAL kind stays
+    # PULLBACK_CSP (too many consumers: rec_aging keys, capital-planner,
+    # money-plan deploy kinds, day-over-day signatures). Normalizing here
+    # keeps signatures/action-keys byte-identical across the rename.
+    if kind.upper().startswith("CSP — PAID-TO-WAIT") or \
+            kind.upper().startswith("CSP - PAID-TO-WAIT"):
+        kind = "PULLBACK CSP"
     rest = first[m_type.end():]
 
     # Stable identifier: a full option contract (digits allowed!) first; else
@@ -91,6 +99,135 @@ def load_yesterday_briefing(today_iso: str, snapshots_root: Path) -> Optional[st
     return None
 
 
+def _month_abbrev(exp_iso: str) -> str:
+    """'2026-11-20' → 'Nov'; unparseable → the raw string (never invented)."""
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(str(exp_iso)[:10], "%Y-%m-%d").strftime("%b")
+    except (ValueError, TypeError):
+        return str(exp_iso or "?")
+
+
+def detect_executed_rolls(prev_positions, today_positions) -> list[dict]:
+    """Detect user-executed rolls from the position diff (task #40 fix 9).
+
+    A roll pattern = same underlying + option type, old SHORT contract gone,
+    NEW short contract (different strike and/or expiry) appeared today.
+    Pairs greedily by closest strike when several legs changed on one name
+    (the META 575/580 → 570/575 case). Returns [] on missing snapshots —
+    fail-open, never a guessed roll.
+
+    Each entry: {old_symbol, new_symbol, underlying, type, old_strike,
+    new_strike, old_exp, new_exp, same_strike, new_premium (measured
+    premiumReceived on the new leg, or None)}.
+    """
+    if not prev_positions or not today_positions:
+        return []
+
+    def _shorts(positions):
+        out = {}
+        for p in positions or []:
+            try:
+                if (p.get("assetType") or "").upper() != "OPTION":
+                    continue
+                if float(p.get("qty", 0) or 0) >= 0:
+                    continue
+                sym = str(p.get("symbol") or "")
+                if sym:
+                    out[sym] = p
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    prev_by_sym = _shorts(prev_positions)
+    today_by_sym = _shorts(today_positions)
+    gone = {s: p for s, p in prev_by_sym.items() if s not in today_by_sym}
+    new = {s: p for s, p in today_by_sym.items() if s not in prev_by_sym}
+    if not gone or not new:
+        return []
+
+    def _key(p):
+        return (str(p.get("underlying") or ""), (p.get("type") or "").upper())
+
+    rolls: list[dict] = []
+    used_new: set = set()
+    for old_sym, old_p in sorted(gone.items()):
+        candidates = [
+            (abs(float(np.get("strike", 0) or 0)
+                 - float(old_p.get("strike", 0) or 0)), ns, np)
+            for ns, np in new.items()
+            if ns not in used_new and _key(np) == _key(old_p)
+        ]
+        if not candidates:
+            continue
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        _, new_sym, new_p = candidates[0]
+        used_new.add(new_sym)
+        try:
+            old_strike = float(old_p.get("strike", 0) or 0)
+            new_strike = float(new_p.get("strike", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        premium = new_p.get("premiumReceived")
+        try:
+            premium = float(premium) if premium else None
+        except (TypeError, ValueError):
+            premium = None
+        rolls.append({
+            "old_symbol": old_sym,
+            "new_symbol": new_sym,
+            "underlying": old_p.get("underlying"),
+            "type": (old_p.get("type") or "").upper(),
+            "old_strike": old_strike,
+            "new_strike": new_strike,
+            "old_exp": old_p.get("expiration") or "",
+            "new_exp": new_p.get("expiration") or "",
+            "same_strike": abs(old_strike - new_strike) < 0.005,
+            "new_premium": premium,
+        })
+    return rolls
+
+
+def render_executed_roll_directives(rolls: list[dict],
+                                    today_iso: str | None = None) -> list[str]:
+    """Ready-to-paste directive templates for detected user-executed rolls
+    (task #40 fix 9) — so decisions made on purpose stop generating
+    next-day nags. The template targets state/fable_advisor_memory.md and
+    includes 'hold' phrasing so analysis.advisor_directives parses it as a
+    hold directive. Basis = strike − measured premiumReceived on the new
+    leg; omitted when the broker payload carried no premium (rule #19)."""
+    lines: list[str] = []
+    for r in rolls or []:
+        und = r.get("underlying") or "?"
+        t_letter = "P" if r.get("type") == "PUT" else "C"
+        move = (f"{_month_abbrev(r.get('old_exp'))}→"
+                f"{_month_abbrev(r.get('new_exp'))}")
+        if r.get("same_strike"):
+            shape = "same strike"
+            shape_word = "same-strike"
+        else:
+            shape = (f"${r.get('old_strike'):g}→${r.get('new_strike'):g}")
+            shape_word = ("down" if r.get("new_strike", 0)
+                          < r.get("old_strike", 0) else "up")
+        hold_bit = "hold."
+        if r.get("type") == "PUT" and r.get("new_premium") is not None:
+            basis = float(r["new_strike"]) - float(r["new_premium"])
+            hold_bit = f"hold — willing to own at ~${basis:,.0f} basis."
+        date_bit = str(today_iso or "")
+        lines.append(
+            f"_Detected roll: {und} ${r.get('old_strike'):g}{t_letter} "
+            f"{move} ({shape}). If deliberate, add to "
+            f"state/fable_advisor_memory.md: "
+            f"`- **{r.get('new_symbol')}** — rolled {shape_word} "
+            f"{date_bit} deliberately; {hold_bit} "
+            f"Re-flag only if delta > 0.60.` "
+            f"Add \"through earnings\" to the directive to also hold "
+            f"across an earnings print (otherwise a profitable hold "
+            f"pauses when a report is imminent)._"
+        )
+    return lines
+
+
 _RECON_STATUS_LABELS = {
     "EXECUTED": "✅ EXECUTED (position diff confirms; or overtaken by events)",
     "PARTIAL": "◐ PARTIAL (position reduced, not fully closed)",
@@ -100,13 +237,19 @@ _RECON_STATUS_LABELS = {
 
 
 def render_diff_panel(today_md: str, yesterday_md: Optional[str],
-                      recon_status: Optional[dict] = None) -> list[str]:
+                      recon_status: Optional[dict] = None,
+                      executed_rolls: Optional[list] = None,
+                      today_iso: Optional[str] = None) -> list[str]:
     """Render a "## Since Yesterday" panel comparing the two briefings.
 
     ``recon_status`` (optional) maps action keys (``KIND:IDENT``, from
     analysis.rec_aging.reconcile) to fill-reconciliation statuses. When
     provided, removed items render a definitive status instead of the legacy
     "likely executed" guess; when absent, the old wording is kept as fallback.
+
+    ``executed_rolls`` (task #40 fix 9, from :func:`detect_executed_rolls`)
+    adds ready-to-paste directive templates for rolls the user executed at
+    the broker, so deliberate decisions stop generating next-day nags.
     """
     if not yesterday_md:
         return []  # nothing to diff against on first run
@@ -118,10 +261,17 @@ def render_diff_panel(today_md: str, yesterday_md: Optional[str],
     removed = yest_sigs - today_sigs
     common = today_sigs & yest_sigs
 
-    if not (added or removed):
+    if not (added or removed or executed_rolls):
         return []
 
     lines = ["", "## Since Yesterday's Briefing", ""]
+
+    if executed_rolls:
+        lines.append(f"### 🔄 Detected User-Executed Rolls "
+                     f"({len(executed_rolls)})")
+        lines.extend(render_executed_roll_directives(executed_rolls,
+                                                     today_iso))
+        lines.append("")
     if removed:
         lines.append(f"### ✅ Resolved or Executed ({len(removed)})")
         for sig in sorted(removed):

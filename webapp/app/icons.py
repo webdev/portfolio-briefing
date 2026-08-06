@@ -85,6 +85,7 @@ _ACTION_ICONS = {
     # CSP entry verbs (open new short put)
     "PULLBACK_CSP":      "💎",  # gem = quality entry
     "PULLBACK CSP":      "💎",
+    "CSP — PAID-TO-WAIT": "💎",  # renamed render label (kind stays PULLBACK_CSP)
     "NEW_CSP":           "✍️",  # write/open new
     "NEW CSP":           "✍️",
     "LONG_DATED_CSP":    "📅",  # calendar = long horizon
@@ -108,6 +109,8 @@ _ACTION_ICONS = {
     "SKIPPED_RSI":          "⏭️",
     "SKIPPED_LT_VERDICT":   "⏭️",
     "_FUNDING_HINT":        "💵",
+    "reference_demoted":    "📎",  # rule #43 — reference-only LTO card
+    "REFERENCE_DEMOTED":    "📎",
 }
 
 
@@ -132,6 +135,8 @@ _ACTION_LABELS = {
     "SKIPPED_LT_CSP":         "Skipped — LT CSP",
     "SKIPPED_RSI":            "Skipped — RSI gate",
     "SKIPPED_LT_VERDICT":     "Skipped — LT-trend gate",
+    "reference_demoted":      "Reference — not actionable today",
+    "REFERENCE_DEMOTED":      "Reference — not actionable today",
     "LONG_DATED_CSP":         "Long-Dated CSP",
     "_FUNDING_HINT":          "Funding hint",
     # Composite verbs
@@ -150,10 +155,18 @@ _ACTION_LABELS = {
     "LT_ADD":                 "LT Add",
     "LT_CSP":                 "LT CSP",
     "NEW_CSP":                "New CSP",
-    "PULLBACK_CSP":           "Pullback CSP",
-    "PULLBACK CSP":           "Pullback CSP",
+    # 2026-08-04 rename: "Pullback CSP" read as "the stock is pulling back
+    # now" — it's a strategy name (sell below-spot put, get paid to wait).
+    "PULLBACK_CSP":           "CSP — Paid-to-Wait",
+    "PULLBACK CSP":           "CSP — Paid-to-Wait",
+    "CSP — PAID-TO-WAIT":     "CSP — Paid-to-Wait",
     "REVIEW_CORE":            "Review Core",
     "EXIT_NOW":               "Exit Now",
+    # Task #40 (2026-07-30) action kinds
+    "HOLD_FOR_BASIS":         "Hold for Basis (assignment OK)",
+    "HOLD FOR BASIS":         "Hold for Basis (assignment OK)",
+    "CLOSE_INTO_RECOVERY":    "Close into Recovery (pre-print)",
+    "CLOSE INTO RECOVERY":    "Close into Recovery (pre-print)",
 }
 
 

@@ -138,11 +138,35 @@ class Briefing(_Base):
     # is nested and stable enough to consume as-is; the web app renders from it.
     # Empty dict when the briefing predates rotation-advisor.
     rotation_opportunities: dict[str, Any] = Field(default_factory=dict)
+    # Task #20 — CSP rotations: close a lower-yield held CSP to fund a
+    # higher-yield new CSP (coverage-neutral or better). List of CSPRotation
+    # to_dict() rows. Empty when the briefing predates the feature or no
+    # rotation qualified that cycle.
+    csp_rotations: list[dict[str, Any]] = Field(default_factory=list)
+    # Task #21 — near-miss CSP rotations: blocked by exactly ONE discipline
+    # gate. List of NearMissRotation to_dict() rows (block_reason /
+    # block_detail / unblock_path). Informational only — never qualified.
+    # Empty when the briefing predates the feature or nothing was near.
+    csp_rotation_near_misses: list[dict[str, Any]] = Field(default_factory=list)
+    # Task #22 — Actionable Rotation Playbook: RotationPlaybook.to_dict()
+    # (closes / opens / totals / warnings). Empty dict when the briefing
+    # predates the feature, the freed-collateral floor wasn't met, or the
+    # step failed that cycle (fail-open).
+    rotation_playbook: dict[str, Any] = Field(default_factory=dict)
+    # 2026-08-04 — 💰 Money Plan: build_money_plan() rollup (banks/deploys/
+    # net cash/coverage-after/MTD/blocked money + pre-rendered "lines").
+    # Empty dict when the briefing predates the feature or nothing was
+    # measurable that cycle (fail-open).
+    money_plan: dict[str, Any] = Field(default_factory=dict)
     # Task #16 — benchmark tracking + P/L attribution:
     # {"benchmark": BenchmarkReport.to_dict(), "attribution":
     #  AttributionReport.to_dict()}. Empty dict when the briefing predates
     # the feature or the panel was unavailable that cycle.
     benchmark_report: dict[str, Any] = Field(default_factory=dict)
+    # Task #41 — 👻 ghost portfolio: GhostReport.to_dict() (options-stripped
+    # counterfactual NAV series + gap figures). Empty dict when the briefing
+    # predates the feature or the compute was unavailable that cycle.
+    ghost_portfolio: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("date", mode="before")
     @classmethod

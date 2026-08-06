@@ -192,6 +192,111 @@ def check_smart_take_profit(
     return GuardrailResult(fired=False)
 
 
+def check_strike_tested(
+    position: Dict[str, Any],
+    params: Dict[str, Any],
+) -> GuardrailResult:
+    """STRIKE TESTED trigger (task #38) — fire AT the strike, not through it.
+
+    The gap this closes (real money, 2026-07-22): MU $950P with spot $959
+    (0.9% above strike, +12% capture, 121 DTE) matched NO matrix cell —
+    the NEAR_ATM roll cell required 30-50% profit — and fell to
+    DEFAULT_HOLD. One week later the put was $211 ITM and the same roll
+    cost a $4,700 debit. The at-the-money moment is when extrinsic peaks
+    and credit rolls are biggest; this guardrail makes that moment loud.
+
+    Fires for SHORT PUTs when ALL of:
+      - |delta| ≥ delta_trigger (default 0.45), OR delta unavailable AND
+        spot within price_band_pct (default 3%) of strike, either side
+      - DTE ≥ min_dte (default 21) — below that, the briefing's forced-
+        decision item (Part 3) owns the moment
+      - profit captured < max_profit_to_fire (default 30%) — at ≥30%
+        capture the take-profit logic owns the decision
+      - NOT already deep ITM (spot more than deep_itm_pct below strike,
+        default 10%) — deep ITM is the existing ITM cells' territory
+
+    Emits ROLL_OUT_AND_DOWN (the canonical down-and-out tag every
+    downstream surface already recognizes) with cell
+    GUARDRAIL_STRIKE_TESTED. Config block: wheel_parameters.yaml →
+    strike_tested (flattened by matrix_loader like every other block).
+    """
+    st = params.get("strike_tested") or {}
+    lookup = {**params, **st} if isinstance(st, dict) else params
+
+    if not bool(lookup.get("enabled", True)):
+        return GuardrailResult(fired=False)
+
+    # SHORT PUTs only — covered calls have their own CALL_* cells.
+    position_type = str(position.get("positionType", "")).upper()
+    option_type = str(position.get("optionType", "")).upper()
+    if "SHORT" not in position_type or "PUT" not in (option_type or position_type):
+        return GuardrailResult(fired=False)
+
+    strike = float(position.get("strikePrice", 0) or 0)
+    spot = float(position.get("underlyingPrice", 0) or 0)
+    dte = int(position.get("daysToExpiry", 0) or 0)
+    entry = float(position.get("entryPrice", 0) or 0)
+    current_mid = float(position.get("currentMid", 0) or 0)
+
+    min_dte = int(lookup.get("min_dte", 21))
+    if dte < min_dte:
+        return GuardrailResult(fired=False)
+
+    # Profit gate — take-profit logic owns ≥ max_profit_to_fire captures.
+    # Underwater (negative profit) positions DO fire — the less profit at
+    # test, the more urgent the credit roll.
+    max_profit = float(lookup.get("max_profit_to_fire", 0.30))
+    profit_pct = (entry - current_mid) / entry if entry > 0 else 0.0
+    if profit_pct >= max_profit:
+        return GuardrailResult(fired=False)
+
+    # Deep-ITM gate — spot more than deep_itm_pct below strike belongs to
+    # the ITM matrix cells (roll-down economics are different there).
+    deep_itm_pct = float(lookup.get("deep_itm_pct", 0.10))
+    if strike > 0 and spot > 0 and (strike - spot) / strike > deep_itm_pct:
+        return GuardrailResult(fired=False)
+
+    # Trigger: measured delta first; price-band fallback ONLY when the
+    # delta is unavailable (never fabricate — CLAUDE.md #19).
+    delta_trigger = float(lookup.get("delta_trigger", 0.45))
+    band = float(lookup.get("price_band_pct", 0.03))
+    raw_delta = position.get("delta")
+    tested = False
+    trigger_desc = ""
+    if raw_delta is not None:
+        try:
+            abs_delta = abs(float(raw_delta))
+        except (TypeError, ValueError):
+            abs_delta = None
+        if abs_delta is not None and abs_delta >= delta_trigger:
+            tested = True
+            trigger_desc = f"δ {abs_delta:.2f} ≥ {delta_trigger:.2f}"
+    elif strike > 0 and spot > 0 and abs(spot - strike) / strike <= band:
+        tested = True
+        trigger_desc = (
+            f"spot ${spot:,.2f} within {band*100:.0f}% of strike "
+            f"${strike:,.2f} (no chain delta)"
+        )
+
+    if not tested:
+        return GuardrailResult(fired=False)
+
+    return GuardrailResult(
+        fired=True,
+        decision=Decision(
+            decision="ROLL_OUT_AND_DOWN",
+            matrix_cell="GUARDRAIL_STRIKE_TESTED",
+            rationale=(
+                f"🎯 Strike tested ({trigger_desc}) with {profit_pct*100:.0f}% "
+                f"captured and {dte} DTE — credit-roll window open; roll "
+                f"down-and-out while extrinsic is at its peak. The less "
+                f"profit at test, the more urgent."
+            ),
+            warnings=["strike_tested_fired"],
+        ),
+    )
+
+
 def check_open_order(context: Dict[str, Any]) -> GuardrailResult:
     """Check if there's already an open order pending."""
     
@@ -351,6 +456,10 @@ def run_pre_matrix_guardrails(
     checks = [
         check_loss_stop(position, params),
         check_crash_stop(position),
+        # Task #38: strike-tested trigger — after loss-stop/crash-stop,
+        # before the matrix walk. Fires only at < 30% capture, so it never
+        # collides with the smart take-profit layers (all require ≥ 30%).
+        check_strike_tested(position, params),
         check_smart_take_profit(position, smart_tp_params),  # ← task #49
         check_open_order(context),
         check_earnings_imminent(position, underlying, params),
