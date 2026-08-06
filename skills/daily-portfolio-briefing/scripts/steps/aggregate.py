@@ -162,6 +162,25 @@ def aggregate_briefing(
     # Make config visible to render layer (used for core_positions/ltcg_rate/etc.)
     snapshot_data["_config"] = config
 
+    # Task #43 — make the true chain-IV map available to every downstream
+    # consumer (rotation playbook gate battery, LT-opportunity honesty checks,
+    # the Vol Surface panel and the IV-label annotation pass). snapshot_inputs
+    # computes it live; when aggregate is driven from a re-loaded snapshot,
+    # fall back to the persisted chain_iv.json. Fail-open: no map → the
+    # labeled realized-vol proxy carries the briefing.
+    if not snapshot_data.get("chain_iv") and snapshot_dir is not None:
+        try:
+            _civ_file = snapshot_dir / "chain_iv.json"
+            if _civ_file.exists():
+                import json as _civ_json
+                _loaded = _civ_json.loads(_civ_file.read_text(encoding="utf-8"))
+                if isinstance(_loaded, dict):
+                    snapshot_data["chain_iv"] = _loaded
+        except Exception as _civ_e:
+            import sys as _sys
+            print(f"[aggregate] chain_iv.json load failed (non-fatal): "
+                  f"{_civ_e}", file=_sys.stderr)
+
     # Bug #25: parse contract-level standing directives from
     # state/fable_advisor_memory.md so the CLOSE recommender + rec-aging can
     # respect them (a directive-held CLOSE is suppressed with a transparency
@@ -278,6 +297,23 @@ def aggregate_briefing(
             print(f"[aggregate] stalled panel failed: {_stall_e}", file=_sys.stderr)
     lines.extend(render_header(date_str, regime, nlv, cash, action_count, confidence, regime_rationale, ytd_pnl, gate_state=gate_state, balance=balance))
     lines.extend(render_market_context(regime_data, quotes))
+
+    # Task #43 — Vol Surface subsection (true chain-implied vol). The map is
+    # computed by snapshot_inputs from this cycle's chains; when aggregate is
+    # driven from a re-loaded snapshot, fall back to the persisted
+    # chain_iv.json. Skew-blowout / term-inversion are FLAGS, not forecasts
+    # (wheelhouz signals #7/#8) — informational only. Fail-open: no chain IV
+    # → no section, the labeled RVrank proxy carries the briefing.
+    try:
+        from analysis import chain_iv as _civ_mod
+        if _civ_mod.load_chain_iv_config(config)["enabled"]:
+            lines.extend(_civ_mod.render_vol_surface(
+                snapshot_data.get("chain_iv") or {}, config,
+                rv_ranks=snapshot_data.get("iv_ranks") or {}))
+    except Exception as _civ_e:
+        import sys as _sys
+        print(f"[aggregate] vol-surface panel failed: {_civ_e}",
+              file=_sys.stderr)
     # Pass option positions (with real Greeks from E*TRADE) for the net-Greeks aggregate.
     # If theta is missing on positions, estimate it from current_mid + days_to_expiry as a
     # last-resort proxy (theta ≈ -mid / dte for short-dated options) so the briefing surfaces
@@ -358,6 +394,21 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] benchmark panel failed (non-fatal): {_bte}", file=_sys.stderr)
 
+    # Task #44 — 🤖 vs 🧠 ignored-rec forward ledger. Every prior action the
+    # reconciliation resolved EXECUTED or IGNORED is appended to
+    # state/rec_outcome_ledger.json with its rec-day mark, forward-marked at
+    # +7d/+30d from snapshot marks (labeled estimates), and summarized here
+    # in the benchmark section. Fail-open: any error → no panel.
+    try:
+        from analysis import ignored_ledger as _il
+        lines.extend(_il.update_and_render(
+            snapshot_dir, aging_info,
+            snapshot_data.get("positions") or [], date_str))
+    except Exception as _ile:
+        import sys as _sys
+        print(f"[aggregate] ignored-rec ledger failed (non-fatal): {_ile}",
+              file=_sys.stderr)
+
     # Task #41 — 👻 Ghost portfolio: options-stripped counterfactual NAV
     # ("is it the market or my moves?"). Full idempotent recompute from
     # snapshot history each cycle (also persists state/ghost_portfolio.json).
@@ -399,6 +450,59 @@ def aggregate_briefing(
     lines.extend(render_watch_with_commentary(equity_reviews, options_reviews, snapshot_data))
 
     lines.extend(render_opportunities(new_ideas))
+
+    # Task #42 — Put credit spreads, reference-first pilot. For every
+    # ACTIONABLE Tier-C CSP candidate above, compose the defined-risk spread
+    # variant (short leg = the CSP's gated strike; long leg from the same
+    # snapshot chain) and render the side-by-side paper-watch card. Daily
+    # outcomes are tracked in state/spread_paper_ledger.json. Reference mode
+    # changes NO gates; the Money Plan carries the informational BP line.
+    # Fail-open: any error → no subsection, briefing ships.
+    spreads_json: dict = {}
+    spread_reference_rollup: dict | None = None
+    try:
+        from analysis import spread_composer as _spc
+        _sp_cfg = _spc.load_spread_config(config)
+        if _sp_cfg["enabled"]:
+            _sp_chains = snapshot_data.get("chains") or {}
+            _sp_composed = _spc.compose_spreads(new_ideas, _sp_chains, config)
+            lines.extend(_spc.render_spreads_section(_sp_composed, config))
+            # Paper ledger: entry marks today + estimated close-outs for
+            # expired paper spreads (latest spot, labeled estimate).
+            _sp_spots: dict = {}
+            for _sym, _q in (snapshot_data.get("quotes") or {}).items():
+                if isinstance(_q, dict):
+                    _px = _q.get("lastTrade") or _q.get("last") or _q.get("price")
+                    if _px:
+                        _sp_spots[str(_sym).upper()] = _px
+            _sp_ledger_stats = _spc.update_paper_ledger(
+                _spc.default_ledger_path(snapshot_dir),
+                _sp_composed.get("spreads"), date_str,
+                spot_by_ticker=_sp_spots)
+            # Informational Money-Plan rollup: spread-mode BP for today's
+            # capacity-gated entries vs their cash-secured collateral.
+            _sp_gated = [
+                op for op in (list(long_term_opportunities or [])
+                              + list(new_ideas or []))
+                if isinstance(op, dict)
+                and (str(op.get("kind") or "").upper().startswith(("SKIPPED",
+                                                                   "DEFERRED"))
+                     or op.get("capacity_blocked"))
+            ]
+            spread_reference_rollup = _spc.spread_reference_summary(
+                _sp_gated, _sp_chains, config)
+            spreads_json = {
+                "mode": _sp_cfg["mode"],
+                "spreads": _sp_composed.get("spreads") or [],
+                "skips": _sp_composed.get("skips") or [],
+                "tier_excluded": _sp_composed.get("tier_excluded") or [],
+                "paper_ledger": _sp_ledger_stats,
+                "gated_reference": spread_reference_rollup,
+            }
+    except Exception as _sp_e:
+        import sys as _sys
+        print(f"[aggregate] spread composer failed (non-fatal): {_sp_e}",
+              file=_sys.stderr)
 
     # NEW (Wave 22): Long-term opportunities — ADD/TRIM/EXIT/HOLD + LEAPs + long-dated CSPs
     if long_term_opportunities:
@@ -1031,8 +1135,14 @@ def aggregate_briefing(
         recs = (snapshot_data.get("recommendations_list") or [])
         recs_map = {(r.get("ticker") or "").upper(): r
                     for r in recs if r.get("ticker")}
+        # Task #45 — Autopilot Claude-portfolio membership rides the same
+        # pass as a ` · 🤖 CP-held` suffix (corroboration only).
+        _cp_payload = snapshot_data.get("claude_portfolio") or {}
+        _cp_tickers = {str(t).upper()
+                       for t in (_cp_payload.get("tickers") or []) if t}
         md_text = "\n".join(lines)
-        md_text = annotate_parkev_chips(md_text, recs_map)
+        md_text = annotate_parkev_chips(md_text, recs_map,
+                                        cp_tickers=_cp_tickers)
         lines = md_text.split("\n")
     except Exception as _e:
         import sys as _sys
@@ -1053,6 +1163,34 @@ def aggregate_briefing(
     except Exception as _e:
         import sys as _sys
         print(f"[aggregate] tier-badge annotation failed: {_e}", file=_sys.stderr)
+
+    # ── True-IV label annotation (task #43) ───────────────────────────────
+    # Every legacy "IV rank N" token in the briefing IS the 252d realized-vol
+    # proxy — backward-looking, gap-inflatable (the AMZN "IV rank 100 / 4%
+    # ann" case). Rewrite each occurrence honestly: names with TRUE chain-
+    # implied vol this cycle render "IV 34% · IVrank 62 · RVrank N" (plus
+    # skew-blowout / term-inversion tags), names without chains render
+    # "RVrank N (realized-vol proxy)". Idempotent; italic footers exempt.
+    try:
+        from analysis import chain_iv as _civ_ann
+        if _civ_ann.load_chain_iv_config(config)["enabled"]:
+            md_text = "\n".join(lines)
+            md_text, _civ_stats = _civ_ann.annotate_briefing(
+                md_text, snapshot_data.get("chain_iv") or {},
+                snapshot_data.get("iv_ranks") or {}, config)
+            lines = md_text.split("\n")
+            if any(_civ_stats.values()):
+                lines.append(
+                    f"_📈 IV labels: {_civ_stats['true']} true chain-IV "
+                    f"read(s) · {_civ_stats['building']} building-history · "
+                    f"{_civ_stats['rv_only']} realized-vol fallback(s) "
+                    f"(RVrank, labeled — chains unavailable for those "
+                    f"names)._")
+                lines.append("")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] true-IV label annotation failed: {_e}",
+              file=_sys.stderr)
 
     # ── Same-cycle vintage guard ──────────────────────────────────────────
     # Never mix pre-gap technicals with live quotes on one card. When a name's
@@ -1191,6 +1329,7 @@ def aggregate_briefing(
             long_term_opportunities=long_term_opportunities,
             aging_info=aging_info,
             snapshot_dir=snapshot_dir,
+            spread_reference=spread_reference_rollup,
         )
         # Task #41 — 👻 "Wheel vs Ghost" bullet: the options program's
         # measured net contribution (real − ghost NAV). Appended before the
@@ -1313,6 +1452,9 @@ def aggregate_briefing(
         # panel failed this cycle (fail-open). The webapp renders this at
         # the top of the briefing page.
         "money_plan": money_plan_json,
+        # Task #42 — put-credit-spread reference pilot (paper-watch cards,
+        # ledger stats, gated-entry BP rollup). {} when disabled/failed.
+        "put_credit_spreads": spreads_json,
     }
     # Step 7.5: per-action aging — tomorrow's run reads this back for
     # reconciliation (each: {key, kind, ident, summary, first_flagged,

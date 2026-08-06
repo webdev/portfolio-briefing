@@ -186,6 +186,18 @@ def main():
         except Exception as _e:
             print(f"[Step 1.7] FINVIZ fetch failed (non-fatal): {_e}")
 
+        # Step 1.8: Claude/Autopilot portfolio — SECOND rec source (task
+        # #45). Live page fetch → 24h cache → manual seed, provenance-
+        # labeled; deliberately low weight downstream (CP chip + the
+        # Parkev-agreement playbook bonus only). Fail-open like Parkev's.
+        print("[Step 1.8] Fetching Claude/Autopilot portfolio...")
+        claude_portfolio: dict = {}
+        try:
+            from steps.fetch_claude_portfolio import fetch_claude_portfolio_step
+            claude_portfolio = fetch_claude_portfolio_step(snapshot_dir, config)
+        except Exception as _cpe:
+            print(f"[Step 1.8] Claude-portfolio fetch failed (non-fatal): {_cpe}")
+
         # Step 2: Snapshot inputs
         print("[Step 2] Snapshotting inputs...")
         # Build candidate chain-fetch list from Parkev BUY+ tickers so every
@@ -234,6 +246,9 @@ def main():
             raise
         # Make recommendations available to downstream skills via snapshot_data
         snapshot_data["recommendations_list"] = recommendations_list
+        # Task #45 — Claude/Autopilot portfolio rides along for the CP chip
+        # (parkev_chip) and the playbook agreement bonus (rotation_playbook).
+        snapshot_data["claude_portfolio"] = claude_portfolio
 
         # Step 3: Classify regime
         print("[Step 3] Classifying regime...")
@@ -674,6 +689,17 @@ def main():
                     _cand_md = _sr_cand.annotate_briefing(_cand_md, _sr_by_cand)
             except Exception as _se:
                 print(f"  WARNING: S/R annotation on candidate report failed: {_se}", file=sys.stderr)
+            # Task #43 — honest IV labels on the standalone report too: legacy
+            # "IV rank N" tokens become "IV 34% · IVrank 62 · RVrank N" (true
+            # chain IV) or "RVrank N (realized-vol proxy)". Fail-open.
+            try:
+                from analysis import chain_iv as _civ_cand
+                if _civ_cand.load_chain_iv_config(config)["enabled"]:
+                    _cand_md, _ = _civ_cand.annotate_briefing(
+                        _cand_md, snapshot_data.get("chain_iv") or {},
+                        snapshot_data.get("iv_ranks") or {}, config)
+            except Exception as _cie:
+                print(f"  WARNING: chain-IV annotation on candidate report failed: {_cie}", file=sys.stderr)
             _cand_path = output_path.parent / f"candidates_{today_date_str}.md"
             _cand_path.write_text(_cand_md)
             print(f"Candidate research: {_cand_path}")
@@ -727,6 +753,15 @@ def main():
                 gate_state=gate_state,
                 **({"verdict_state_path": _wte_verdict_path} if _wte_verdict_path else {}),
             )
+            # Task #43 — honest IV labels (same pass as the candidate report).
+            try:
+                from analysis import chain_iv as _civ_wte
+                if _wte_md and _civ_wte.load_chain_iv_config(config)["enabled"]:
+                    _wte_md, _ = _civ_wte.annotate_briefing(
+                        _wte_md, snapshot_data.get("chain_iv") or {},
+                        snapshot_data.get("iv_ranks") or {}, config)
+            except Exception as _cie_w:
+                print(f"  WARNING: chain-IV annotation on when-to-enter report failed: {_cie_w}", file=sys.stderr)
             if _wte_md:
                 _wte_path = output_path.parent / f"when_to_enter_{today_date_str}.md"
                 _wte_path.write_text(_wte_md)

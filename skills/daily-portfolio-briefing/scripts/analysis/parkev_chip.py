@@ -289,7 +289,8 @@ def _extract_ticker(line: str) -> str | None:
     return None
 
 
-def annotate_parkev_chips(md: str, recs_by_ticker: dict | None) -> str:
+def annotate_parkev_chips(md: str, recs_by_ticker: dict | None,
+                          cp_tickers: set | None = None) -> str:
     """Walk the rendered briefing markdown and append a Parkev chip to EVERY
     action-list / watch-row / capital-plan / candidate-card header that
     mentions a ticker, regardless of whether the ticker is in Parkev's
@@ -301,6 +302,10 @@ def annotate_parkev_chips(md: str, recs_by_ticker: dict | None) -> str:
       - Ticker NOT in recs_by_ticker → render `🅿️ no rec`
         (so the user knows the absence is INTENTIONAL, not a missing
         annotation — this is what the ARM case caught Jun 2026)
+      - Ticker in ``cp_tickers`` (task #45 — the Autopilot Claude
+        portfolio) → ` · 🤖 CP-held` appended AFTER the Parkev chip
+        (`🅿️ BUY · 🔥 High · 3d · 🤖 CP-held`). Corroboration only —
+        an anonymous source never changes the Parkev read itself.
       - Lines already carrying a 🅿️ marker → never double-annotated
       - Sub-bullets / S/R continuation lines / prose → skipped (no chip)
 
@@ -322,6 +327,7 @@ def annotate_parkev_chips(md: str, recs_by_ticker: dict | None) -> str:
     recs_norm = {t.upper(): v for t, v in recs_by_ticker.items() if t}
     if not recs_norm:
         return md
+    cp_norm = {str(t).upper() for t in (cp_tickers or set()) if t}
     out_lines = []
     for line in md.splitlines():
         if _is_annotatable_header(line):
@@ -330,6 +336,8 @@ def annotate_parkev_chips(md: str, recs_by_ticker: dict | None) -> str:
                 # Look up; if absent, format_parkev_chip(None) → "🅿️ no rec"
                 rec = recs_norm.get(tk)
                 chip = format_parkev_chip(rec)
+                if tk in cp_norm:
+                    chip += " · 🤖 CP-held"
                 line = f"{line}  · {chip}"
         out_lines.append(line)
     return "\n".join(out_lines)

@@ -516,6 +516,34 @@ def conviction_score(
     return score
 
 
+def cp_agreement_bonus(ticker: str, parkev_rating: str | None,
+                       cp_tickers: set | None,
+                       config: dict | None) -> tuple[float, str | None]:
+    """Task #45 — Claude/Autopilot portfolio AGREEMENT bonus.
+
+    +``claude_portfolio.agreement_bonus`` (default 1) ONLY when BOTH
+    Parkev (a BUY-variant, i.e. normalized rating "BUY") AND the Claude
+    portfolio hold the name. CP membership alone adds NOTHING — it's an
+    anonymous, methodology-opaque source, so it corroborates a Parkev
+    catalyst but never qualifies a candidate by itself.
+
+    Returns (score_delta, setup_flag_or_None).
+    """
+    cp_cfg = (config or {}).get("claude_portfolio") \
+        if isinstance(config, dict) else None
+    cp_cfg = cp_cfg if isinstance(cp_cfg, dict) else {}
+    if not cp_cfg.get("enabled", True):
+        return 0.0, None
+    if not cp_tickers or str(ticker or "").upper() not in cp_tickers:
+        return 0.0, None
+    if str(parkev_rating or "").upper() != "BUY":
+        return 0.0, None
+    bonus = _f(cp_cfg.get("agreement_bonus"), 1.0) or 0.0
+    if bonus <= 0:
+        return 0.0, None
+    return bonus, f"🤖 CP agrees with Parkev (+{bonus:g})"
+
+
 def star_badge(score: float) -> str:
     """⭐⭐⭐ ≥18 · ⭐⭐ ≥12 · ⭐ ≥6 · '' below (qualified but unstarred)."""
     if score >= 18:
@@ -692,6 +720,7 @@ def _phase2_gate_battery(
     cfg: dict,
     config: dict | None,
     min_score: float,
+    iv_is_true: bool = False,
 ) -> list[str]:
     """Final gate battery every Phase 2 candidate passes BEFORE selection.
 
@@ -722,11 +751,17 @@ def _phase2_gate_battery(
     reasons: list[str] = []
 
     # Gate 3 — IV-rank honesty (re-score first, before floors read the score).
+    # Task #43: this gate exists to catch the REALIZED-vol proxy's gap
+    # inflation (backward-looking rank pinned at 100 by the move itself). A
+    # TRUE chain-implied rank is measured from today's chains — post-crush it
+    # is already low, so the gap-inflation rewrite doesn't apply (the
+    # delivered-yield floors in gate 2 stay as belt-and-suspenders).
     try:
         from analysis.iv_honesty import claimed_fat_but_thin
     except ImportError:
         claimed_fat_but_thin = None
-    if (claimed_fat_but_thin is not None and iv_rank is not None
+    if (not iv_is_true
+            and claimed_fat_but_thin is not None and iv_rank is not None
             and claimed_fat_but_thin(
                 iv_rank, cand.annualized_yield_pct, config)):
         iv_token = f"IV rank {iv_rank:.0f}"
@@ -974,10 +1009,23 @@ def _compute(
         technicals = snapshot_data.get("technicals") or {}
     iv_ranks = _analytics_get(analytics, "iv_ranks") \
         or snapshot_data.get("iv_ranks") or {}
+    # Task #43 — TRUE chain-implied IV rank (measured from this cycle's
+    # chains) is preferred over the 252d realized-vol proxy for every
+    # `iv_rank ≥ N` condition below. The proxy is backward-looking: the
+    # AMZN post-gap card carried "IV rank 100" while the delivered premium
+    # was 4% annualized. Fail-open: no chain IV → labeled RV fallback.
+    chain_iv_map = _analytics_get(analytics, "chain_iv") \
+        or snapshot_data.get("chain_iv") or {}
+    chain_iv_map = chain_iv_map if isinstance(chain_iv_map, dict) else {}
     earnings_cal = _analytics_get(analytics, "earnings_calendar") or {}
     # Rule #43 gate battery — live quotes for the vintage check (fail-open).
     quotes_map = snapshot_data.get("quotes") or {}
     quotes_map = quotes_map if isinstance(quotes_map, dict) else {}
+    # Task #45 — Claude/Autopilot portfolio membership (agreement bonus).
+    _cp_payload = snapshot_data.get("claude_portfolio")
+    _cp_payload = _cp_payload if isinstance(_cp_payload, dict) else {}
+    cp_tickers_set = {str(t).upper()
+                      for t in (_cp_payload.get("tickers") or []) if t}
 
     # Spots for intrinsic math (fail-open).
     spots: dict[str, float] = {}
@@ -1144,6 +1192,17 @@ def _compute(
         iv_rank = _f(raw_d.get("iv_rank"), None)
         if iv_rank is None and isinstance(iv_ranks, dict):
             iv_rank = _f(iv_ranks.get(c.ticker), None)
+        # Task #43 preference order: TRUE chain-implied rank when available,
+        # labeled realized-vol proxy otherwise.
+        iv_is_true = False
+        try:
+            from analysis.chain_iv import effective_iv_rank as _eff_iv
+            _iv_val, _iv_src = _eff_iv(c.ticker, chain_iv_map, iv_rank)
+            if _iv_src == "chain":
+                iv_rank = _iv_val
+                iv_is_true = True
+        except ImportError:
+            pass
         drawdown = _f(raw_d.get("drawdown_pct"), None)
         if drawdown is None:
             drawdown = _f(tech.get("drawdown_pct"), None)
@@ -1161,7 +1220,12 @@ def _compute(
         if rsi is not None and rsi < 35:
             setup_flags.append(f"RSI {rsi:.0f} deep oversold")
         if iv_rank is not None and iv_rank >= 85:
-            setup_flags.append(f"IV rank {iv_rank:.0f}")
+            # Label the source honestly: "IVrank(true) N" is chain-implied
+            # (measured this cycle); the bare legacy token stays for the
+            # realized-vol fallback (the aggregate annotation pass relabels
+            # it "RVrank N" in the rendered briefing).
+            setup_flags.append(f"IVrank(true) {iv_rank:.0f}" if iv_is_true
+                               else f"IV rank {iv_rank:.0f}")
         if drawdown is not None and drawdown >= 30:
             setup_flags.append(f"drawdown {drawdown:.0f}%")
 
@@ -1287,6 +1351,15 @@ def _compute(
         # premium, and "no date found" must not read as "no print coming".
         if earnings_unknown:
             score -= earn_unknown_penalty
+
+        # Task #45 — Claude-portfolio AGREEMENT bonus: fires only when
+        # Parkev is a BUY-variant AND the CP holds the name; CP membership
+        # alone never adds a point (never standalone qualification).
+        cp_delta, cp_flag = cp_agreement_bonus(
+            c.ticker, rating, cp_tickers_set, config)
+        if cp_delta:
+            score += cp_delta
+            setup_flags.append(cp_flag)
 
         # Task #30 — equity-stacking gate: a short put on a name whose
         # EQUITY is already a large slice of NLV concentrates single-name
@@ -1419,7 +1492,8 @@ def _compute(
             cand, iv_rank=iv_rank, tech=tech,
             live_quote=(quotes_map.get(c.ticker)
                         or quotes_map.get(str(c.ticker).upper())),
-            cfg=cfg, config=_cfg_top, min_score=min_score)
+            cfg=cfg, config=_cfg_top, min_score=min_score,
+            iv_is_true=iv_is_true)
         if battery_reasons:
             battery_skips.append(
                 f"⛔ {c.ticker} ${c.strike:g}P excluded — "

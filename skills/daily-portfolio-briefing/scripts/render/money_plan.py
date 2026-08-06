@@ -258,6 +258,7 @@ def build_money_plan(
     long_term_opportunities: list | None = None,
     aging_info: dict | None = None,
     snapshot_dir=None,
+    spread_reference: dict | None = None,
 ) -> tuple[list[str], dict]:
     """Compose the 💰 Money Plan. Returns (markdown_lines, json_dict);
     ([], {}) when nothing is measurable. Never raises past its own guard —
@@ -485,6 +486,18 @@ def build_money_plan(
             if cov_now < floor:
                 gate_bit += f" (coverage {cov_now:.2f}× < {floor:.2f}×)"
         blocked_bits.append(gate_bit)
+    # Task #42 — informational only (reference mode changes NO gate): what
+    # buying power would spread-mode need for today's gated entries vs the
+    # cash-secured collateral? Only entries with a REAL composed long leg
+    # count (spread_composer.spread_reference_summary), never extrapolated.
+    if isinstance(spread_reference, dict) and spread_reference.get("count"):
+        _sr_n = int(spread_reference["count"])
+        blocked_bits.append(
+            f"spread-mode would run today's {_sr_n} gated "
+            f"entr{'y' if _sr_n == 1 else 'ies'} at "
+            f"~${_f(spread_reference.get('spread_bp')):,.0f} BP vs "
+            f"${_f(spread_reference.get('csp_collateral')):,.0f} "
+            f"cash-secured")
     if hedge_nag and hedge_days:
         blocked_bits.append(
             f"hedge undecided {int(hedge_days)}d — standing question")
@@ -513,6 +526,8 @@ def build_money_plan(
         "theta_per_day": (round(theta_day, 2)
                           if theta_day is not None else None),
         "gated_entry_count": len(gated),
+        # Task #42 — spread-mode BP rollup for gated entries (informational).
+        "spread_reference": spread_reference,
         "monthly_unlock": (round(unlock, 2) if unlock is not None else None),
         "hedge_nag": hedge_nag,
         # Bullet lines (without the '- ' prefix) for the webapp panel.

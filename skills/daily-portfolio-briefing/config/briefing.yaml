@@ -404,6 +404,22 @@ iv_gap_check:
   min_yield_for_fat_claim: 0.20 # delivered annualized yield below 20% = thin
   gap_threshold_pct: 8          # |1d/2d move| ≥ 8% within last 3 sessions = gap
 
+# Task #43 — TRUE chain-implied vol (replaces the realized-vol "IV rank"
+# proxy on every surface where chains were fetched this cycle). Per
+# underlying: ATM 30d implied vol (interpolated from the strikes bracketing
+# spot), 25Δ put-call skew (skew blowout when > skew_sigma_threshold σ of its
+# own trailing mean), and term slope (front − back ATM IV; positive =
+# inverted / front-stressed). True IVrank = percentile of today's atm_iv_30d
+# vs the rolling per-ticker history (252 entries) persisted to history_path;
+# while history < min_history_days the rank renders "building history" and
+# the legacy realized-vol percentile stays as a LABELED companion (RVrank) —
+# never as "IV rank". See scripts/analysis/chain_iv.py.
+chain_iv:
+  enabled: true
+  history_path: state/chain_iv_history.json  # relative to the skill root
+  min_history_days: 20          # rank renders n/a below this many observations
+  skew_sigma_threshold: 2.0     # skew blowout flag at ≥ 2σ vs trailing mean
+
 # Intrinsic value — attach a fair-value read (FMP DCF + analyst price-target
 # consensus) to EVERY single-stock recommendation. ETFs are labelled
 # "n/a — basket"; missing FMP data fails closed (no fabricated number). Requires
@@ -652,6 +668,33 @@ rotation_playbook:
     - {max_days: 30, multiplier: 1.0}    # month-old — baseline
     - {max_days: 60, multiplier: 0.5}    # fading — decayed weight
     - {max_days: null, multiplier: 0.25} # stale — near-zero credit
+
+# Task #42 — Put credit spreads, reference-first pilot. Defined-risk income
+# for Tier C premium-only names: the spread variant of each ALREADY-GATED
+# CSP candidate (same short strike; long leg ≈ width_target below, from the
+# same snapshot chain) consumes ~(width − credit) of buying power instead of
+# full cash-secured collateral. mode: reference (default) renders the
+# side-by-side paper-watch card + tracks outcomes in
+# state/spread_paper_ledger.json and changes NO gates; mode: live renders
+# actionable two-leg tickets (built, off by default). Tier A/B names are
+# excluded — conviction names keep the assignment path. Skips (zero-bid long
+# leg, credit% below floor, no chain) always render with reasons (rule #24).
+spread:
+  enabled: true
+  mode: reference                # reference (paper-watch) | live
+  width_target: 20               # $ width; high-priced names use 10% of strike
+  high_price_width_pct: 0.10
+  min_credit_pct_of_width: 0.15  # quality floor — skip thinner spreads
+
+# Task #45 — Claude/Autopilot portfolio as a SECOND rec source (anonymous,
+# low weight). Fetched fail-open by skills/claude-portfolio-fetcher (live
+# page fetch → manual seed fallback, 24h cache, provenance-labeled). CP-held
+# tickers get a `🤖 CP-held` chip after the Parkev chip; the rotation
+# playbook adds agreement_bonus ONLY when BOTH Parkev (BUY-variant) AND the
+# Claude portfolio agree — CP membership alone never qualifies a candidate.
+claude_portfolio:
+  enabled: true
+  agreement_bonus: 1
 
 # Output
 output:

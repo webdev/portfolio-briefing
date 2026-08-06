@@ -826,6 +826,7 @@ def generate_long_term_opportunities_step(
     # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
     _enrich_with_live_premiums(
         op_dicts, iv_ranks=iv_ranks, technicals=technicals, config=config,
+        chain_iv=snapshot_data.get("chain_iv"),
     )
 
     # Universal capacity-gate DEFERRED tag (hard rules #24 / #41, audit
@@ -1107,6 +1108,7 @@ def _enrich_with_live_premiums(
     iv_ranks: dict | None = None,
     technicals: dict | None = None,
     config: dict | None = None,
+    chain_iv: dict | None = None,
 ) -> None:
     """Fetch real put-chain bid/mid/ask via the etrade-chain-fetcher skill.
 
@@ -1267,6 +1269,14 @@ def _enrich_with_live_premiums(
         if op.get("rationale") and "fat premium" in op["rationale"]:
             _t = (op.get("ticker") or "").upper()
             _iv = (iv_ranks or {}).get(_t) or (iv_ranks or {}).get(op.get("ticker"))
+            # Task #43: prefer the TRUE chain-implied rank when measured this
+            # cycle — post-crush it is already low, so a "fat premium" claim
+            # is checked against reality instead of the gap-inflated
+            # realized-vol proxy. The delivered-yield cross-check below stays
+            # as belt-and-suspenders either way.
+            _civ_m = (chain_iv or {}).get(_t)
+            if isinstance(_civ_m, dict) and _civ_m.get("iv_rank") is not None:
+                _iv = _civ_m["iv_rank"]
             _tech = (technicals or {}).get(_t) or (technicals or {}).get(op.get("ticker"))
             rewritten = iv_honesty.rewrite_fat_premium(
                 op["rationale"],

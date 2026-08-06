@@ -897,6 +897,58 @@ def snapshot_inputs(
     )
     chains = _parallel_chain_fetch(chain_pairs)
 
+    # Task #43 — TRUE chain-implied vol (ATM IV / 25Δ skew / term slope) from
+    # the chains just fetched, plus the true IV rank vs the persisted rolling
+    # history (state/chain_iv_history.json). The legacy 252d realized-vol
+    # percentile stays available as a LABELED companion (RVrank) — it is
+    # backward-looking and has claimed "IV rank 100 = fat premium" on names
+    # whose implied premium had crushed (AMZN post-gap 4% ann). Fail-open:
+    # any error → empty map, briefing falls back to the labeled RV proxy.
+    chain_iv_map: dict = {}
+    try:
+        from analysis import chain_iv as _civ
+        _civ_cfg = _civ.load_chain_iv_config(config)
+        if _civ_cfg["enabled"] and chains:
+            _hist_path = _civ.resolve_history_path(config, snapshot_dir)
+            # One-time seed from stored snapshot chains (idempotent — dates
+            # already seeded are skipped, so steady-state cost is ~0).
+            _seeded = _civ.backfill_history(
+                snapshot_dir.parent, _hist_path, config=config)
+            if _seeded:
+                print(f"  Chain-IV history: backfilled {_seeded} day(s) "
+                      f"from stored snapshot chains")
+            _civ_spots: dict = {}
+            for _s, _t in technicals.items():
+                if isinstance(_t, dict) and _t.get("spot"):
+                    _civ_spots.setdefault(str(_s).upper(), _t["spot"])
+            for _s, _q in quotes.items():
+                if isinstance(_q, dict) and _q.get("last"):
+                    _civ_spots.setdefault(str(_s).upper(), _q["last"])
+            from datetime import date as _civ_date
+            try:
+                _civ_as_of = _civ_date.fromisoformat(snapshot_dir.name)
+            except ValueError:
+                _civ_as_of = _civ_date.today()
+            chain_iv_map = _civ.compute_metrics_for_snapshot(
+                chains, _civ_spots, as_of=_civ_as_of)
+            _hist = _civ.load_history(_hist_path)
+            _civ.update_history(_hist, _civ_as_of.isoformat(), chain_iv_map)
+            if _civ_as_of.isoformat() not in (_hist.get("dates_seeded") or []):
+                _hist.setdefault("dates_seeded", []).append(
+                    _civ_as_of.isoformat())
+                _hist["dates_seeded"] = sorted(_hist["dates_seeded"])
+            _civ.save_history(_hist_path, _hist)
+            _civ.attach_ranks(chain_iv_map, _hist, config)
+            _ranked = sum(1 for m in chain_iv_map.values()
+                          if m.get("iv_rank") is not None)
+            print(f"  Chain-IV: true implied vol for {len(chain_iv_map)} "
+                  f"underlyings ({_ranked} with enough history for a true "
+                  f"IVrank)")
+    except Exception as e:
+        print(f"    [warn] chain-IV computation failed (falling back to the "
+              f"labeled realized-vol proxy): {e}", file=sys.stderr)
+        chain_iv_map = {}
+
     # Persist
     with open(snapshot_dir / "accounts.json", "w") as f:
         json.dump(accounts, f, indent=2, default=json_default)
@@ -920,6 +972,10 @@ def snapshot_inputs(
     for key, value in chains.items():
         with open(chains_dir / f"{key}.json", "w") as f:
             json.dump(value, f, indent=2, default=json_default)
+
+    if chain_iv_map:
+        with open(snapshot_dir / "chain_iv.json", "w") as f:
+            json.dump(chain_iv_map, f, indent=2, default=json_default)
 
     # Persist earnings calendar and YTD P&L
     with open(snapshot_dir / "earnings.json", "w") as f:
@@ -951,6 +1007,11 @@ def snapshot_inputs(
         "chains": {"source": "etrade_live" if etrade_live else "yfinance",
                    "fetched_at": now_iso, "fresh": True},
         "iv_ranks": {"source": "yfinance_252d", "fetched_at": now_iso, "fresh": True},
+        # Task #43: true implied vol measured from this cycle's chains
+        # (ATM 30d IV, 25Δ skew, term slope + rank vs rolling history).
+        "chain_iv": {"source": "chains_atm_iv", "fetched_at": now_iso,
+                     "fresh": bool(chain_iv_map),
+                     "tickers": len(chain_iv_map)},
         "technicals": {"source": "yfinance_730d", "fetched_at": now_iso, "fresh": True},
         "earnings_calendar": {"source": "yfinance+fmp_fallback",
                               "fetched_at": now_iso, "fresh": True},
@@ -971,6 +1032,7 @@ def snapshot_inputs(
         "iv_ranks": iv_ranks,
         "technicals": technicals,
         "chains": chains,
+        "chain_iv": chain_iv_map,
         "open_orders": open_orders,
         "theses": theses,
         "earnings_calendar": earnings_calendar,

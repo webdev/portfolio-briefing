@@ -1,0 +1,13 @@
+# Claude Portfolio fetcher — configuration.
+#
+# The public Autopilot "Claude Portfolio" landing page embeds the holdings
+# (symbol + percentOfPortfolio) in its Next.js flight data; there is no
+# stable public JSON API, so the page IS the source. Swap source_url to a
+# mirror/API endpoint if one appears — the parser tries JSON first, then
+# the flight-data pattern.
+source_url: "https://www.joinautopilot.com/landing/1/950048"
+timeout_sec: 20
+cache_hours: 24
+cache_path: "state/claude_portfolio_cache.json"     # relative to skill root
+manual_seed_path: "config/claude_portfolio_manual.yaml"
+manual_seed_max_age_days: 45   # older seed still used, but flagged stale
