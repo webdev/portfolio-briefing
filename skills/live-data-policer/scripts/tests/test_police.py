@@ -158,6 +158,76 @@ def test_fmp_fallback_earnings_source_passes():
         assert not result.stale_sources, src
 
 
+def test_task36_etrade_routed_sources_pass_allow_list():
+    """Task #36: snapshot chains/quotes now route through E*TRADE with a
+    labeled yfinance fallback — provenance carries the MEASURED split label
+    ('etrade', 'etrade+yfinance-fallback'). Both must PASS the allow-list on
+    both chains and quotes; the legacy 'etrade_live' stamp stays allowed for
+    older snapshots."""
+    for src in ("etrade", "etrade+yfinance-fallback", "etrade_live"):
+        snapshot = {
+            "data_provenance": {
+                "positions": _provenance("etrade_live", 5),
+                "broker_positions": _provenance("etrade_live", 5),
+                "quotes": {**_provenance(src, 2), "requested": 150,
+                           "fetched": 149, "etrade": 146, "yfinance": 3},
+                "chains": {**_provenance(src, 10), "etrade": 112,
+                           "yfinance": 38},
+                "iv_ranks": _provenance("yfinance_252d", 60),
+                "earnings_calendar": _provenance("yfinance", 60),
+            }
+        }
+        result = police_data_freshness(snapshot)
+        assert result.verdict == "PASS", src
+        assert not result.stale_sources, src
+
+
+def test_task36_quote_coverage_line_reports_etrade_yfinance_split():
+    """Task #36: when coverage dips below the 90% floor, the advisory line
+    reports the measured etrade/yfinance split so the reader can see WHICH
+    backend degraded (the old line only gave a total: 'only 23/134 symbols
+    (17%) received live quotes')."""
+    snapshot = {
+        "data_provenance": {
+            "positions": _provenance("etrade_live", 5),
+            "broker_positions": _provenance("etrade_live", 5),
+            "quotes": {**_provenance("etrade+yfinance-fallback", 2),
+                       "requested": 134, "fetched": 100,
+                       "etrade": 97, "yfinance": 3},
+            "chains": _provenance("etrade", 10),
+            "iv_ranks": _provenance("yfinance_252d", 60),
+            "earnings_calendar": _provenance("yfinance", 60),
+        }
+    }
+    result = police_data_freshness(snapshot)
+    assert result.verdict == "WARN"
+    cov = [s for s in result.stale_sources if s["source"] == "quote_coverage"]
+    assert cov, "coverage line missing"
+    assert "97 etrade" in cov[0]["issue"]
+    assert "3 yfinance" in cov[0]["issue"]
+
+
+def test_task36_coverage_line_without_split_counts_still_renders():
+    """Older snapshots without etrade/yfinance counts keep the plain
+    coverage line (fail-open on missing metadata)."""
+    snapshot = {
+        "data_provenance": {
+            "positions": _provenance("etrade_live", 5),
+            "broker_positions": _provenance("etrade_live", 5),
+            "quotes": {**_provenance("yfinance", 2),
+                       "requested": 36, "fetched": 22},
+            "chains": _provenance("etrade_live", 10),
+            "iv_ranks": _provenance("yfinance_252d", 60),
+            "earnings_calendar": _provenance("yfinance", 60),
+        }
+    }
+    result = police_data_freshness(snapshot)
+    cov = [s for s in result.stale_sources if s["source"] == "quote_coverage"]
+    assert cov
+    assert "only 22/36" in cov[0]["issue"]
+    assert "split" not in cov[0]["issue"]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

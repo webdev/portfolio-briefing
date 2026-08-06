@@ -1,0 +1,29 @@
+{
+  "status": "ok",
+  "inception": "2026-05-09",
+  "as_of": "2026-05-22",
+  "series": {
+    "2026-05-09": {"ghost_nav": 1000000.0, "real_nav": 1000000.0, "gap": 0.0, "gap_delta_1d": null},
+    "2026-05-11": {"ghost_nav": 1001000.0, "real_nav": 1002500.0, "gap": 1500.0, "gap_delta_1d": 1500.0},
+    "2026-05-12": {"ghost_nav": 1000500.0, "real_nav": 1003500.0, "gap": 3000.0, "gap_delta_1d": 1500.0},
+    "2026-05-13": {"ghost_nav": 1002000.0, "real_nav": 1006200.0, "gap": 4200.0, "gap_delta_1d": 1200.0},
+    "2026-05-14": {"ghost_nav": 1003000.0, "real_nav": 1008000.0, "gap": 5000.0, "gap_delta_1d": 800.0},
+    "2026-05-15": {"ghost_nav": 1001500.0, "real_nav": 1007700.0, "gap": 6200.0, "gap_delta_1d": 1200.0},
+    "2026-05-18": {"ghost_nav": 1004000.0, "real_nav": 1011000.0, "gap": 7000.0, "gap_delta_1d": 800.0},
+    "2026-05-19": {"ghost_nav": 1005000.0, "real_nav": 1013100.0, "gap": 8100.0, "gap_delta_1d": 1100.0},
+    "2026-05-20": {"ghost_nav": 1004500.0, "real_nav": 1013700.0, "gap": 9200.0, "gap_delta_1d": 1100.0},
+    "2026-05-21": {"ghost_nav": 1006000.0, "real_nav": 1016300.0, "gap": 10300.0, "gap_delta_1d": 1100.0},
+    "2026-05-22": {"ghost_nav": 1007000.0, "real_nav": 1018500.0, "gap": 11500.0, "gap_delta_1d": 1200.0}
+  },
+  "summary": {
+    "total_gap": 11500.0,
+    "month_gap": 11500.0,
+    "week_gap": 5300.0,
+    "inception": "2026-05-09",
+    "as_of": "2026-05-22"
+  },
+  "events": [],
+  "notes": [],
+  "footnote": "Ghost = all options closed at inception marks, never traded again.",
+  "generated_at": "2026-05-22T10:00:00"
+}

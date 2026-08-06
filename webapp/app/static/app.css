@@ -3008,3 +3008,48 @@ html[data-theme="solarized-light"] .tech-card {
     color: var(--color-text-tertiary);
     font-style: italic;
 }
+
+/* ─── 💪 Program Edge card (Home) ─── */
+.program-edge-card .pe-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .75rem;
+}
+.pe-headline {
+    display: flex;
+    align-items: baseline;
+    gap: .6rem;
+    flex-wrap: wrap;
+    margin: .25rem 0 .1rem;
+}
+.pe-big {
+    font-family: var(--font-mono);
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+.pe-pos { color: var(--color-positive); }
+.pe-neg { color: var(--color-negative); }
+.pe-sub { font-size: 12px; }
+.pe-deltas {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin-bottom: .5rem;
+}
+.pe-table {
+    width: 100%;
+    margin-top: .5rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    border-collapse: collapse;
+}
+.pe-table th {
+    text-align: right;
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    padding: .15rem .5rem;
+}
+.pe-table td { text-align: right; padding: .15rem .5rem; }
+.pe-table td:first-child, .pe-table th:first-child { text-align: left; padding-left: 0; }
+.pe-building { margin: .25rem 0 0; }

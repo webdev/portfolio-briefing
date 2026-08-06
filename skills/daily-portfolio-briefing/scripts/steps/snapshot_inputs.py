@@ -454,6 +454,10 @@ def _fetch_option_chain(underlying: str, expiration: str) -> dict | None:
             "calls": _clean(calls),
             "puts": _clean(puts),
             "fetched_at": datetime.utcnow().isoformat() + "Z",
+            # Per-item source truth (task #36): this producer is yfinance.
+            # Provenance labels are derived from these per-chain fields,
+            # never from the run-mode flag.
+            "source": "yfinance",
         }
     except Exception as e:
         print(f"    [warn] chain fetch failed for {underlying} {expiration}: {e}", file=sys.stderr)
@@ -585,6 +589,7 @@ def _parallel_chain_fetch(pairs: list[tuple[str, str]]) -> dict:
 def _build_chain_pairs(
     refreshed_positions: list,
     underlyings_with_options: list[str],
+    list_expirations_fn=None,
 ) -> list[tuple[str, str]]:
     """Compute (underlying, expiration) pairs to fetch.
 
@@ -610,11 +615,22 @@ def _build_chain_pairs(
             and p.get("underlying") == underlying
             and p.get("expiration")
         })
-        try:
-            t = yf.Ticker(underlying)
-            available = list(t.options or [])
-        except Exception:
-            available = []
+        # Expiration listing: E*TRADE-backed lister when routing (task #36),
+        # yfinance otherwise. If the lister returns nothing for a symbol,
+        # fall through to yfinance so pair-building never degrades below the
+        # pre-routing behavior.
+        available: list[str] = []
+        if list_expirations_fn is not None:
+            try:
+                available = list(list_expirations_fn(underlying) or [])
+            except Exception:
+                available = []
+        if not available:
+            try:
+                t = yf.Ticker(underlying)
+                available = list(t.options or [])
+            except Exception:
+                available = []
 
         future_exps: list[str] = []
         if available and held_exps:
@@ -781,19 +797,68 @@ def snapshot_inputs(
     technical_symbols = sorted({s for s in (underlyings | _extra_tech) if s})
     earnings_symbols = sorted({s for s in underlyings if s})
 
+    # ------------------------------------------------------------------
+    # Task #36 — quote/chain routing through E*TRADE (hard rule #2).
+    # Routing is ON when the run is live OR config chains.source == "etrade".
+    # Fail-open at every layer: no tokens / adapter missing → yfinance,
+    # LABELED per item; the pipeline never blocks on E*TRADE.
+    # ------------------------------------------------------------------
+    chains_cfg = (config.get("chains") or {}) if isinstance(config, dict) else {}
+    etrade_routing = bool(etrade_live) or (
+        str(chains_cfg.get("source", "")).lower() == "etrade")
+    _routing = None
+    if etrade_routing:
+        try:
+            from analysis import chain_routing as _routing  # noqa: N813
+        except Exception as e:
+            print(f"    [warn] chain_routing unavailable ({e}) — "
+                  f"yfinance path for this run", file=sys.stderr)
+            _routing = None
+
+    # E*TRADE batch quotes FIRST (25 symbols/call, ≤4 req/s) — this is what
+    # erases the yfinance-throttle quote gap (111/134 missing, 2026-07-30).
+    # yfinance covers only the E*TRADE misses (index symbols, failures).
+    etrade_quotes: dict = {}
+    if _routing is not None:
+        try:
+            etrade_quotes = _routing.fetch_quotes_etrade(quote_symbols)
+        except Exception as e:
+            print(f"    [warn] E*TRADE batch quotes failed: {e} — "
+                  f"yfinance fallback for all symbols", file=sys.stderr)
+            etrade_quotes = {}
+    yf_quote_symbols = [s for s in quote_symbols if s not in etrade_quotes]
+
     print(
         f"  Fetching live data in parallel "
-        f"(quotes:{len(quote_symbols)}, technicals:{len(technical_symbols)}, "
+        f"(quotes:{len(yf_quote_symbols)}"
+        f"{' yf + ' + str(len(etrade_quotes)) + ' etrade' if etrade_quotes else ''}, "
+        f"technicals:{len(technical_symbols)}, "
         f"earnings:{len(earnings_symbols)}, workers={_PARALLEL_FETCH_WORKERS})..."
     )
     quotes, iv_ranks, technicals, earnings_calendar = _parallel_market_data_fetch(
-        quote_symbols, technical_symbols, earnings_symbols
+        yf_quote_symbols, technical_symbols, earnings_symbols
     )
+    # Per-item source labels (task #36): yfinance quotes labeled at merge,
+    # E*TRADE quotes carry source="etrade" from the router.
+    for _q in quotes.values():
+        _q.setdefault("source", "yfinance")
+    quotes.update(etrade_quotes)
+    # Backfill fiveDayChangePct on E*TRADE quotes from the technicals' own
+    # OHLC pull (recent_closes) — no extra network; absent when unavailable.
+    for _sym, _q in quotes.items():
+        if _q.get("source") == "etrade" and "fiveDayChangePct" not in _q:
+            _rc = ((technicals.get(_sym) or {}).get("recent_closes") or [])
+            if len(_rc) >= 6 and _rc[0]:
+                _q["fiveDayChangePct"] = round(
+                    (_q["last"] - _rc[0]) / _rc[0], 4)
     print(
         f"  Parallel fetch complete: {len(quotes)} quotes, "
         f"{len(iv_ranks)} IV ranks, {len(technicals)} technical sets, "
         f"{len(earnings_calendar)} earnings dates"
     )
+    if _routing is not None:
+        print("  " + _routing.split_line(
+            "quotes", _routing.quote_source_counts(quotes)))
 
     # Fetch YTD options P&L from E*TRADE if available
     ytd_pnl: dict = {}
@@ -883,7 +948,17 @@ def snapshot_inputs(
     new_candidates = sorted(extra_set - held_set)
     all_underlyings = sorted(held_set | extra_set)
 
-    chain_pairs = _build_chain_pairs(refreshed_positions, all_underlyings)
+    # E*TRADE-backed expiration listing when routing (falls back to yfinance
+    # per-symbol inside _build_chain_pairs). None → pure yfinance listing.
+    _exp_lister = None
+    if _routing is not None:
+        try:
+            _exp_lister = _routing.make_expiration_lister()
+        except Exception:
+            _exp_lister = None
+
+    chain_pairs = _build_chain_pairs(refreshed_positions, all_underlyings,
+                                     list_expirations_fn=_exp_lister)
     if new_candidates:
         print(
             f"  Chain coverage: {len(held_underlyings)} held + "
@@ -891,11 +966,34 @@ def snapshot_inputs(
             f"(new: {', '.join(new_candidates[:8])}"
             f"{', ...' if len(new_candidates) > 8 else ''})"
         )
-    print(
-        f"  Fetching {len(chain_pairs)} option chains in parallel "
-        f"(held + future + candidates, workers={_PARALLEL_FETCH_WORKERS})..."
-    )
-    chains = _parallel_chain_fetch(chain_pairs)
+    if _routing is not None:
+        # Task #36: priority-tiered E*TRADE fetch (held + near-expiry first),
+        # per-run budget cap, ≤4 req/s throttle, labeled yfinance fallback.
+        _max_chains = int(chains_cfg.get(
+            "etrade_max_chains", _routing.DEFAULT_MAX_CHAINS))
+        _spots: dict = {}
+        for _s, _q in quotes.items():
+            if isinstance(_q, dict) and _q.get("last"):
+                _spots[_s] = _q["last"]
+        for _s, _t in technicals.items():
+            if isinstance(_t, dict) and _t.get("spot"):
+                _spots.setdefault(_s, _t["spot"])
+        _plan = _routing.build_chain_plan(
+            chain_pairs, refreshed_positions, max_chains=_max_chains)
+        print(f"  Fetching {len(chain_pairs)} option chains via E*TRADE "
+              f"(budget {_max_chains}, throttle "
+              f"{_routing.ETRADE_RATE_PER_SEC:.0f} req/s, "
+              f"yfinance fallback labeled)...")
+        chains = _routing.fetch_chains_routed(
+            _plan, _spots, yf_fetch_many=_parallel_chain_fetch)
+        print("  " + _routing.split_line(
+            "chains", _routing.chain_source_counts(chains)))
+    else:
+        print(
+            f"  Fetching {len(chain_pairs)} option chains in parallel "
+            f"(held + future + candidates, workers={_PARALLEL_FETCH_WORKERS})..."
+        )
+        chains = _parallel_chain_fetch(chain_pairs)
 
     # Task #43 — TRUE chain-implied vol (ATM IV / 25Δ skew / term slope) from
     # the chains just fetched, plus the true IV rank vs the persisted rolling
@@ -993,6 +1091,25 @@ def snapshot_inputs(
     # adapter sometimes returns just "etrade" but the live-data-policer's
     # allow-list expects the explicit "etrade_live" tag.
     positions_source = "etrade_live" if etrade_live else source
+    # Task #36 — provenance labels come from MEASURED per-item sources, never
+    # from the run-mode flag. The old code stamped chains "etrade_live" on any
+    # live run even though every chain was fetched via yfinance (the line-813
+    # mislabel). source_split_label reports the honest split, and the counts
+    # ride along so the policer / panel can render "112 etrade · 38
+    # yfinance-fallback".
+    try:
+        from analysis import chain_routing as _prov_routing
+        _chain_counts = _prov_routing.chain_source_counts(chains)
+        _quote_counts = _prov_routing.quote_source_counts(quotes)
+        _chains_label = _prov_routing.source_split_label(
+            _chain_counts, routing_attempted=etrade_routing)
+        _quotes_label = _prov_routing.source_split_label(
+            _quote_counts, routing_attempted=etrade_routing)
+    except Exception:
+        _chain_counts = {}
+        _quote_counts = {}
+        _chains_label = "yfinance"
+        _quotes_label = "yfinance"
     data_provenance = {
         "positions": {
             "source": positions_source,
@@ -1002,10 +1119,15 @@ def snapshot_inputs(
         # requested/fetched: quote-fetch coverage (rule #46 — the 2026-08-04
         # PLTR bug shipped on a 22/36 cycle; the live-data policer surfaces
         # coverage < 90% so silent quote gaps are visible in the briefing).
-        "quotes": {"source": "yfinance", "fetched_at": now_iso, "fresh": True,
-                   "requested": len(quote_symbols), "fetched": len(quotes)},
-        "chains": {"source": "etrade_live" if etrade_live else "yfinance",
-                   "fetched_at": now_iso, "fresh": True},
+        # etrade/yfinance: per-item source split (task #36).
+        "quotes": {"source": _quotes_label, "fetched_at": now_iso, "fresh": True,
+                   "requested": len(quote_symbols), "fetched": len(quotes),
+                   "etrade": _quote_counts.get("etrade", 0),
+                   "yfinance": _quote_counts.get("yfinance", 0)},
+        "chains": {"source": _chains_label,
+                   "fetched_at": now_iso, "fresh": True,
+                   "etrade": _chain_counts.get("etrade", 0),
+                   "yfinance": _chain_counts.get("yfinance", 0)},
         "iv_ranks": {"source": "yfinance_252d", "fetched_at": now_iso, "fresh": True},
         # Task #43: true implied vol measured from this cycle's chains
         # (ATM 30d IV, 25Δ skew, term slope + rank vs rolling history).

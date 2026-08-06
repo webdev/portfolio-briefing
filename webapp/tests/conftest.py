@@ -22,6 +22,7 @@ def _point_at_fixtures() -> None:
     """Override env vars BEFORE importing app.main so config.py picks them up."""
     os.environ["PORTFOLIO_BRIEFING_DELIVERY_DIR"] = str(FIXTURES)
     os.environ["PORTFOLIO_BRIEFING_SNAPSHOTS_DIR"] = str(FIXTURES / "snapshots")
+    os.environ["PORTFOLIO_BRIEFING_GHOST_FILE"] = str(FIXTURES / "ghost_portfolio.json")
 
     # Per-session ephemeral DuckDB — use a path that DuckDB can create from scratch.
     tmp_dir = tempfile.mkdtemp(prefix="webapp-test-")

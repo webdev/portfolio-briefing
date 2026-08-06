@@ -46,7 +46,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import contract, counterpoints, diff, home, icons, ideas, inline_md, ingest, jobs, md_render, position_state, red_flags, report_parser, setups, tech_card, unified_card
+from . import contract, counterpoints, diff, home, icons, ideas, inline_md, ingest, jobs, md_render, position_state, program_edge, red_flags, report_parser, setups, tech_card, unified_card
 from .chips import (
     clear_recs_cache,
     parkev_chip_renderer,
@@ -58,6 +58,7 @@ from .charts import (
     build_expiration_ladder_figure,
     build_nlv_figure,
     build_parkev_timeline,
+    build_program_edge_figure,
     build_ticker_sparkline,
 )
 from .config import briefings_delivery
@@ -278,6 +279,15 @@ def _wire_routes(app: FastAPI) -> None:
             except Exception:
                 pass  # home page must never fail on fable errors
 
+            # 💪 Program Edge — real vs no-options ghost, daily. Fail-open:
+            # missing/short/corrupt state file → "building history (N days)"
+            # card, never a 500 (house rule: state corruption recovers).
+            program_edge_card = None
+            try:
+                program_edge_card = program_edge.build_card(program_edge.load_state())
+            except Exception:
+                pass
+
             return _render(
                 request,
                 "home.html",
@@ -295,6 +305,7 @@ def _wire_routes(app: FastAPI) -> None:
                     topbar=_topbar_context(briefing, conn),
                     delivery_dir=str(briefings_delivery()),
                     fable_preview=fable_preview,
+                    program_edge=program_edge_card,
                 ),
             )
         finally:
@@ -1238,6 +1249,17 @@ def _wire_routes(app: FastAPI) -> None:
             bench.get("series"),
             benchmark_ticker=bench.get("benchmark_ticker") or "SPY",
         ))
+
+    @app.get("/charts/program-edge.json")
+    async def chart_program_edge() -> JSONResponse:
+        """💪 Program Edge sparkline — cumulative gap (real − ghost) series
+        from the pipeline's ghost_portfolio.json state file. Missing/short
+        history renders an empty-figure placeholder, never 500."""
+        try:
+            points = program_edge.series_points(program_edge.load_state())
+        except Exception:
+            points = []
+        return JSONResponse(build_program_edge_figure(points))
 
     # ─── Health check ─────────────────────────────────────────────────
 

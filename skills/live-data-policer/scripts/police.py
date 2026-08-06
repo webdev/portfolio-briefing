@@ -42,12 +42,16 @@ _DISALLOWED_SOURCES = {"fixture", "cache", "replay", "stale", "missing"}
 # Live-Data policy panel carries an advisory coverage line.
 _QUOTE_COVERAGE_MIN = 0.90
 
-# Source values that are explicitly allowed for each data type
+# Source values that are explicitly allowed for each data type.
+# Task #36: snapshot chains/quotes now route through E*TRADE with labeled
+# per-item yfinance fallback — provenance reports the MEASURED split
+# ("etrade", "etrade+yfinance-fallback") instead of the old mode-flag
+# "etrade_live" stamp (kept for older snapshots).
 _ALLOWED_SOURCES = {
     "positions": {"etrade_live"},
     "broker_positions": {"etrade_live", "manual_override"},
-    "quotes": {"yfinance", "etrade_live"},
-    "chains": {"etrade_live", "yfinance"},
+    "quotes": {"yfinance", "etrade_live", "etrade", "etrade+yfinance-fallback"},
+    "chains": {"etrade_live", "yfinance", "etrade", "etrade+yfinance-fallback"},
     "iv_ranks": {"yfinance_252d", "etrade_live"},
     # Task #43 defect 3 (2026-08-03): the earnings-unknown fix tags the
     # combined source as "yfinance+fmp_fallback" (yfinance primary, FMP
@@ -219,6 +223,14 @@ def police_data_freshness(
     except (TypeError, ValueError):
         q_requested = q_fetched = 0
     if q_requested > 0 and (q_fetched / q_requested) < _QUOTE_COVERAGE_MIN:
+        # Task #36: quotes now route through E*TRADE with labeled yfinance
+        # fallback — report the measured split when the provenance carries it.
+        try:
+            _q_et = int(q_meta.get("etrade"))
+            _q_yf = int(q_meta.get("yfinance"))
+            split = f" (split: {_q_et} etrade · {_q_yf} yfinance)"
+        except (TypeError, ValueError):
+            split = ""
         stale.append(StaleSource(
             source="quote_coverage",
             age_minutes=0,
@@ -227,7 +239,8 @@ def police_data_freshness(
             issue=(
                 f"only {q_fetched}/{q_requested} symbols "
                 f"({q_fetched / q_requested * 100:.0f}%) received live quotes "
-                f"this cycle (< {_QUOTE_COVERAGE_MIN * 100:.0f}% floor) — "
+                f"this cycle (< {_QUOTE_COVERAGE_MIN * 100:.0f}% floor)"
+                f"{split} — "
                 f"missing names fall back to broker position prices for the "
                 f"vintage check; truly unverifiable names render "
                 f"⚠ unverified with favourable RSI badges withheld"

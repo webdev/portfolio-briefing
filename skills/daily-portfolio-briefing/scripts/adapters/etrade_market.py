@@ -126,6 +126,66 @@ def get_option_expirations(symbol: str, timeout_s: float = 3.0) -> Optional[List
     return result["data"]
 
 
+def get_quotes(symbols: List[str], timeout_s: float = 6.0) -> Optional[Dict[str, Dict]]:
+    """Batch quote fetch — up to 25 symbols per E*TRADE call (API limit).
+
+    Callers batch above 25 (see analysis/chain_routing.plan_quote_batches);
+    this function truncates defensively rather than erroring.
+
+    Returns {SYMBOL: {"last": float, "previousClose": float}} or None on
+    error/timeout/no-tokens (fail-open — caller falls back to yfinance).
+    """
+    if not symbols:
+        return None
+    client = _build_market_client()
+    if client is None:
+        return None
+
+    batch = [s for s in symbols if s][:25]
+    result = {"data": None, "error": None}
+
+    def _do_fetch():
+        try:
+            start = time.monotonic()
+            resp = client.get_quote(batch, resp_format="json")
+            elapsed = time.monotonic() - start
+            if elapsed > timeout_s:
+                result["error"] = f"timeout after {elapsed:.2f}s"
+                return
+            if not resp or "QuoteResponse" not in resp:
+                result["error"] = "missing_response"
+                return
+            quote_data = resp["QuoteResponse"].get("QuoteData", [])
+            if isinstance(quote_data, dict):
+                quote_data = [quote_data]
+            out: Dict[str, Dict] = {}
+            for qd in quote_data:
+                sym = ((qd.get("Product") or {}).get("symbol") or "").upper()
+                if not sym:
+                    continue
+                allq = qd.get("All") or {}
+                try:
+                    last = float(allq.get("lastTrade") or 0)
+                    prev = float(allq.get("previousClose") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if last <= 0:
+                    continue
+                out[sym] = {"last": last, "previousClose": prev}
+            result["data"] = out or None
+        except Exception as e:
+            result["error"] = str(e)[:80]
+
+    import threading
+    thread = threading.Thread(target=_do_fetch, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+
+    if thread.is_alive() or result["error"]:
+        return None
+    return result["data"]
+
+
 def find_put_strike_near(
     symbol: str,
     target_otm_pct: float = 12.0,

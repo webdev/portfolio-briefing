@@ -7,6 +7,7 @@ from .expiration import build_expiration_ladder_figure
 from .parkev_timeline import build_parkev_timeline
 from .sparkline import build_ticker_sparkline
 from .benchmark import build_benchmark_figure
+from .program_edge import build_program_edge_figure
 
 __all__ = [
     "build_nlv_figure",
@@ -15,4 +16,5 @@ __all__ = [
     "build_parkev_timeline",
     "build_ticker_sparkline",
     "build_benchmark_figure",
+    "build_program_edge_figure",
 ]

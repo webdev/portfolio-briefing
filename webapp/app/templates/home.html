@@ -24,6 +24,48 @@
         <span class="home-doc-link-arrow">→</span>
     </a>
 
+    {# ─── 💪 PROGRAM EDGE — real portfolio vs no-options ghost ───
+       Cumulative $ the options program has netted vs a ghost portfolio
+       that closed every option at inception and never traded one again.
+       Fail-open: short/missing ghost history renders "building history
+       (N days)" — never a 500. Data: pipeline state/ghost_portfolio.json. #}
+    {% if program_edge %}
+    <section class="chart-card program-edge-card" id="program-edge">
+        <header class="pe-head">
+            <h3>💪 Program Edge</h3>
+            <a class="pe-benchmark-link muted" href="/briefing/{{ briefing.date.isoformat() }}#benchmark">Benchmark detail →</a>
+        </header>
+        {% if program_edge.status != 'ok' %}
+            <p class="muted pe-building">Ghost-portfolio comparison — building history ({{ program_edge.days }} day{{ 's' if program_edge.days != 1 else '' }}).</p>
+        {% else %}
+            <div class="pe-headline">
+                <span class="pe-big {{ 'pe-pos' if program_edge.total_gap >= 0 else 'pe-neg' }}">{{ program_edge.headline }}</span>
+                <span class="pe-sub muted">options program net vs no-options ghost, since {{ program_edge.inception_label }}</span>
+            </div>
+            <div class="pe-deltas muted">
+                <span class="pe-delta">{{ program_edge.delta_1d }} today</span>
+                · <span class="pe-delta">{{ program_edge.mtd }} month-to-date</span>
+            </div>
+            <div class="chart-target pe-spark" data-chart-url="/charts/program-edge.json" style="min-height: 130px;"></div>
+            <table class="pe-table">
+                <thead>
+                    <tr><th></th><th>Real</th><th>Ghost</th><th>Edge</th></tr>
+                </thead>
+                <tbody>
+                {% for row in program_edge.windows %}
+                    <tr>
+                        <td>{{ row.label }}</td>
+                        <td>{{ row.real }}</td>
+                        <td>{{ row.ghost }}</td>
+                        <td class="{{ 'pe-pos' if row.edge_raw >= 0 else 'pe-neg' }}">{{ row.edge }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </section>
+    {% endif %}
+
     {# ─── HERO — one-sentence portfolio state ─── #}
     <section class="home-hero home-hero-{{ hero_sentence.tone }}">
         <div class="home-hero-inner">

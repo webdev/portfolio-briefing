@@ -58,6 +58,19 @@ brokerage: etrade
 # schwab_account_labels:
 #   "123456789": INDIVIDUAL
 
+# Task #36 — snapshot chain/quote routing (hard rule #2: tradeable chain
+# prices from E*TRADE only). source: etrade routes the snapshot's option
+# chains AND quotes through the canonical etrade-chain-fetcher / E*TRADE
+# batch-quote API with a ≤4 req/s aggregate throttle. HELD underlyings +
+# near-expiries fetch first; candidate chains fill the remaining budget up
+# to etrade_max_chains — beyond the cap (or on any E*TRADE failure / token
+# absence) chains fall back to yfinance, LABELED per-chain, and provenance
+# reports the honest split ("chains: 112 etrade · 38 yfinance-fallback").
+# Live runs (--etrade-live) route regardless of this flag.
+chains:
+  source: etrade
+  etrade_max_chains: 150
+
 enabled_strategies:
   - wheel              # covered calls + cash-secured puts
   - dividend_growth    # pullback entry on dividend growers (optional)
