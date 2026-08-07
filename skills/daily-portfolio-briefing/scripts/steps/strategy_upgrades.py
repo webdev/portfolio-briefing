@@ -54,6 +54,26 @@ def _safe_price(v) -> float:
     return f if math.isfinite(f) and f > 0 else 0.0
 
 
+def _dte_from_expiration(exp) -> int | None:
+    """Days-to-expiration computed from the ACTUAL contract expiration.
+
+    Hard rule #19: any DTE or annualized yield rendered in the briefing must
+    be computed from the real selected contract's expiration — never an
+    assumed ~30d. (Observed 2026-08-06: the SMH strangle put leg matched the
+    existing call's Nov 20 '26 expiry — 106 days out — but was labeled
+    "(28d)" and annualized with 365/30, inflating 14.8% ann to "53% ann".)
+
+    Returns None when the expiration is unparseable or not in the future
+    (fail closed — callers render "n/a" rather than a fabricated number).
+    """
+    try:
+        exp_date = datetime.strptime(str(exp)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+    dte = (exp_date - date.today()).days
+    return dte if dte > 0 else None
+
+
 @dataclass
 class StrategyUpgrade:
     """A single upgrade recommendation."""
@@ -453,7 +473,17 @@ def compute_strategy_upgrades(
             continue
 
         total_premium = mid * 100 * call_qty
-        ann_yield = (total_premium / put_collateral * 365 / 30) if put_collateral > 0 else 0  # ~30 DTE
+        # DTE from the ACTUAL selected expiration — the put leg matches the
+        # existing call's expiry, which can be months out. The annualized
+        # yield MUST use this same DTE (hard rule #19): one source of truth,
+        # computed once here, rendered by the panel for both the "(Nd)" label
+        # and the "% ann" figure. None → renderer shows "n/a", never a guess.
+        put_dte = _dte_from_expiration(call_exp)
+        ann_yield = (
+            (total_premium / put_collateral) * (365 / put_dte)
+            if (put_collateral > 0 and put_dte)
+            else None
+        )
 
         # Compute call premium for reference
         call_price = short_call.get("currentMid") or short_call.get("premiumReceived", 0)
@@ -480,11 +510,12 @@ def compute_strategy_upgrades(
                 "qty": int(call_qty),
                 "strike": float(strike),
                 "expiration": call_exp,
+                "dte": put_dte,
                 "delta": float(put_strike_data.get("delta", 0)),
                 "premium_per_contract": round(mid, 2),
                 "total_premium": round(total_premium, 2),
             },
-            "yield_annualized": round(ann_yield, 4),
+            "yield_annualized": round(ann_yield, 4) if ann_yield is not None else None,
             "collateral_required": round(put_collateral, 2),
             "concentration_check": {
                 "current_pct": round(current_weight_pct * 100, 1),
@@ -599,6 +630,7 @@ def compute_strategy_upgrades(
             "rsi_14": _collar_rsi,
             "rsi_tag": rsi_discipline.tag(_collar_rsi),
             "shares_held": int(qty),
+            "current_price": round(price, 2),
             "current_unrealized_gain": round(unrealized_gain, 2),
             "gain_pct": round(gain_pct * 100, 1),
             "position_value": round(current_value, 2),
@@ -607,6 +639,10 @@ def compute_strategy_upgrades(
                 "qty": int(contracts),
                 "strike": float(strike),
                 "expiration": exp_str,
+                # Real DTE from the selected chain expiration (rule #19) —
+                # the renderer derives both the "(Nd)" label and the
+                # annualized cost drag from this one value.
+                "dte": _dte_from_expiration(exp_str),
                 "delta": float(put_strike_data.get("delta", 0)),
                 "cost_per_contract": round(put_mid, 2),
                 "total_cost": round(put_cost, 2),

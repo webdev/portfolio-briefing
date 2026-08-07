@@ -1,6 +1,27 @@
 """Render strategy upgrades panel with covered strangles, collars, and sub-lot completions."""
 
 
+def _real_dte(proposed: dict, exp_date) -> int | None:
+    """DTE for a proposed leg — composer value first, else derived from the
+    SAME rendered expiration date. Never a hardcoded default (hard rule #19:
+    the 2026-08-06 briefing labeled a Nov 20 '26 put leg "(28d)" — 106 days
+    out — because the label was baked into the format string).
+
+    ``exp_date`` is the datetime parsed for the "Fri Nov 20 '26" display, so
+    the label and the date the user sees can never disagree. Returns None
+    (renderers show "DTE n/a") when neither source yields a future date.
+    """
+    dte = proposed.get("dte")
+    if isinstance(dte, (int, float)) and dte > 0:
+        return int(dte)
+    if exp_date is not None:
+        from datetime import date
+        derived = (exp_date.date() - date.today()).days
+        if derived > 0:
+            return derived
+    return None
+
+
 def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     """
     Render strategy upgrades panel.
@@ -225,7 +246,13 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 exp_date = datetime.strptime(exp, "%Y-%m-%d")
                 exp_fmt = exp_date.strftime("%a %b %d '%y")
             except (ValueError, TypeError):
+                exp_date = None
                 exp_fmt = exp
+
+            # Real DTE for the rendered expiration — label and annualized
+            # yield both trace to the SAME actual contract date (rule #19).
+            dte = _real_dte(proposed, exp_date)
+            dte_str = f"{dte}d" if dte else "DTE n/a"
 
             status = "⛔ BLOCKED" if conc_blocked else "✅ OK"
 
@@ -238,8 +265,12 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 lines.append(f"  - Current: {conc.get('current_pct', 0):.0f}% NLV | Post-action: {conc.get('post_action_pct', 0):.0f}% NLV")
                 lines.append(f"  - **BLOCKED**: {reason}")
             else:
-                lines.append(f"  - Add {qty}× ${strike:.0f}P exp {exp_fmt} (28d) @ ${premium_per:.2f} mid (δ{delta:+.2f})")
-                lines.append(f"  - New premium: ${put_total:,.0f} ({yield_ann:.0%} ann on ${collateral:,.0f})")
+                lines.append(f"  - Add {qty}× ${strike:.0f}P exp {exp_fmt} ({dte_str}) @ ${premium_per:.2f} mid (δ{delta:+.2f})")
+                if yield_ann is not None:
+                    lines.append(f"  - New premium: ${put_total:,.0f} ({yield_ann:.0%} ann on ${collateral:,.0f})")
+                else:
+                    # Fail closed — no DTE means no honest annualization.
+                    lines.append(f"  - New premium: ${put_total:,.0f} (ann yield n/a — DTE unknown; on ${collateral:,.0f})")
                 lines.append(f"  - Combined: calls ${call_total:,.0f} + puts ${put_total:,.0f} = **${total_combined:,.0f} total**")
 
             lines.append("")
@@ -273,7 +304,13 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 exp_date = datetime.strptime(exp, "%Y-%m-%d")
                 exp_fmt = exp_date.strftime("%a %b %d '%y")
             except (ValueError, TypeError):
+                exp_date = None
                 exp_fmt = exp
+
+            # Real DTE for the rendered expiration (rule #19) — drives both
+            # the "(Nd)" label and the annualized-drag figure below.
+            dte = _real_dte(proposed, exp_date)
+            dte_str = f"{dte}d" if dte else "DTE n/a"
 
             # Net-zero indicator
             net_zero_badge = "🆓 NET-ZERO" if net_cost <= 10 else ""
@@ -284,13 +321,33 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 lines.append(f"  - RSI: {c.get('rsi_tag')} (protective put — shown for context)")
 
             if call_offset > 0:
-                lines.append(f"  - Buy {qty}× ${strike:.0f}P exp {exp_fmt} (28d) @ ${cost_per:.2f} mid (δ{delta:+.2f})")
+                lines.append(f"  - Buy {qty}× ${strike:.0f}P exp {exp_fmt} ({dte_str}) @ ${cost_per:.2f} mid (δ{delta:+.2f})")
                 lines.append(f"  - Cost: ${total_cost:,.0f} | Existing CC premium offsets: ${call_offset:,.0f} → **net cost: ${net_cost:,.0f}**")
             else:
-                lines.append(f"  - Buy {qty}× ${strike:.0f}P exp {exp_fmt} (28d) @ ${cost_per:.2f} mid (δ{delta:+.2f})")
-                lines.append(f"  - Cost: ${total_cost:,.0f} ({(total_cost / (shares * proposed.get('strike', 1)) * 100):.1f}% annual drag on position)")
+                lines.append(f"  - Buy {qty}× ${strike:.0f}P exp {exp_fmt} ({dte_str}) @ ${cost_per:.2f} mid (δ{delta:+.2f})")
+                # Annualized cost drag from the SAME real DTE — the old line
+                # divided the one-period cost by position value and called it
+                # "annual", implicitly assuming a 365d contract.
+                position_value = shares * proposed.get("strike", 1)
+                if dte and position_value > 0:
+                    drag_pct = total_cost / position_value * (365 / dte) * 100
+                    lines.append(f"  - Cost: ${total_cost:,.0f} ({drag_pct:.1f}% annualized drag on position)")
+                else:
+                    lines.append(f"  - Cost: ${total_cost:,.0f} (annualized drag n/a — DTE unknown)")
 
-            lines.append(f"  - Floor: ${strike:.0f} ({((strike - proposed.get('strike', strike)) / (shares * proposed.get('strike', strike)) * 100):.0f}% below current) → locks in ${unrealized - max_loss:,.0f} gain")
+            # Distance to the floor, measured against the REAL current price
+            # (the old expression subtracted the strike from itself → always
+            # "0% below current", a fabricated-looking constant).
+            cur_px = c.get("current_price")
+            if not cur_px:
+                pos_val = c.get("position_value")
+                cur_px = (pos_val / shares) if (pos_val and shares) else None
+            if cur_px and strike:
+                below_pct = (cur_px - strike) / cur_px * 100
+                floor_ctx = f"{below_pct:.0f}% below current"
+            else:
+                floor_ctx = "distance vs current n/a"
+            lines.append(f"  - Floor: ${strike:.0f} ({floor_ctx}) → locks in ${unrealized - max_loss:,.0f} gain")
             lines.append(f"  - If {symbol} drops 20%: without collar **${scenario.get('gain_without_collar', 0):,.0f}** | with collar **${scenario.get('gain_with_collar', 0):,.0f}** (saves **${scenario.get('saves', 0):,.0f}**)")
 
             lines.append("")
