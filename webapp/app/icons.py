@@ -96,6 +96,8 @@ _ACTION_ICONS = {
     "write_covered_call":  "📝",  # write a call against shares
     "WRITE_COVERED_CALL":  "📝",
     "WRITE COVERED CALL":  "📝",
+    "index_covered_call":  "🗂",  # index CC (SPY/VOO/QQQ — rule #34 envelope)
+    "INDEX_COVERED_CALL":  "🗂",
     "sublot_completion":   "🧩",  # complete the lot
     "SUBLOT_COMPLETION":   "🧩",
     "SUB_LOT":             "🧩",  # merged-ideas kind (task #17)
@@ -124,6 +126,7 @@ _ACTION_ICONS = {
 _ACTION_LABELS = {
     # Snake-case strategy upgrade types
     "write_covered_call":     "Write Covered Call",
+    "index_covered_call":     "Index Covered Call",
     "sublot_completion":      "Complete Lot",
     "SUB_LOT":                "Sub-lot Completion",
     "collar":                 "Collar",

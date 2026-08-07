@@ -428,6 +428,19 @@ def _build_digest_inner(full_md: str, config: dict | None,
     #    explainer sub-bullets)
     _emit(_find(blocks, "health"), _strip_health_explainers)
 
+    # 3b. Sector Exposure one-line summary (2026-08-07 — George: "It seems
+    #     like I'm pretty heavily invested in tech. Is it the right
+    #     thing?"). Pure subset: the panel's bold ``**🧭 …**`` summary line
+    #     is kept verbatim in the Health zone; the full table stays in the
+    #     full briefing (the pointers block still lists the section).
+    _sector_blk = _find(blocks, "sector exposure")
+    if _sector_blk is not None:
+        _sector_sum = next((ln for ln in _sector_blk["lines"]
+                            if ln.startswith("**🧭")), None)
+        if _sector_sum:
+            out_lines.append(_sector_sum)
+            out_lines.append("")
+
     # 4. Today's Action List — kept in full (minus standalone italic
     #    transparency footers). Watch-panel URGENT/CLOSE/ROLL items surface
     #    here by design, so the digest never loses an action.

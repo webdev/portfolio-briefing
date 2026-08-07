@@ -153,6 +153,7 @@ def extras_tone(kind: Any) -> str:
 
 _AFFORDANCE_LABELS = {
     "write_covered_call": "WRITE CC",
+    "index_covered_call": "WRITE INDEX CC",
     "collar": "COLLAR",
 }
 _SUBLOT_TYPE = "sublot_completion"

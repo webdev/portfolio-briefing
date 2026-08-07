@@ -57,6 +57,7 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     strangles = [u for u in upgrades if u.get("type") == "covered_strangle"]
     collars = [u for u in upgrades if u.get("type") == "collar"]
     new_ccs = [u for u in upgrades if u.get("type") == "write_covered_call"]
+    index_ccs = [u for u in upgrades if u.get("type") == "index_covered_call"]
     sublots = [u for u in upgrades if u.get("type") == "sublot_completion"]
     tier_a_skips = [u for u in upgrades if u.get("type") == "tier_a_no_cc"]
 
@@ -186,6 +187,130 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 _render_cc(cc, "⏸ TIER ENVELOPE NOT MET")
             else:
                 _render_cc(cc, "⏸ WAIT FOR STRENGTH")
+
+    # === INDEX COVERED CALLS (rule #34 — index envelope) ===
+    # SPY/VOO/QQQ index holdings get their own subsection with a distinct,
+    # less punitive envelope than single-name Tier A (no earnings gaps, no
+    # single-name headline risk). Every state renders visibly (rule #24):
+    # actionable ticket, wait-for-strength, RSI-blocked, not-writable, and
+    # chain-unavailable rows. The ticket carries the MEASURED delta (δ n/a
+    # when the chain has no Greeks) and the REAL DTE from the actual
+    # expiration — never a fabricated number (rules #16/#19).
+    if index_ccs:
+        lines.append(f"### 🗂 Index Covered Calls ({len(index_ccs)})")
+        lines.append(
+            "_Index positions carry no earnings gaps or single-name headline "
+            "risk, so they use a distinct envelope from single-name Tier A "
+            "(rule #34): delta-first strike from the live E*TRADE chain, "
+            "RSI favored writing into strength (rule #44). Writability is "
+            "per-account — a 100-share round lot in ONE account._"
+        )
+        lines.append("")
+        for u in index_ccs:
+            sym = u.get("underlying")
+            shares = int(u.get("shares_held") or 0)
+            weight = u.get("current_weight_pct") or 0
+            favored = u.get("index_rsi_favored", 55)
+
+            # Not writable — visible row, never silently skipped (rule #24).
+            if not u.get("writable"):
+                lines.append(
+                    f"- **{sym}** — {u.get('not_writable_reason', '⏸ not writable')} "
+                    f"· {shares} held ({weight:.1f}% NLV)"
+                )
+                lines.append("")
+                continue
+
+            state = u.get("index_rsi_state")
+
+            # RSI-blocked — visible row with the hook's full reason.
+            if state == "blocked":
+                lines.append(
+                    f"- **{sym}** — ⛔ RSI-blocked (index band): "
+                    f"{u.get('rsi_note', u.get('rsi_tag', 'RSI unfavorable'))}"
+                )
+                lines.append("")
+                continue
+
+            contracts = u.get("contracts_writable")
+            header = (
+                f"**{sym} — {shares} shares "
+                f"({contracts} lot{'s' if (contracts or 0) != 1 else ''} writable, "
+                f"{weight:.1f}% NLV)**"
+            )
+
+            # Chain unavailable — no actionable ticket, no estimates (rule #10).
+            if u.get("chain_source") != "etrade_live":
+                lines.append(f"{header} ⚠ CHAIN UNAVAILABLE")
+                lines.append(
+                    "  - Live E*TRADE chain unavailable — no actionable ticket "
+                    "(fail closed). Verify the chain at the broker before writing."
+                )
+                if u.get("rsi_14") is not None:
+                    lines.append(f"  - **RSI:** {u.get('rsi_tag')} — {u.get('rsi_note', '')}")
+                lines.append("")
+                continue
+
+            if u.get("actionable"):
+                badge = "✅ READY TO WRITE (index)"
+            else:
+                badge = f"⏸ WAIT FOR STRENGTH (index band ≥{favored:.0f})"
+            lines.append(f"{header} {badge}{_promo_badge(u)}")
+
+            # Ticket — measured delta, actual OTM%, real DTE (rules #16/#19).
+            strike = u.get("target_strike")
+            dte = u.get("target_dte")
+            exp_raw = u.get("expiration")
+            try:
+                from datetime import datetime
+                exp_fmt = datetime.strptime(
+                    str(exp_raw)[:10], "%Y-%m-%d"
+                ).strftime("%a %b %d '%y")
+            except (ValueError, TypeError):
+                exp_fmt = str(exp_raw)
+            otm_pct = u.get("otm_pct")
+            delta = u.get("target_delta")
+            otm_str = f"{otm_pct:.1f}% OTM" if otm_pct is not None else "OTM"
+            delta_str = f"δ {abs(delta):.2f}" if delta is not None else "δ n/a"
+            anchor = u.get("sr_anchor") if isinstance(u.get("sr_anchor"), dict) else None
+            anchor_str = ""
+            if anchor:
+                touches = int(anchor.get("touches", 1) or 1)
+                source = anchor.get("source", "swing")
+                touches_phrase = f"{touches} touches" if touches >= 2 else "1 touch"
+                anchor_str = (
+                    f", at ${float(anchor['price']):g} resistance "
+                    f"({source}, {touches_phrase})"
+                )
+            lines.append(
+                f"  - SELL {contracts}× {sym} ${strike:g}C exp {exp_fmt} "
+                f"({dte} DTE, {otm_str}, {delta_str}{anchor_str})"
+            )
+            if u.get("rsi_14") is not None:
+                lines.append(f"  - **RSI:** {u.get('rsi_tag')} — {u.get('rsi_note', '')}")
+            else:
+                lines.append(
+                    "  - **RSI:** n/a — no RSI gate applied; verify momentum "
+                    "manually before writing."
+                )
+            for viol in (u.get("envelope_violations") or []):
+                lines.append(f"  - **⏸ Index envelope:** {viol}")
+            premium_per_share = u.get("est_premium_per_share") or 0
+            premium_total = u.get("est_premium_total") or 0
+            annualized = u.get("est_annualized_pct")
+            bid = u.get("bid") or 0
+            ask = u.get("ask") or 0
+            spread_pct = (
+                ((ask - bid) / premium_per_share * 100) if premium_per_share else 0
+            )
+            ann_str = f"{annualized:.1f}% annualized" if annualized is not None else "ann n/a"
+            lines.append(
+                f"  - Premium: ${premium_per_share:.2f}/share (bid ${bid:.2f} / mid "
+                f"${premium_per_share:.2f} / ask ${ask:.2f}, spread {spread_pct:.0f}%) "
+                f"× 100 × {contracts} = **${premium_total:,.0f}** (~{ann_str})"
+            )
+            lines.append("  - **Source:** Live E*TRADE chain")
+            lines.append("")
 
     # === TIER A CORE HOLDINGS (NO CC by policy) ===
     # CLAUDE.md hard rule #29: Tier A holdings (LT core compounders — NVDA,

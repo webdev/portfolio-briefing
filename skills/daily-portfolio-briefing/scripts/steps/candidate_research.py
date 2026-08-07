@@ -122,7 +122,8 @@ def _fv_note(tk: str, spot, fv: dict | None, etf_set) -> str | None:
 def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                  gate_state=None, compact: bool = False,
                  mv_row: dict | None = None,
-                 config: dict | None = None) -> list[str]:
+                 config: dict | None = None,
+                 sector_pcts: dict | None = None) -> list[str]:
     """One candidate card. ``compact`` (2026-08-06 length diet) keeps the
     header, RSI metrics, entry ticket, and earnings line but drops the FV
     note + Verdict elaboration (both live in the companion
@@ -217,6 +218,22 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                 if _lad:
                     mv_ladder_line = f"  - {_lad}"
 
+    # 2026-08-07 — diversification-aware conviction note (George: "It seems
+    # like I'm pretty heavily invested in tech. Is it the right thing?").
+    # Sits BESIDE the CP/MV bonus notes, same pattern: assignment-adjusted
+    # sector pcts, config-gated, conviction context only — never a gate.
+    # Fail-closed: unknown sector / unmeasured book → no line.
+    sector_note_line = None
+    if status == "candidate" and sector_pcts:
+        try:
+            from analysis import sector_exposure as _sx
+            _sx_delta, _sx_note = _sx.sector_conviction_adjustment(
+                tk, sector_pcts, config)
+            if _sx_note:
+                sector_note_line = f"  - {_sx_note}"
+        except Exception:
+            sector_note_line = None
+
     out = [f"**{_STATUS_LABEL[status]} · `{tk}` · {spot_s}**{badge}"]
 
     metrics = []
@@ -301,6 +318,8 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
             out.append(mv_note_line)
         if mv_ladder_line:
             out.append(mv_ladder_line)
+        if sector_note_line:
+            out.append(sector_note_line)
     elif status == "held_rsi" and rv:
         out.append(f"  - _Held back by RSI: {rv.reason}_")
 
@@ -740,6 +759,23 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     _quotes_cb = (snapshot_data or {}).get("quotes") or {}
     _positions_cb = (snapshot_data or {}).get("positions") or []
 
+    # 2026-08-07 — assignment-adjusted sector pcts for the 🧭 diversification
+    # note on candidate cards (George: "It seems like I'm pretty heavily
+    # invested in tech. Is it the right thing?"). Computed once per render;
+    # config-gated inside sector_exposure. Fail-open: any error → {} → no
+    # note on any card.
+    _sector_pcts_cb: dict = {}
+    try:
+        from analysis import sector_exposure as _sx_cb
+        if _sx_cb.sector_exposure_enabled(config):
+            _sx_nlv_cb = float(((snapshot_data or {}).get("balance") or {})
+                               .get("accountValue") or 0)
+            _sector_pcts_cb = _sx_cb.assignment_pcts(
+                _sx_cb.compute_sector_exposure(
+                    _positions_cb, _sx_nlv_cb, config))
+    except Exception:
+        _sector_pcts_cb = {}
+
     cands: list[tuple[str, dict]] = []
     held: list[tuple[str, dict, object]] = []
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
@@ -846,7 +882,8 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                                 gate_state=gate_state, compact=compact,
                                 mv_row=_mv_rows_cb.get(
                                     (r.get("ticker") or "").upper()),
-                                config=config)
+                                config=config,
+                                sector_pcts=_sector_pcts_cb)
             card[0] = f"{card[0]}  · _{tname}_"
             # Same-name (different-strike) stacking note — kept, but flagged.
             tk = (r.get("ticker") or "").upper()

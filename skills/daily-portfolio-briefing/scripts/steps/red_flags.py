@@ -270,6 +270,62 @@ def compute_red_flags(
         ))
 
     # ----------------------------------------------------------------
+    # 4b. Sector look-through over the per-sector cap (2026-08-07 —
+    # George: "It seems like I'm pretty heavily invested in tech. Is it
+    # the right thing?"). Reads the SAME exposure computed for the Sector
+    # Exposure panel (analytics["sector_exposure"]) — measured equity-MV %
+    # of NLV plus the assignment-adjusted % ("if all puts assign"). Over
+    # cap → MEDIUM; ≥ 1.5× cap → HIGH. No exposure computed → no flag.
+    # ----------------------------------------------------------------
+    se = (analytics or {}).get("sector_exposure") \
+        if isinstance(analytics, dict) else None
+    se = se if isinstance(se, dict) else {}
+    se_cap = se.get("cap_pct")
+    tech_pct = se.get("tech_pct_nlv")
+    tech_assign_pct = se.get("tech_assignment_pct_nlv")
+    for oc in (se.get("over_cap") or []):
+        sector = oc.get("sector")
+        pct = oc.get("pct_nlv")
+        apct = oc.get("assignment_pct_nlv")
+        if not sector or pct is None or not se_cap:
+            continue
+        severity = "HIGH" if pct >= 1.5 * se_cap else "MEDIUM"
+        tech_txt = ""
+        if tech_pct is not None and tech_assign_pct is not None:
+            tech_txt = (
+                f" Net tech-correlated exposure (look-through) is "
+                f"~{tech_pct:.0f}% of NLV — ~{tech_assign_pct:.0f}% if all "
+                f"puts assign."
+            )
+        flags.append(RedFlag(
+            severity=severity,
+            headline=(
+                f"Sector concentration: {sector} at {pct:.0f}% of NLV "
+                f"(assignment-adjusted {apct:.0f}%) — over the "
+                f"{se_cap:.0f}% cap"
+            ),
+            detail=(
+                f"Look-through equity exposure to **{sector}** is "
+                f"**{pct:.1f}% of NLV**, over the {se_cap:.0f}% per-sector "
+                f"cap; if every short put assigns it grows to "
+                f"**{apct:.1f}%**.{tech_txt} A correlated drawdown in this "
+                f"sector hits equity AND put obligations at once — see the "
+                f"Sector Exposure (look-through) panel for the full table."
+            ),
+            do=[
+                "Route new CSPs / adds toward underweight sectors — the "
+                "conviction scorer now surfaces a 🧭 diversification bonus "
+                "on them.",
+                f"Close or roll winners in {sector} first when freeing "
+                f"collateral.",
+            ],
+            dont=[
+                f"Open new short puts in {sector} — each one raises the "
+                f"assignment-adjusted concentration further.",
+            ],
+        ))
+
+    # ----------------------------------------------------------------
     # 5. Third-party SELL on held positions (uncommitted exits)
     # ----------------------------------------------------------------
     held_tickers = {

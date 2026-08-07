@@ -412,6 +412,89 @@ def is_cc_enabled_for_tier(tier: str, config: dict | None,
     return base_enabled
 
 
+# ─── Index covered calls (rule #34 — INDEX envelope, 2026-08-07) ──────────
+#
+# SPY / VOO / QQQ index holdings sit in Tier A (never CC'd by default), but
+# the user approved surfacing INDEX covered calls: income with no single-name
+# risk. Indexes carry no earnings gaps or single-name headline risk, so the
+# punitive single-name Tier A envelope (RSI ≥ 75, ≥20% OTM) is inappropriate.
+# The index envelope is a DISTINCT config block —
+# `covered_call_tiers.tier_a.index_cc` — consumed ONLY by the index-CC
+# surface (strategy_upgrades Type E). It never loosens the single-name
+# Tier A gate: `is_cc_enabled_for_tier` / `willing_to_write_cc_on` /
+# `engineered` are untouched.
+
+_FALLBACK_INDEX_CC = {
+    "enabled": False,          # opt-in via config — fail-closed default
+    "tickers": [],
+    "target_delta": 0.18,
+    "delta_tolerance": 0.07,
+    "max_dte": 45,
+    "min_dte": 21,
+    # Index RSI band (rule #44 — CCs are sold into STRENGTH), consumed only
+    # by the index surface; the global call bands (favored ≥60 / block <35)
+    # are single-name-tuned and stay untouched.
+    "rsi_favored": 55.0,
+    "rsi_block_below": 40.0,
+    # Coverage of shares up to 100% is allowed on index positions (no
+    # single-name thesis to preserve upside for).
+    "coverage_cap_pct": 100,
+}
+
+
+def index_cc_settings(config: dict | None) -> dict:
+    """Return the index covered-call envelope from
+    `covered_call_tiers.tier_a.index_cc`, merged over canonical fallbacks.
+
+    Missing/empty config → `enabled: False` (fail-closed): the index-CC
+    surface is a no-op until the config opts in, and legacy behavior
+    (SPY → tier_a_no_cc transparency record) is byte-identical.
+    """
+    fallback = dict(_FALLBACK_INDEX_CC)
+    tier_a = _cc_tiers_block(config).get("tier_a")
+    user = tier_a.get("index_cc") if isinstance(tier_a, dict) else None
+    if not isinstance(user, dict):
+        return fallback
+    out = dict(fallback)
+    for k, v in user.items():
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def is_index_cc_ticker(ticker: str, config: dict | None) -> bool:
+    """True when the index-CC envelope is enabled AND `ticker` is on its
+    `tickers` list. The Type D single-name composer uses this to hand the
+    holding to the dedicated index pass (never a `tier_a_no_cc` record and
+    never the single-name envelope)."""
+    if not ticker or not isinstance(ticker, str):
+        return False
+    settings = index_cc_settings(config)
+    if not settings.get("enabled"):
+        return False
+    return ticker.upper().strip() in _normalize_tier_list(settings.get("tickers"))
+
+
+def index_cc_rsi_thresholds(base_thresholds: dict, config: dict | None) -> dict:
+    """Return a COPY of `base_thresholds` with the CALL bands overridden by
+    the index band (favored ≥ `rsi_favored`, block < `rsi_block_below`).
+
+    Consumed ONLY by the index-CC surface, so the global single-name call
+    bands (favored ≥60 / block <35) are never mutated. Feed the result to
+    `rsi_discipline.hook("call", rsi, idx_thresholds)` — the central hook
+    stays the single gate; only the band values differ.
+    """
+    import copy as _copy
+    settings = index_cc_settings(config)
+    th = _copy.deepcopy(base_thresholds or {})
+    call = th.setdefault("call", {})
+    favored = float(settings.get("rsi_favored", 55.0))
+    call["favored_above"] = favored
+    call["caution_below"] = favored
+    call["block_below"] = float(settings.get("rsi_block_below", 40.0))
+    return th
+
+
 def concentration_cap_for_tier(tier: str, config: dict | None) -> float:
     """Return the per-tier concentration cap as a percentage of NLV.
 

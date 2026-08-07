@@ -609,6 +609,30 @@ covered_call_tiers:
       # premium to pennies. Off by default; the 200-SMA gate + short DTE
       # already give a rebound-proof strike with real premium.
       min_strike_above_analyst_pt: false
+
+    # INDEX-CC mode (2026-08-07, user-approved): SPY/VOO/QQQ index holdings
+    # get their own envelope, DISTINCT from the punitive single-name Tier A
+    # gate — indexes have no earnings gaps or single-name headline risk, so
+    # RSI ≥ 75 / ≥20% OTM is inappropriate. Consumed ONLY by the index-CC
+    # surface (position_tiers.index_cc_settings → strategy_upgrades Type E);
+    # the global rsi_discipline call bands and the willing_to_write_cc_on
+    # single-name opt-in list are untouched.
+    #   RSI ≥ rsi_favored (55): favored — write into strength (rule #44).
+    #   40-55: wait-for-strength (shown, not green-lit — rule #24).
+    #   RSI < rsi_block_below (40): hard block (visible reason).
+    # Coverage up to 100% of round lots is allowed on index positions.
+    # Writability stays per-account: 100 shares in ONE account (VOO at 50
+    # shares renders "⏸ not writable", never silently skipped).
+    index_cc:
+      enabled: true
+      tickers: [SPY, VOO, QQQ]
+      target_delta: 0.18
+      delta_tolerance: 0.07
+      max_dte: 45
+      min_dte: 21
+      rsi_favored: 55
+      rsi_block_below: 40
+      coverage_cap_pct: 100
   tier_b:
     enabled: true
     rsi_floor: 70
@@ -760,3 +784,13 @@ output:
   output_dir: "reports/daily"
   snapshot_dir: "state/briefing_snapshots"
   preserve_days: 90                       # Keep snapshots for 90 days
+
+# 2026-08-07 — Sector look-through exposure panel + diversification-aware
+# conviction (George: "It seems like I'm pretty heavily invested in tech.
+# Is it the right thing?"). Ticker→sector + ETF decompositions live in
+# config/sector_map.yaml; single source of truth: analysis/sector_exposure.py.
+sector_exposure:
+  enabled: true
+  cap_pct: 35            # wheelhouz sector rule — any sector over this red-flags
+  underweight_pct: 5     # sectors at/below this earn the +1 diversification bonus
+  cache_ttl_hours: 24    # FMP profile-sector fallback cache TTL (state/.../sector_cache.json)

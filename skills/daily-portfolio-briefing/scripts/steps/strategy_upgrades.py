@@ -220,6 +220,28 @@ def _is_tail_risk_name(symbol: str) -> bool:
     return symbol in tail_risk
 
 
+def _max_qty_in_one_account(equity_pos: dict) -> float:
+    """Largest share count held within a SINGLE account for this position.
+
+    A covered call must be written against a 100-share round lot held in ONE
+    account — the broker can't combine a 15-share lot in account A with a
+    91-share lot in account B (the real SPY 15+91=106 bug). Parses the
+    position's `accountsBreakdown` entries ("INDIVIDUAL: 101 sh"); when no
+    breakdown is available, falls back to the aggregate qty (legacy).
+    """
+    qty = equity_pos.get("qty", 0) or 0
+    accounts_breakdown = equity_pos.get("accountsBreakdown") or []
+    if not accounts_breakdown:
+        return qty
+    import re as _re
+    per_account_qtys = []
+    for entry in accounts_breakdown:
+        m = _re.search(r":\s*(\d+(?:\.\d+)?)\s*sh", str(entry))
+        if m:
+            per_account_qtys.append(float(m.group(1)))
+    return max(per_account_qtys) if per_account_qtys else qty
+
+
 def _is_likely_mutual_fund(symbol: str) -> bool:
     """Mutual funds use 5-letter tickers ending in X (no options trade on them).
 
@@ -702,6 +724,14 @@ def compute_strategy_upgrades(
         if _find_short_call(positions, symbol):
             continue
 
+        # Index-CC path (rule #34 index envelope): tickers on the enabled
+        # `covered_call_tiers.tier_a.index_cc` list are owned by the
+        # dedicated index pass (Type E below) — never a tier_a_no_cc record
+        # and never the single-name envelope. With index_cc disabled/absent
+        # this is False for every symbol → legacy behavior byte-identical.
+        if position_tiers.is_index_cc_ticker(symbol, params):
+            continue
+
         # ─── Tier framework: classify the holding and load CC discipline ───
         tier = position_tiers.tier_for(symbol, params)
         cc_settings = position_tiers.cc_settings_for_tier(tier, params)
@@ -735,17 +765,7 @@ def compute_strategy_upgrades(
         # round lot held WITHIN A SINGLE ACCOUNT (the broker can't combine
         # lots across accounts for short-call coverage). The aggregate qty
         # might be ≥100 across two accounts but neither has a writeable lot.
-        accounts_breakdown = equity_pos.get("accountsBreakdown") or []
-        max_qty_in_one_account = qty  # default when no breakdown available
-        if accounts_breakdown:
-            import re as _re
-            per_account_qtys = []
-            for entry in accounts_breakdown:
-                m = _re.search(r":\s*(\d+(?:\.\d+)?)\s*sh", entry)
-                if m:
-                    per_account_qtys.append(float(m.group(1)))
-            if per_account_qtys:
-                max_qty_in_one_account = max(per_account_qtys)
+        max_qty_in_one_account = _max_qty_in_one_account(equity_pos)
 
         if max_qty_in_one_account < 100:
             # Aggregate qty looked like 100+ but no single account holds a lot
@@ -1035,6 +1055,212 @@ def compute_strategy_upgrades(
             ),
         }
         upgrades.append(upgrade)
+
+    # === Type E: Index Covered Calls (rule #34 — INDEX envelope) ===
+    # SPY/VOO/QQQ index holdings (per covered_call_tiers.tier_a.index_cc):
+    # income with no earnings gaps or single-name headline risk, so a
+    # distinct, less punitive envelope than single-name Tier A applies.
+    # Every hard rule still binds: delta-first strike via the canonical
+    # E*TRADE chain fetcher, MEASURED delta only (δ n/a when the chain has
+    # no Greeks), real DTE from the actual expiration, S/R resistance
+    # anchoring, per-account writability (100 shares in ONE account), and
+    # chain-unavailable → NO actionable ticket (fail closed — no estimate
+    # fallback here, unlike Type D). RSI runs through the central
+    # rsi_discipline.hook with the index override band (favored ≥55,
+    # block <40 by default) — the global single-name bands are untouched.
+    # Every state is a VISIBLE record (rule #24): not-writable, RSI-blocked,
+    # wait-for-strength, and chain-unavailable rows all render.
+
+    idx_cfg = position_tiers.index_cc_settings(params)
+    if idx_cfg.get("enabled"):
+        idx_th = position_tiers.index_cc_rsi_thresholds(rsi_th, params)
+        idx_min_dte = int(idx_cfg.get("min_dte", 21) or 21)
+        idx_max_dte = int(idx_cfg.get("max_dte", 45) or 45)
+        if idx_max_dte < idx_min_dte:
+            idx_max_dte = idx_min_dte
+
+        for equity_pos in positions:
+            if equity_pos.get("assetType") != "EQUITY":
+                continue
+            symbol = equity_pos.get("symbol")
+            if not symbol or not position_tiers.is_index_cc_ticker(symbol, params):
+                continue
+            qty = equity_pos.get("qty", 0) or 0
+            price = _safe_price(equity_pos.get("price"))
+            if qty <= 0 or price <= 0:
+                continue
+            # Already capped → roll management owns it, same as Type D.
+            if _find_short_call(positions, symbol):
+                continue
+
+            base = {
+                "type": "index_covered_call",
+                "underlying": symbol,
+                "tier": position_tiers.tier_for(symbol, params),
+                "shares_held": int(qty),
+                "current_price": round(price, 2),
+                "current_weight_pct": round(qty * price / nlv * 100, 1) if nlv else 0,
+                "index_rsi_favored": float(idx_cfg.get("rsi_favored", 55.0)),
+                "index_rsi_block_below": float(idx_cfg.get("rsi_block_below", 40.0)),
+            }
+
+            # Per-account writability (the SPY 15+91=106 lesson): a CC needs
+            # a 100-share round lot in ONE account. Not-writable positions
+            # render as a visible ⏸ row — never silently skipped (rule #24).
+            max_in_one = _max_qty_in_one_account(equity_pos)
+            if max_in_one < 100:
+                upgrades.append({
+                    **base,
+                    "writable": False,
+                    "actionable": False,
+                    "not_writable_reason": (
+                        f"⏸ not writable — {int(max_in_one)} shares "
+                        f"(need 100 in one account)"
+                    ),
+                    "rationale": (
+                        f"{symbol} index CC considered but not writable: largest "
+                        f"single-account lot is {int(max_in_one)} shares; a covered "
+                        f"call needs a 100-share round lot within one account."
+                    ),
+                })
+                continue
+
+            contracts_in_account = int(max_in_one // 100)
+            idx_coverage_pct = int(idx_cfg.get("coverage_cap_pct", 100) or 0)
+            if idx_coverage_pct <= 0:
+                continue
+            contracts_writable = min(
+                contracts_in_account,
+                max(1, (contracts_in_account * idx_coverage_pct) // 100),
+            )
+
+            # RSI — central hook, index override band. Index CCs are sold
+            # into STRENGTH (rule #44): favored ≥ rsi_favored, blocked below
+            # rsi_block_below, wait-for-strength in between.
+            rsi_val = rsi_discipline.rsi_for(symbol, technicals)
+            rv = rsi_discipline.hook("call", rsi_val, idx_th)
+            if rsi_val is None:
+                idx_state = "unknown"
+            elif rsi_gate_on and rv.removed:
+                idx_state = "blocked"
+            elif rv.promoted:
+                idx_state = "favored"
+            else:
+                idx_state = "wait"
+
+            rec = {
+                **base,
+                "writable": True,
+                "contracts_in_account": contracts_in_account,
+                "contracts_writable": contracts_writable,
+                "rsi_14": rsi_val,
+                "rsi_tag": rv.tag,
+                "rsi_note": rv.reason,
+                "rsi_decision": rv.decision,
+                "rsi_badge": rv.badge,
+                "index_rsi_state": idx_state,
+            }
+
+            if idx_state == "blocked":
+                # No new open — don't consult the chain. Visible row with the
+                # hook's full reason (rule #24), inside the index subsection.
+                rec.update({
+                    "actionable": False,
+                    "rationale": (
+                        f"{symbol} index CC blocked by the index RSI band: {rv.reason}"
+                    ),
+                })
+                upgrades.append(rec)
+                continue
+
+            # S/R resistance anchoring (rule #20) — same hook as Type D.
+            sr_resistances = None
+            sr_payload = (technicals.get(symbol) or {}).get("support_resistance")
+            if isinstance(sr_payload, dict):
+                sr_resistances = sr_payload.get("resistances") or None
+
+            # Canonical E*TRADE chain, delta-first (rule #16). Target the
+            # middle of the [min_dte, max_dte] window.
+            idx_target_dte = (idx_min_dte + idx_max_dte) // 2
+            chain_quote = _etrade_call_quote(
+                symbol=symbol,
+                spot=price,
+                target_otm_pct=4.0,  # fallback only when chain has no deltas
+                target_dte=idx_target_dte,
+                target_delta=float(idx_cfg.get("target_delta", 0.18)),
+                delta_tolerance=float(idx_cfg.get("delta_tolerance", 0.07)),
+                sr_resistances=sr_resistances,
+            )
+
+            # Real DTE from the ACTUAL selected expiration (rule #19); a
+            # missing quote, zero premium, or unparseable expiration all fail
+            # closed → visible row, NO actionable ticket, no estimates
+            # (hard rule #10 — a wrong ticket costs more than a missing one).
+            actual_dte = (
+                _dte_from_expiration(chain_quote.get("expiration"))
+                if chain_quote else None
+            )
+            premium_per_share = (
+                (chain_quote.get("mid") or chain_quote.get("bid") or 0)
+                if chain_quote else 0
+            )
+            if not chain_quote or actual_dte is None or premium_per_share <= 0:
+                rec.update({
+                    "actionable": False,
+                    "chain_source": "unavailable",
+                    "rationale": (
+                        f"{symbol} index CC: live E*TRADE chain unavailable — "
+                        f"no actionable ticket (fail closed). Verify the chain "
+                        f"at the broker before writing."
+                    ),
+                })
+                upgrades.append(rec)
+                continue
+
+            target_strike = float(chain_quote["strike"])
+            idx_delta = chain_quote.get("delta")
+            otm_pct_actual = ((target_strike - price) / price * 100.0) if price > 0 else None
+            premium_total = premium_per_share * 100 * contracts_writable
+            annualized = (premium_per_share / price) * (365 / actual_dte) * 100
+
+            envelope_violations = []
+            if actual_dte < idx_min_dte or actual_dte > idx_max_dte:
+                envelope_violations.append(
+                    f"DTE {actual_dte}d outside index window "
+                    f"{idx_min_dte}-{idx_max_dte}d"
+                )
+
+            actionable = (
+                idx_state in ("favored", "unknown") and not envelope_violations
+            )
+
+            rec.update({
+                "actionable": actionable,
+                "envelope_violations": envelope_violations,
+                "chain_source": "etrade_live",
+                "target_strike": target_strike,
+                "expiration": chain_quote.get("expiration"),
+                "target_dte": actual_dte,
+                "target_delta": (
+                    round(abs(float(idx_delta)), 2) if idx_delta is not None else None
+                ),
+                "otm_pct": (
+                    round(otm_pct_actual, 1) if otm_pct_actual is not None else None
+                ),
+                "strike_selected_by": chain_quote.get("selected_by", "etrade"),
+                "sr_anchor": chain_quote.get("sr_anchor"),
+                "est_premium_per_share": round(premium_per_share, 2),
+                "est_premium_total": round(premium_total, 0),
+                "est_annualized_pct": round(annualized, 1),
+                "bid": round(chain_quote.get("bid", 0) or 0, 2),
+                "ask": round(chain_quote.get("ask", 0) or 0, 2),
+                "rationale": (
+                    f"Index covered call on {symbol}: {contracts_writable}× "
+                    f"${target_strike:g}C ({actual_dte} DTE) collects "
+                    f"~${premium_total:,.0f} with no single-name headline risk."
+                ),
+            })
+            upgrades.append(rec)
 
     # === Type C: Sub-Lot Completions ===
     # For equity positions with 1-99 shares, buy to reach 100-share lot

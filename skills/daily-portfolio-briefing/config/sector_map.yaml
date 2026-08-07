@@ -1,0 +1,318 @@
+# Curated ticker → GICS-style sector map — single source of truth for the
+# Sector Exposure (look-through) panel and diversification-aware conviction
+# (analysis/sector_exposure.py). 2026-08-07, George: "It seems like I'm
+# pretty heavily invested in tech. Is it the right thing?"
+#
+# Rules (mirror CLAUDE.md #19 — no fabricated data):
+#   - Only names whose sector classification is reliably known are listed.
+#     Anything NOT here falls back to the FMP profile sector (if FMP_API_KEY
+#     is present, cached 24h) and otherwise buckets as "Unclassified" —
+#     the code NEVER guesses.
+#   - `tech_correlated: true` flags names OUTSIDE Info Tech / Comm Services
+#     that trade with the tech complex (TSLA, SOFI, AMZN, VRT, ...). Info
+#     Tech + Comm Services count as tech-correlated automatically. Keep the
+#     flag list tight — flagging a name commits the tech-% math to it.
+#   - `etf_lookthrough` decomposes ETFs into sector weights. Broad-index
+#     weights are APPROXIMATE (rendered with '~', flagged `approx: true`) —
+#     look-through estimates, not exact holdings.
+
+sectors:
+  # ── Information Technology ──────────────────────────────────────────────
+  NVDA:  {sector: Information Technology}
+  MSFT:  {sector: Information Technology}
+  MU:    {sector: Information Technology}
+  QCOM:  {sector: Information Technology}
+  AMD:   {sector: Information Technology}
+  AVGO:  {sector: Information Technology}
+  ARM:   {sector: Information Technology}
+  ASML:  {sector: Information Technology}
+  TSM:   {sector: Information Technology}
+  INTC:  {sector: Information Technology}
+  TXN:   {sector: Information Technology}
+  MRVL:  {sector: Information Technology}
+  ON:    {sector: Information Technology}
+  KLAC:  {sector: Information Technology}
+  LRCX:  {sector: Information Technology}
+  AMAT:  {sector: Information Technology}
+  ONTO:  {sector: Information Technology}
+  CDNS:  {sector: Information Technology}
+  SNPS:  {sector: Information Technology}
+  ANET:  {sector: Information Technology}
+  CSCO:  {sector: Information Technology}
+  NOK:   {sector: Information Technology}   # communications equipment
+  ORCL:  {sector: Information Technology}
+  CRM:   {sector: Information Technology}
+  NOW:   {sector: Information Technology}
+  INTU:  {sector: Information Technology}
+  IBM:   {sector: Information Technology}
+  ADBE:  {sector: Information Technology}
+  AAPL:  {sector: Information Technology}
+  PLTR:  {sector: Information Technology}
+  CRWD:  {sector: Information Technology}
+  PANW:  {sector: Information Technology}
+  FTNT:  {sector: Information Technology}
+  ZS:    {sector: Information Technology}
+  S:     {sector: Information Technology}
+  OKTA:  {sector: Information Technology}
+  CYBR:  {sector: Information Technology}
+  RBRK:  {sector: Information Technology}
+  NET:   {sector: Information Technology}
+  DDOG:  {sector: Information Technology}
+  MDB:   {sector: Information Technology}
+  SNOW:  {sector: Information Technology}
+  TEAM:  {sector: Information Technology}
+  WDAY:  {sector: Information Technology}
+  MNDY:  {sector: Information Technology}
+  DOCU:  {sector: Information Technology}
+  TWLO:  {sector: Information Technology}
+  ZM:    {sector: Information Technology}
+  PATH:  {sector: Information Technology}
+  AI:    {sector: Information Technology}
+  APP:   {sector: Information Technology}
+  SMCI:  {sector: Information Technology}
+  DELL:  {sector: Information Technology}
+  STX:   {sector: Information Technology}
+  WDC:   {sector: Information Technology}
+  SNDK:  {sector: Information Technology}
+  PSTG:  {sector: Information Technology}
+  GLW:   {sector: Information Technology}
+  LITE:  {sector: Information Technology}
+  COHR:  {sector: Information Technology}
+  CIEN:  {sector: Information Technology}
+  FN:    {sector: Information Technology}
+  AAOI:  {sector: Information Technology}
+  CGNX:  {sector: Information Technology}
+  MBLY:  {sector: Information Technology}
+  ENPH:  {sector: Information Technology}   # GICS classifies solar inverters under IT
+  IONQ:  {sector: Information Technology}
+  RGTI:  {sector: Information Technology}
+  QBTS:  {sector: Information Technology}
+  NVTS:  {sector: Information Technology}
+  CRWV:  {sector: Information Technology}
+  NBIS:  {sector: Information Technology}
+  IREN:  {sector: Information Technology}   # BTC miner / AI DC — miners classify under IT
+  CIFR:  {sector: Information Technology}
+  WULF:  {sector: Information Technology}
+
+  # ── Communication Services ──────────────────────────────────────────────
+  GOOG:  {sector: Communication Services}
+  GOOGL: {sector: Communication Services}
+  META:  {sector: Communication Services}
+  NFLX:  {sector: Communication Services}
+  DIS:   {sector: Communication Services}
+  RDDT:  {sector: Communication Services}
+  SNAP:  {sector: Communication Services}
+  PINS:  {sector: Communication Services}
+
+  # ── Consumer Discretionary ─────────────────────────────────────────────
+  AMZN:  {sector: Consumer Discretionary, tech_correlated: true}
+  TSLA:  {sector: Consumer Discretionary, tech_correlated: true}
+  MCD:   {sector: Consumer Discretionary}
+  APTV:  {sector: Consumer Discretionary}
+  QS:    {sector: Consumer Discretionary}   # auto components
+
+  # ── Consumer Staples ────────────────────────────────────────────────────
+  KO:    {sector: Consumer Staples}
+  PEP:   {sector: Consumer Staples}
+  PG:    {sector: Consumer Staples}
+  COST:  {sector: Consumer Staples}         # GICS 2023 move from Cons Disc
+  WMT:   {sector: Consumer Staples}         # GICS 2023 move from Cons Disc
+
+  # ── Financials ──────────────────────────────────────────────────────────
+  JPM:   {sector: Financials}
+  BAC:   {sector: Financials}
+  GS:    {sector: Financials}
+  MS:    {sector: Financials}
+  SCHW:  {sector: Financials}
+  V:     {sector: Financials}               # GICS 2023 move from IT
+  MA:    {sector: Financials}               # GICS 2023 move from IT
+  SOFI:  {sector: Financials, tech_correlated: true}
+  COIN:  {sector: Financials, tech_correlated: true}
+  HOOD:  {sector: Financials, tech_correlated: true}
+
+  # ── Health Care ─────────────────────────────────────────────────────────
+  LLY:   {sector: Health Care}
+  JNJ:   {sector: Health Care}
+  ABBV:  {sector: Health Care}
+  MRK:   {sector: Health Care}
+  PFE:   {sector: Health Care}
+  UNH:   {sector: Health Care}
+  TMO:   {sector: Health Care}
+
+  # ── Industrials ─────────────────────────────────────────────────────────
+  VRT:   {sector: Industrials, tech_correlated: true}  # AI data-center thermal — trades with AI capex
+  GE:    {sector: Industrials}
+  GEV:   {sector: Industrials}
+  HON:   {sector: Industrials}
+  BA:    {sector: Industrials}
+  RTX:   {sector: Industrials}
+  LMT:   {sector: Industrials}
+  NOC:   {sector: Industrials}
+  GD:    {sector: Industrials}
+  ETN:   {sector: Industrials}
+  AVAV:  {sector: Industrials}
+  KTOS:  {sector: Industrials}
+  RKLB:  {sector: Industrials}
+  LUNR:  {sector: Industrials}
+  UBER:  {sector: Industrials}              # GICS: passenger ground transportation
+  BE:    {sector: Industrials}
+  PLUG:  {sector: Industrials}
+  EOSE:  {sector: Industrials}
+
+  # ── Energy ──────────────────────────────────────────────────────────────
+  XOM:   {sector: Energy}
+  CVX:   {sector: Energy}
+  COP:   {sector: Energy}
+  EOG:   {sector: Energy}
+  OXY:   {sector: Energy}
+  SLB:   {sector: Energy}
+  CCJ:   {sector: Energy}                   # uranium sits under Energy in GICS
+  LEU:   {sector: Energy}
+  UUUU:  {sector: Energy}
+
+  # ── Materials ───────────────────────────────────────────────────────────
+  FCX:   {sector: Materials}
+  AA:    {sector: Materials}
+  MP:    {sector: Materials}
+
+  # ── Utilities ───────────────────────────────────────────────────────────
+  CEG:   {sector: Utilities}
+  OKLO:  {sector: Utilities}
+  VST:   {sector: Utilities}
+  NEE:   {sector: Utilities}
+
+# ── ETF look-through decompositions ──────────────────────────────────────
+# Broad-index weights are approximate (# approx, verified 2026-08) and the
+# panel renders them as '~' look-through ESTIMATES, never exact holdings.
+etf_lookthrough:
+  SPY:                                      # approx S&P 500 sector weights, verified 2026-08
+    approx: true
+    weights:
+      Information Technology: 0.34
+      Financials: 0.13
+      Communication Services: 0.10
+      Consumer Discretionary: 0.10
+      Health Care: 0.09
+      Industrials: 0.09
+      Consumer Staples: 0.05
+      Energy: 0.03
+      Utilities: 0.03
+      Materials: 0.02
+      Real Estate: 0.02
+  VOO:                                      # approx S&P 500 sector weights, verified 2026-08
+    approx: true
+    weights:
+      Information Technology: 0.34
+      Financials: 0.13
+      Communication Services: 0.10
+      Consumer Discretionary: 0.10
+      Health Care: 0.09
+      Industrials: 0.09
+      Consumer Staples: 0.05
+      Energy: 0.03
+      Utilities: 0.03
+      Materials: 0.02
+      Real Estate: 0.02
+  QQQ:                                      # approx Nasdaq-100 sector weights, verified 2026-08
+    approx: true
+    weights:
+      Information Technology: 0.50
+      Communication Services: 0.16
+      Consumer Discretionary: 0.13
+      Consumer Staples: 0.06
+      Health Care: 0.06
+      Industrials: 0.05
+      Utilities: 0.015
+      Materials: 0.015
+      Energy: 0.005
+      Financials: 0.005
+  SMH:                                      # 100% semis — Info Tech
+    approx: false
+    weights: {Information Technology: 1.0}
+  SOXX:                                     # 100% semis — Info Tech
+    approx: false
+    weights: {Information Technology: 1.0}
+  SOXL:                                     # 3x-levered semis — MV-based exposure understates notional
+    approx: false
+    weights: {Information Technology: 1.0}
+  XLK:
+    approx: false
+    weights: {Information Technology: 1.0}
+  XLC:
+    approx: false
+    weights: {Communication Services: 1.0}
+  XLF:
+    approx: false
+    weights: {Financials: 1.0}
+  XLE:
+    approx: false
+    weights: {Energy: 1.0}
+  XLV:
+    approx: false
+    weights: {Health Care: 1.0}
+  XLP:
+    approx: false
+    weights: {Consumer Staples: 1.0}
+  XLU:
+    approx: false
+    weights: {Utilities: 1.0}
+  IGV:                                      # software — Info Tech
+    approx: false
+    weights: {Information Technology: 1.0}
+  HACK:
+    approx: false
+    weights: {Information Technology: 1.0}
+  CIBR:
+    approx: false
+    weights: {Information Technology: 1.0}
+  QTUM:                                     # approx — quantum/compute names
+    approx: true
+    weights: {Information Technology: 1.0}
+  DRAM:                                     # memory names — Info Tech
+    approx: false
+    weights: {Information Technology: 1.0}
+  CHPX:                                     # AI semis + quantum — Info Tech
+    approx: false
+    weights: {Information Technology: 1.0}
+  WGMI:                                     # BTC miners classify under IT
+    approx: true
+    weights: {Information Technology: 1.0}
+  SOCL:
+    approx: false
+    weights: {Communication Services: 1.0}
+  URA:                                      # uranium miners — Energy per GICS
+    approx: true
+    weights: {Energy: 1.0}
+  OIH:
+    approx: false
+    weights: {Energy: 1.0}
+  NLR:                                      # approx — nuclear utilities + uranium miners
+    approx: true
+    weights: {Utilities: 0.5, Energy: 0.5}
+  PPA:
+    approx: true
+    weights: {Industrials: 1.0}
+  ITA:
+    approx: true
+    weights: {Industrials: 1.0}
+  UFO:
+    approx: true
+    weights: {Industrials: 1.0}
+  ARKX:
+    approx: true
+    weights: {Industrials: 1.0}
+  BOTZ:                                     # approx — robotics splits IT / Industrials
+    approx: true
+    weights: {Information Technology: 0.6, Industrials: 0.4}
+  ROBO:                                     # approx — robotics splits IT / Industrials
+    approx: true
+    weights: {Information Technology: 0.6, Industrials: 0.4}
+  REMX:
+    approx: true
+    weights: {Materials: 1.0}
+  POWR:                                     # approx — power infra splits Industrials / Utilities
+    approx: true
+    weights: {Industrials: 0.7, Utilities: 0.3}
+  GRID:                                     # approx — smart grid splits Industrials / Utilities
+    approx: true
+    weights: {Industrials: 0.7, Utilities: 0.3}

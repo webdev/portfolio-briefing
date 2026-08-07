@@ -371,6 +371,33 @@ def aggregate_briefing(
         options_positions.append(p)
     lines.extend(render_health(equity_reviews, nlv, options_positions))
 
+    # 2026-08-07 — Sector Exposure (look-through) panel, right after Health
+    # (George: "It seems like I'm pretty heavily invested in tech. Is it the
+    # right thing?"). Config-gated (sector_exposure.enabled). The computed
+    # exposure is stashed on analytics so Red Flags reads the SAME numbers.
+    # Fail-open: any error → no panel, no crash.
+    try:
+        from analysis.sector_exposure import (
+            sector_exposure_enabled as _sx_enabled,
+            compute_sector_exposure as _sx_compute,
+        )
+        if _sx_enabled(config):
+            import os as _sx_os
+            from render.sector_panel import render_sector_panel as _sx_render
+            _sx_exposure = _sx_compute(
+                snapshot_data.get("positions") or [], nlv, config,
+                api_key=_sx_os.getenv("FMP_API_KEY"),
+                cache_path=(snapshot_dir.parent if snapshot_dir
+                            else Path("state/briefing_snapshots"))
+                / "sector_cache.json",
+            )
+            analytics["sector_exposure"] = _sx_exposure
+            lines.extend(_sx_render(_sx_exposure))
+    except Exception as _sx_e:
+        import sys as _sys
+        print(f"[aggregate] sector-exposure panel failed (non-fatal): "
+              f"{_sx_e}", file=_sys.stderr)
+
     # NEW: Render stress test panel
     lines.extend(render_stress_test(analytics["stress_coverage"], analytics["nlv"]))
 

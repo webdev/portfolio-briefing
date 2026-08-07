@@ -259,6 +259,83 @@ themes:
     etfs: [SOCL, XLC]   # SOCL=Global X Social Media; XLC=Communication Services Select Sector
     notes: "Social platforms riding the AI wave via training-data licensing + LLM-powered ad targeting"
 
+  # ── Diversification themes (added 2026-08-07) ─────────────────────────
+  # Non-tech sectors so the daily candidate machine sources diversification —
+  # the book is ~90% tech-correlated and every candidate was tech before
+  # these. Anchors are liquid, optionable large caps where CSP/wheel
+  # mechanics work (tight spreads, real IV). Capped at ≤7 anchors per theme
+  # to bound daily scout runtime/API cost.
+
+  healthcare_pharma:
+    name: "Healthcare & Pharma"
+    group: "Diversification"
+    anchors:
+      - UNH    # UnitedHealth — managed care leader
+      - LLY    # Eli Lilly — GLP-1 / obesity franchise
+      - JNJ    # Johnson & Johnson — diversified pharma + medtech
+      - ABBV   # AbbVie — immunology (Skyrizi/Rinvoq post-Humira)
+      - MRK    # Merck — Keytruda oncology franchise
+      - PFE    # Pfizer — diversified pharma, high yield
+      - TMO    # Thermo Fisher — life-science tools (picks-and-shovels)
+      # NOTE: single-binary biotechs deliberately excluded (tail-risk rule —
+      # FDA headlines gap 15-25% through any strike; wheel mechanics break)
+    etfs: [XLV]   # XLV = Health Care Select Sector SPDR; verified 2026-08-07
+    notes: "Defensive diversifier — demographics + GLP-1 cycle; low tech correlation"
+
+  energy:
+    name: "Energy"
+    group: "Diversification"
+    anchors:
+      - XOM    # ExxonMobil — integrated major, Guyana + Permian
+      - CVX    # Chevron — integrated major, high yield
+      - COP    # ConocoPhillips — largest pure E&P
+      - SLB    # Schlumberger — oilfield services leader
+      - OXY    # Occidental — Permian + Berkshire-backed; high IV
+      - EOG    # EOG Resources — low-cost shale E&P
+    etfs: [XLE, OIH]   # XLE = Energy Select Sector SPDR; OIH = VanEck Oil Services; verified 2026-08-07
+    notes: "Commodity-driven diversifier — oil cycle largely uncorrelated to tech tape"
+
+  financials:
+    name: "Financials"
+    group: "Diversification"
+    anchors:
+      - JPM    # JPMorgan — money-center leader
+      - GS     # Goldman Sachs — capital markets / IB
+      - MS     # Morgan Stanley — wealth management + IB
+      - BAC    # Bank of America — rate-sensitive money center
+      - SCHW   # Charles Schwab — brokerage / asset gathering
+      - V      # Visa — payments network (toll booth)
+      - MA     # Mastercard — payments network (toll booth)
+    etfs: [XLF]   # XLF = Financial Select Sector SPDR; verified 2026-08-07
+    notes: "Rate-cycle + capital-markets diversifier; deep option liquidity across the group"
+
+  defense_aerospace:
+    name: "Defense & Aerospace"
+    group: "Diversification"
+    anchors:
+      - LMT    # Lockheed Martin — largest prime (also in Drones theme)
+      - RTX    # RTX — missiles/defense + commercial aero engines
+      - NOC    # Northrop Grumman — B-21 + space systems
+      - GD     # General Dynamics — submarines + Gulfstream
+      - BA     # Boeing — commercial aero duopoly + defense
+      - GE     # GE Aerospace — engines + aftermarket services
+    etfs: [ITA, PPA]   # ITA = iShares US Aerospace & Defense; PPA = Invesco Aerospace & Defense; verified 2026-08-07
+    notes: "Budget-cycle driven, geopolitics-hedged diversifier; long-cycle backlogs"
+
+  consumer_staples_value:
+    name: "Consumer Staples & Value"
+    group: "Diversification"
+    anchors:
+      - PG     # Procter & Gamble — staples bellwether
+      - KO     # Coca-Cola — global beverages, dividend aristocrat
+      - PEP    # PepsiCo — beverages + snacks
+      - COST   # Costco — membership retail compounder
+      - WMT    # Walmart — scale retail + ads/membership flywheel
+      - MCD    # McDonald's — franchised royalty model
+      - DIS    # Disney — entertainment/streaming value turnaround (closest theme fit)
+    etfs: [XLP]   # XLP = Consumer Staples Select Sector SPDR; verified 2026-08-07
+    notes: "Defensive cash-flow diversifier — low beta vs the AI complex, steady wheel premium"
+
 # Verdict thresholds — same logic as long-term-opportunity-advisor but tuned
 # for outbound research (slightly more permissive on WATCH).
 verdict:

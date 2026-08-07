@@ -1039,6 +1039,24 @@ def _compute(
     except ImportError:
         _mv_fv_adj, _mv_fv_of, _mv_rows_pb = None, None, {}
 
+    # 2026-08-07 — diversification-aware conviction (George: "It seems like
+    # I'm pretty heavily invested in tech. Is it the right thing?").
+    # ASSIGNMENT-ADJUSTED sector pcts (a new put in an over-cap sector is
+    # the thing to penalize), computed once per run from the same snapshot
+    # positions. Config-gated (sector_exposure.enabled); fail-open: any
+    # error → {} → zero adjustment for every candidate.
+    _sx_mod = None
+    _sector_pcts_pb: dict = {}
+    try:
+        from analysis import sector_exposure as _sx_mod
+        if _sx_mod.sector_exposure_enabled(config):
+            _sx_nlv = _f(_analytics_get(analytics, "nlv"), 0.0) or 0.0
+            _sector_pcts_pb = _sx_mod.assignment_pcts(
+                _sx_mod.compute_sector_exposure(
+                    snapshot_data.get("positions") or [], _sx_nlv, config))
+    except Exception:
+        _sx_mod, _sector_pcts_pb = None, {}
+
     # Spots for intrinsic math (fail-open).
     spots: dict[str, float] = {}
     if isinstance(technicals, dict):
@@ -1396,6 +1414,19 @@ def _compute(
                 score = max(score + mv_delta, min(score, min_score))
                 if mv_note:
                     setup_flags.append(mv_note)
+
+        # 2026-08-07 — sector-diversification conviction (mirrors the
+        # CP/MV bonus pattern above; assignment-adjusted pcts). −1 when the
+        # candidate's sector already sits at/over the cap, +1 when it
+        # genuinely diversifies (sector ≤ underweight floor). Conviction
+        # only — never a hard gate; unknown sector / unmeasured book → 0.
+        if _sx_mod is not None:
+            sx_delta, sx_note = _sx_mod.sector_conviction_adjustment(
+                c.ticker, _sector_pcts_pb, config)
+            if sx_delta:
+                score += sx_delta
+                if sx_note:
+                    setup_flags.append(sx_note)
 
         # Task #30 — equity-stacking gate: a short put on a name whose
         # EQUITY is already a large slice of NLV concentrates single-name

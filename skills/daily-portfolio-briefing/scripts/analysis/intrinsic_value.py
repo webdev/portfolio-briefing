@@ -64,6 +64,7 @@ DEFAULT_ETFS = {
     "URA", "NLR", "BOTZ", "ROBO", "PPA", "ITA", "REMX", "QTUM", "HACK",
     "CIBR", "UFO", "TAN", "ICLN", "LIT", "XBI", "IBB",
     "DRAM", "CHPX", "WGMI", "POWR", "GRID",  # memory / AI-semi+quantum / btc-miners / power infra / smart grid
+    "OIH",  # VanEck Oil Services — energy diversification theme (verified 2026-08-07)
     # bonds / commodity / vol
     "TLT", "IEF", "HYG", "LQD", "GLD", "SLV", "USO", "UNG", "VXX", "UVXY",
 }
