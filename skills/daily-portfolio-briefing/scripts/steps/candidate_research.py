@@ -111,11 +111,23 @@ def _fv_note(tk: str, spot, fv: dict | None, etf_set) -> str | None:
 
 
 def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
-                 gate_state=None, compact: bool = False) -> list[str]:
+                 gate_state=None, compact: bool = False,
+                 mv_row: dict | None = None,
+                 config: dict | None = None) -> list[str]:
     """One candidate card. ``compact`` (2026-08-06 length diet) keeps the
     header, RSI metrics, entry ticket, and earnings line but drops the FV
     note + Verdict elaboration (both live in the companion
-    candidates_<date>.md report)."""
+    candidates_<date>.md report).
+
+    ``mv_row`` (USER DECISION 2026-08-06 — the two approved Moneyvest
+    signals) is the ticker's Moneyvest shopping-list row. Feature 1: a
+    +1-style FV note when spot sits ≥ min_discount below MV FV with a BUY
+    catalyst; a cap note on CSP candidates above MV FV (ticket stays —
+    assignment happens below spot); equity-BUY entries above MV FV are
+    demoted to a visible ⏸ Deferred line (rule #24, never hidden).
+    Feature 2: the LB→HB scale-in ladder line under the entry. Both are
+    config-gated (``moneyvest.fv_conviction`` / ``moneyvest.hb_ladder``);
+    flags off or ``mv_row=None`` → byte-identical legacy card."""
     tk = (r.get("ticker") or "").upper()
     spot = r.get("spot")
     spot_s = f"${spot:.2f}" if spot else "?"
@@ -161,6 +173,37 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
         elif tier == 3 and conviction == "Low":
             badge = f"{badge} 🟡 low conviction — trial size".strip()
         badge = f" {badge}" if not badge.startswith(" ") else badge
+
+    # USER DECISION 2026-08-06 — Moneyvest FV conviction modulation + HB
+    # scale-in ladder (the two approved signals; M-Score/sentiment gating
+    # explicitly declined). Sits BESIDE the Parkev-tier/conviction badges
+    # above, same pattern as the CP agreement bonus. Fail-closed: missing
+    # MV FV / ETF row → nothing renders.
+    mv_note_line = None
+    mv_ladder_line = None
+    mv_add_demote = None
+    if status == "candidate" and mv_row:
+        try:
+            from analysis import mv_conviction as _mvc
+            from analysis.moneyvest_chip import format_hb_ladder as _hb_fmt
+        except ImportError:
+            _mvc = None
+        if _mvc is not None:
+            _fv_mv = _mvc.mv_fair_value_for(mv_row)
+            _dcf = (fv_by_ticker.get(tk) or {}).get("dcf")
+            _diverge = _mvc.fv_sources_diverge(_fv_mv, _dcf)
+            _catalyst = str(r.get("third_party_rec") or "").upper() == "BUY"
+            _delta, _note = _mvc.mv_fv_adjustment(
+                spot, _fv_mv, fmp_divergence_flag=_diverge,
+                has_buy_catalyst=_catalyst, config=config)
+            if _note:
+                mv_note_line = f"  - {_note}"
+            mv_add_demote = _mvc.add_demotion_reason(
+                spot, _fv_mv, fmp_divergence_flag=_diverge, config=config)
+            if _mvc.hb_ladder_enabled(config):
+                _lad = _hb_fmt(mv_row.get("light_buy"), mv_row.get("heavy_buy"))
+                if _lad:
+                    mv_ladder_line = f"  - {_lad}"
 
     out = [f"**{_STATUS_LABEL[status]} · `{tk}` · {spot_s}**{badge}"]
 
@@ -214,11 +257,22 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                 f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}"
             )
         elif (r.get("verdict") or "").upper().startswith("BUY"):
-            rsi_read = ovr if is_override else "RSI favourable"
-            tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (equity):** "
-            out.append(f"  - {tag}BUY `{tk}` on this pullback — {rsi_read}; size per your plan.")
+            if mv_add_demote:
+                # Feature 1 (2026-08-06): NEW equity BUY above MV fair value
+                # → demoted, never hidden (rule #24) — the full context stays
+                # visible so the user can plan the pullback entry.
+                out.append(f"  - ⏸ **Deferred — {mv_add_demote}.**")
+                mv_note_line = None  # the demote line IS the FV read
+            else:
+                rsi_read = ovr if is_override else "RSI favourable"
+                tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (equity):** "
+                out.append(f"  - {tag}BUY `{tk}` on this pullback — {rsi_read}; size per your plan.")
         else:
             out.append("  - _Entry: setup qualifies, but no live chain ticket available — verify before placing._")
+        if mv_note_line:
+            out.append(mv_note_line)
+        if mv_ladder_line:
+            out.append(mv_ladder_line)
     elif status == "held_rsi" and rv:
         out.append(f"  - _Held back by RSI: {rv.reason}_")
 
@@ -601,6 +655,17 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     themes_meta = _tr._fresh_theme_meta() or scout_payload.get("themes", {})
     rbt = scout_payload.get("results_by_theme", {})
 
+    # USER DECISION 2026-08-06 — Moneyvest rows for the FV-conviction /
+    # HB-ladder card annotations. Fail-open: no payload → empty map →
+    # byte-identical legacy cards (both features also config-gated inside
+    # _format_card).
+    _mv_rows_cb: dict = {}
+    try:
+        from analysis.moneyvest_chip import mv_by_ticker as _mvbt_cb
+        _mv_rows_cb = _mvbt_cb((snapshot_data or {}).get("moneyvest"))
+    except ImportError:
+        _mv_rows_cb = {}
+
     # A ticker can anchor several themes (e.g. QCOM in Semis + Applications) but
     # it's one trade — de-dup the flat briefing by ticker (the full per-theme
     # report keeps it under each theme).
@@ -706,7 +771,10 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 _row_cands.append((tname, r))
                 continue
             card = _format_card(r, fv_by_ticker, etf_set, rsi_th,
-                                gate_state=gate_state, compact=compact)
+                                gate_state=gate_state, compact=compact,
+                                mv_row=_mv_rows_cb.get(
+                                    (r.get("ticker") or "").upper()),
+                                config=config)
             card[0] = f"{card[0]}  · _{tname}_"
             # Same-name (different-strike) stacking note — kept, but flagged.
             tk = (r.get("ticker") or "").upper()

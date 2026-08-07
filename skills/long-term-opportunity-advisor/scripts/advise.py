@@ -21,6 +21,20 @@ except ImportError:  # pragma: no cover - standalone runs
     def _fmt_mv_anchor(label: str, price: float) -> str:
         return f"💰 MV {label} ${price:,.0f}"
 
+try:
+    from analysis.moneyvest_chip import format_hb_ladder as _fmt_hb_ladder
+except ImportError:  # pragma: no cover - standalone runs (mirror the grammar)
+    def _fmt_hb_ladder(lb, hb):
+        try:
+            lb_f = float(lb) if lb else None
+            hb_f = float(hb) if hb else None
+        except (TypeError, ValueError):
+            return None
+        if not lb_f or not hb_f or hb_f >= lb_f:
+            return None
+        return (f"Ladder: 💰 LB ${lb_f:,.0f} (first tranche) → "
+                f"HB ${hb_f:,.0f} (scale-in)")
+
 
 def _safe_shares(dollars: float, spot: float | None) -> int:
     """Fail-open share count. Returns 0 when spot is unusable (NaN, None, ≤0).
@@ -144,6 +158,7 @@ def evaluate_options_idea(
     has_cash: bool = True,
     sr_levels: Optional[list] = None,
     mv_ladder: Optional[dict] = None,
+    hb_ladder: bool = False,
 ) -> Optional[LongTermOpportunity]:
     """Evaluate longer-dated option ideas: LEAP / long-dated CSP / diagonal / dividend.
 
@@ -160,6 +175,20 @@ def evaluate_options_idea(
     renders "strike anchored to 💰 Light Buy $196". Anchor selection ONLY —
     it never widens the band and never overrides RSI/chase/earnings gates
     (those run in the calling pipeline).
+
+    ``hb_ladder`` (USER DECISION 2026-08-06, feature 2 — gated by
+    ``moneyvest.hb_ladder.enabled``; default False = legacy LB-first
+    behavior byte-identical). JUDGMENT CALL, documented: the LT_CSP band
+    (7-13% OTM) is by construction a deep-pullback SECOND-tranche
+    acquisition zone — the shallower first tranche is the new_ideas
+    PULLBACK CSP / equity starter. Legacy iteration order (LB → HB → NB,
+    first in-band wins) let Light Buy SHADOW Heavy Buy even when both sat
+    in the band, so assignment anchored at the first-tranche price. With
+    the flag on, when BOTH LB and HB fall inside the band the DEEPER rung
+    (Heavy Buy) wins and the anchor note names it; No-Brainer stays a
+    last-resort fallback. When the anchor is Light Buy and a real HB
+    exists below it, the rationale appends the LB→HB scale-in ladder line
+    so the second rung is always visible.
     """
     rec = (third_party_rec or "").upper()
 
@@ -199,23 +228,50 @@ def evaluate_options_idea(
         if mv_ladder:
             band_lo = spot * 0.87
             band_hi = spot * 0.93
-            for _mv_field, _mv_label in (("light_buy", "Light Buy"),
-                                         ("heavy_buy", "Heavy Buy"),
-                                         ("no_brainer", "No-Brainer Buy")):
-                _mv_price = mv_ladder.get(_mv_field)
+
+            def _rung(field):
                 try:
-                    _mv_price = float(_mv_price) if _mv_price else None
+                    v = mv_ladder.get(field)
+                    v = float(v) if v else None
                 except (TypeError, ValueError):
-                    _mv_price = None
-                if _mv_price and band_lo <= _mv_price <= band_hi:
-                    # At/just-below the ladder price ($5 strike granularity).
-                    import math as _math
-                    csp_strike = int(_math.floor(_mv_price / 5) * 5)
-                    strike_anchor_note = (
-                        f" Strike anchored to "
-                        f"{_fmt_mv_anchor(_mv_label, _mv_price)}.")
-                    mv_anchored = True
-                    break
+                    v = None
+                return v
+
+            _lb, _hb, _nb = (_rung("light_buy"), _rung("heavy_buy"),
+                             _rung("no_brainer"))
+            in_band = [(p, lbl) for p, lbl in
+                       ((_lb, "Light Buy"), (_hb, "Heavy Buy"),
+                        (_nb, "No-Brainer Buy"))
+                       if p and band_lo <= p <= band_hi]
+            chosen = None
+            if in_band:
+                if hb_ladder:
+                    # Feature 2 (2026-08-06) — deeper-rung preference: the
+                    # LT_CSP band is a second-tranche zone, so when both LB
+                    # and HB sit in-band, anchor at the DEEPER Heavy Buy
+                    # (see docstring judgment call). NB stays last resort.
+                    non_nb = [c for c in in_band if c[1] != "No-Brainer Buy"]
+                    chosen = (min(non_nb, key=lambda c: c[0]) if non_nb
+                              else in_band[0])
+                else:
+                    # Legacy: LB → HB → NB, first in-band wins.
+                    chosen = in_band[0]
+            if chosen:
+                _mv_price, _mv_label = chosen
+                # At/just-below the ladder price ($5 strike granularity).
+                import math as _math
+                csp_strike = int(_math.floor(_mv_price / 5) * 5)
+                strike_anchor_note = (
+                    f" Strike anchored to "
+                    f"{_fmt_mv_anchor(_mv_label, _mv_price)}.")
+                # When the anchor is the FIRST-tranche rung and a real
+                # deeper rung exists, surface the scale-in ladder so the
+                # second tranche is always visible (real values only).
+                if hb_ladder and _mv_label == "Light Buy":
+                    _lad = _fmt_hb_ladder(_lb, _hb)
+                    if _lad:
+                        strike_anchor_note += f" {_lad}."
+                mv_anchored = True
         # S/R-aware refinement (hard rule #20): when a real support cluster
         # sits within the 7-13% OTM band, snap the strike to it. Assignment
         # then puts you at a chart-relevant level rather than a round-number
@@ -272,6 +328,7 @@ def generate_long_term_opportunities(
     has_cash: bool = True,
     sr_by_ticker: Optional[dict] = None,
     mv_ladders: Optional[dict] = None,
+    hb_ladder: bool = False,
 ) -> list:
     """
     Run the advisor across the universe (held + recommended-but-not-held tickers).
@@ -328,6 +385,7 @@ def generate_long_term_opportunities(
             third_party_rec=rec, has_cash=has_cash,
             sr_levels=_sr_levels_for(ticker),
             mv_ladder=mv_ladders.get((ticker or "").upper()),
+            hb_ladder=hb_ladder,
         )
         if opt_idea:
             opportunities.append(opt_idea)

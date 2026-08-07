@@ -80,6 +80,14 @@ moneyvest:
   enabled: true
   # cache_path: /custom/path/moneyvest.json   # default: state/cache/moneyvest.json (repo root)
   # ttl_hours: 20
+  # USER DECISION 2026-08-06 — the TWO approved Moneyvest signals in
+  # recommendation logic (M-Score gating and sentiment gating explicitly
+  # DECLINED — do not add). Both flags off → byte-identical legacy output.
+  fv_conviction:            # feature 1 — FV conviction modulation
+    enabled: true
+    min_discount_pct: 10    # spot ≥ this % below MV FV (+ buy catalyst) → +1
+  hb_ladder:                # feature 2 — Heavy-Buy scale-in ladder
+    enabled: true
 
 # 2026-08-06 length diet — the main briefing is the DECISION document; full
 # research detail lives in the companion reports (candidates_DATE.md,

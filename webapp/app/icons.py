@@ -108,6 +108,7 @@ _ACTION_ICONS = {
     "SKIPPED_LT_CSP":       "⏭️",
     "SKIPPED_RSI":          "⏭️",
     "SKIPPED_LT_VERDICT":   "⏭️",
+    "SKIPPED_MV_FV":        "⏭️",
     "_FUNDING_HINT":        "💵",
     "reference_demoted":    "📎",  # rule #43 — reference-only LTO card
     "REFERENCE_DEMOTED":    "📎",
@@ -135,6 +136,7 @@ _ACTION_LABELS = {
     "SKIPPED_LT_CSP":         "Skipped — LT CSP",
     "SKIPPED_RSI":            "Skipped — RSI gate",
     "SKIPPED_LT_VERDICT":     "Skipped — LT-trend gate",
+    "SKIPPED_MV_FV":          "Skipped — above MV fair value",
     "reference_demoted":      "Reference — not actionable today",
     "REFERENCE_DEMOTED":      "Reference — not actionable today",
     "LONG_DATED_CSP":         "Long-Dated CSP",

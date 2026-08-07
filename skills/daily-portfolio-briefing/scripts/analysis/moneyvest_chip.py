@@ -121,6 +121,23 @@ def format_mv_anchor(label: str, price: float) -> str:
     return f"{MV_MARK} MV {label} ${price:,.0f}"
 
 
+def format_hb_ladder(lb, hb) -> str | None:
+    """``Ladder: 💰 LB $196 (first tranche) → HB $160 (scale-in)`` — the ONE
+    grammar for the Heavy-Buy scale-in ladder line (USER DECISION
+    2026-08-06, feature 2). Real values only: returns None unless BOTH
+    rungs exist and HB sits below LB (a sane ladder) — never a fabricated
+    number (rule #19)."""
+    try:
+        lb_f = float(lb) if lb else None
+        hb_f = float(hb) if hb else None
+    except (TypeError, ValueError):
+        return None
+    if not lb_f or not hb_f or hb_f >= lb_f:
+        return None
+    return (f"Ladder: {MV_MARK} LB ${lb_f:,.0f} (first tranche) → "
+            f"HB ${hb_f:,.0f} (scale-in)")
+
+
 def source_legend_lines() -> list[str]:
     """One-line source legend, rendered ONCE near the top of the briefing
     (Market Context). Explains every attribution mark so Moneyvest data is

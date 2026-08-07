@@ -812,11 +812,21 @@ def main():
             _wte_verdict_path = None
             if args.etrade_fixture or args.dry_run:
                 _wte_verdict_path = Path("state/scout_verdicts.test.yaml")
+            # USER DECISION 2026-08-06 (feature 2) — Moneyvest Heavy-Buy
+            # scale-in rungs for WTE trigger text (gated inside the
+            # renderer by moneyvest.hb_ladder.enabled). Fail-open.
+            _mv_rows_wte: dict = {}
+            try:
+                from analysis.moneyvest_chip import mv_by_ticker as _mvbt_w
+                _mv_rows_wte = _mvbt_w(snapshot_data.get("moneyvest"))
+            except Exception:
+                _mv_rows_wte = {}
             _wte_md = _wte.render_when_to_enter_report(
                 scout_payload, config=config,
                 generated_at=_dt_w.now().strftime("%A, %B %d, %Y · %I:%M %p"),
                 sr_by_sym=_sr_wte,
                 gate_state=gate_state,
+                mv_rows=_mv_rows_wte,
                 **({"verdict_state_path": _wte_verdict_path} if _wte_verdict_path else {}),
             )
             # Task #43 — honest IV labels (same pass as the candidate report).

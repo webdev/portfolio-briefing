@@ -1026,6 +1026,18 @@ def _compute(
     _cp_payload = _cp_payload if isinstance(_cp_payload, dict) else {}
     cp_tickers_set = {str(t).upper()
                       for t in (_cp_payload.get("tickers") or []) if t}
+    # USER DECISION 2026-08-06 — Moneyvest FV conviction modulation (the
+    # cp_agreement_bonus pattern; M-Score/sentiment gating explicitly
+    # declined). Fail-open: no module / no cache → empty map → no-op.
+    try:
+        from analysis.mv_conviction import (
+            mv_fair_value_for as _mv_fv_of,
+            mv_fv_adjustment as _mv_fv_adj,
+        )
+        from analysis.moneyvest_chip import mv_by_ticker as _mv_rows_of
+        _mv_rows_pb = _mv_rows_of(snapshot_data.get("moneyvest"))
+    except ImportError:
+        _mv_fv_adj, _mv_fv_of, _mv_rows_pb = None, None, {}
 
     # Spots for intrinsic math (fail-open).
     spots: dict[str, float] = {}
@@ -1360,6 +1372,30 @@ def _compute(
         if cp_delta:
             score += cp_delta
             setup_flags.append(cp_flag)
+
+        # USER DECISION 2026-08-06 — Moneyvest FV conviction modulation
+        # (feature 1): +1 when spot sits ≥ min_discount below MV FV AND a
+        # Parkev BUY catalyst exists (corroboration, never standalone —
+        # same discipline as the CP bonus); above MV FV the new-CSP
+        # conviction is CAPPED one notch, clamped so it never pushes a
+        # qualifying candidate below the min_conviction_score floor (the
+        # CSP stays actionable — assignment happens below spot). Fail-
+        # closed on missing FV/ETF rows. Conviction only — no hard gate
+        # (RSI/earnings/chase battery) is touched.
+        if _mv_fv_adj is not None:
+            _mv_fv_val = _mv_fv_of(_mv_rows_pb.get(c.ticker))
+            mv_delta, mv_note = _mv_fv_adj(
+                spots.get(c.ticker), _mv_fv_val,
+                fmp_divergence_flag=False,  # no FMP DCF on this surface
+                has_buy_catalyst=(rating == "BUY"), config=config)
+            if mv_delta > 0:
+                score += mv_delta
+                setup_flags.append(mv_note)
+            elif mv_delta < 0:
+                # One notch down at most, never below the qualifying floor.
+                score = max(score + mv_delta, min(score, min_score))
+                if mv_note:
+                    setup_flags.append(mv_note)
 
         # Task #30 — equity-stacking gate: a short put on a name whose
         # EQUITY is already a large slice of NLV concentrates single-name

@@ -373,6 +373,14 @@ def generate_long_term_opportunities_step(
     except Exception:
         mv_ladders = {}
 
+    # USER DECISION 2026-08-06 (feature 2) — Heavy-Buy deeper-rung anchor
+    # preference for LT_CSP strikes. Config-gated; off → legacy LB-first.
+    try:
+        from analysis.mv_conviction import hb_ladder_enabled as _hb_on
+        _hb_flag = _hb_on(config)
+    except Exception:
+        _hb_flag = False
+
     try:
         opportunities = generate_long_term_opportunities(
             positions_by_ticker=positions_by_ticker,
@@ -385,6 +393,7 @@ def generate_long_term_opportunities_step(
             has_cash=has_cash,
             sr_by_ticker=sr_by_ticker,
             mv_ladders=mv_ladders,
+            hb_ladder=_hb_flag,
         )
     except Exception as e:
         print(f"  [warn] long-term-advisor failed: {e}", file=sys.stderr)
@@ -702,6 +711,24 @@ def generate_long_term_opportunities_step(
 
         add_demoted.append(op)
     op_dicts = add_demoted
+
+    # USER DECISION 2026-08-06 (feature 1) — Moneyvest FV conviction gate,
+    # BESIDE the Parkev-tier promote/demote logic above (the CP-bonus
+    # pattern): NEW equity ADDs above MV fair value demote to a visible
+    # SKIPPED_MV_FV row (rule #24 — shown with reason, never hidden);
+    # LONG_DATED_CSPs above MV FV stay actionable but carry the
+    # conviction-cap note; at ≥ min_discount below FV with a BUY catalyst
+    # the +1 bonus note is attached. TRIM/EXIT/management untouched.
+    # Config-gated (moneyvest.fv_conviction.enabled); off → identity.
+    try:
+        from analysis.mv_conviction import apply_mv_fv_gate_to_lto as _mv_gate
+        _mv_spots = {str(t).upper(): (info or {}).get("spot")
+                     for t, info in positions_by_ticker.items()}
+        op_dicts = _mv_gate(
+            op_dicts, mv_rows=mv_ladders, spots=_mv_spots,
+            recs_normalized=third_party_recs, config=config)
+    except ImportError:
+        pass
 
     # Pre-trade validator pass — for every surviving LONG_DATED_CSP, run the
     # discipline checkpoint (earnings window, bucket concentration, etc.)

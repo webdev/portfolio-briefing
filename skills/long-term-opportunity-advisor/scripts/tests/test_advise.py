@@ -195,6 +195,59 @@ def test_format_opportunity_md():
     assert "RSI 28 oversold" in txt
 
 
+def _csp_idea(mv_ladder, hb_ladder):
+    """LONG_DATED_CSP path: BUY rec + IV rank > 50 + cash, spot $100 →
+    discipline band $87-$93."""
+    return evaluate_options_idea(
+        ticker="TST", weight_pct=2.0, spot=100.0, rsi=45.0, iv_rank=60.0,
+        sma_200=95.0, third_party_rec="BUY", has_cash=True,
+        mv_ladder=mv_ladder, hb_ladder=hb_ladder,
+    )
+
+
+def test_mv_hb_deeper_rung_preferred_when_flag_on():
+    """USER DECISION 2026-08-06, feature 2 (George: 'Do you take into
+    consideration money-vested fair value prices? What are you actually
+    using it for, other than just displaying it?'): with hb_ladder ON and
+    BOTH Light Buy ($92) and Heavy Buy ($88) inside the 7-13% band, the
+    DEEPER Heavy Buy anchors the LT_CSP strike and the note names the
+    right rung — LB no longer shadows HB (documented judgment call: the
+    band is a second-tranche zone)."""
+    op = _csp_idea({"light_buy": 92.0, "heavy_buy": 88.0}, hb_ladder=True)
+    assert op is not None and op.kind == "LONG_DATED_CSP"
+    assert "$85P" in op.concrete_trade  # floor(88/5)*5
+    assert "💰 MV Heavy Buy $88" in op.rationale
+    assert "Light Buy" not in op.rationale
+
+
+def test_mv_legacy_lb_first_when_flag_off():
+    """Flag OFF → byte-identical legacy behavior: LB ($92) wins even with
+    HB ($88) also in-band (first-in-band iteration order)."""
+    op = _csp_idea({"light_buy": 92.0, "heavy_buy": 88.0}, hb_ladder=False)
+    assert op is not None
+    assert "$90P" in op.concrete_trade  # floor(92/5)*5
+    assert "💰 MV Light Buy $92" in op.rationale
+    assert "Heavy Buy" not in op.rationale
+    assert "Ladder:" not in op.rationale
+
+
+def test_mv_lb_anchor_carries_scale_in_ladder():
+    """Flag ON, only LB in-band, HB below the band → LB anchors (only
+    in-band rung) and the rationale appends the real LB→HB scale-in
+    ladder so the second tranche stays visible."""
+    op = _csp_idea({"light_buy": 92.0, "heavy_buy": 80.0}, hb_ladder=True)
+    assert op is not None
+    assert "💰 MV Light Buy $92" in op.rationale
+    assert "Ladder: 💰 LB $92 (first tranche) → HB $80 (scale-in)" in op.rationale
+
+
+def test_mv_no_ladder_data_no_mention():
+    """No MV row → no ladder / anchor language, never fabricated."""
+    op = _csp_idea(None, hb_ladder=True)
+    assert op is not None
+    assert "💰" not in op.rationale and "Ladder:" not in op.rationale
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

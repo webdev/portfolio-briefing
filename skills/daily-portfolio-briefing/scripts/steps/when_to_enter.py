@@ -174,7 +174,25 @@ def _at_level_label(level) -> str:
     return f"at {level.label()}"
 
 
-def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
+def _hb_scale_in(mv_row: dict | None, spot) -> str | None:
+    """``scale in at $160 (💰 MV Heavy Buy)`` — the Moneyvest Heavy-Buy
+    rung cited as an explicit scale-in level in WAIT/pullback trigger text
+    (USER DECISION 2026-08-06, feature 2). Real values only: returns None
+    unless the row carries a heavy_buy BELOW spot (rule #19 — no HB → no
+    mention, never a fabricated level)."""
+    if not isinstance(mv_row, dict) or not spot:
+        return None
+    try:
+        hb = float(mv_row.get("heavy_buy") or 0)
+        s = float(spot)
+    except (TypeError, ValueError):
+        return None
+    if hb <= 0 or s <= 0 or hb >= s:
+        return None
+    return f"scale in at ${hb:,.0f} (💰 MV Heavy Buy)"
+
+
+def classify(r: dict, sr=None, mv_row: dict | None = None) -> tuple[str, str, str, str]:
     """Classify a single scout result, optionally enriched with S/R.
 
     Returns ``(status, status_label, read, trigger)`` where ``status`` is one
@@ -186,7 +204,16 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
     actual support/resistance levels instead of the generic "8-12% pullback"
     phrasing, and ENTRY cards get a confluence badge when spot sits at a
     strong support. Backwards-compatible: ``sr=None`` reproduces the legacy
-    behavior exactly."""
+    behavior exactly.
+
+    ``mv_row`` (USER DECISION 2026-08-06, feature 2 — HB scale-in ladder)
+    is the ticker's Moneyvest shopping-list row. When it carries a Heavy
+    Buy below spot, the WAIT/pullback trigger text additionally cites it
+    (``scale in at $X (💰 MV Heavy Buy)``) — merged WITH the S/R support
+    zone when both exist, so the trigger shows both the chart level and
+    the valuation rung. ``mv_row=None`` (or no HB below spot) reproduces
+    the legacy text exactly — real values only, never fabricated. The
+    caller gates this on ``moneyvest.hb_ladder.enabled``."""
     rsi = r.get("rsi_14")
     verdict = (r.get("verdict") or "").upper()
     dd = r.get("drawdown_pct") or 0
@@ -210,6 +237,11 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
     nearest_sup = _strongest_support_below(sr_obj, spot or 0) if (sr_obj and spot) else None
     at_sup = _at_support(sr_obj, spot or 0) if (sr_obj and spot) else None
 
+    # Moneyvest Heavy-Buy scale-in rung (feature 2, 2026-08-06) — cited in
+    # WAIT/pullback triggers only when a REAL heavy_buy sits below spot.
+    hb_note = _hb_scale_in(mv_row, spot)
+    hb_sfx = f" {hb_note[0].upper()}{hb_note[1:]}." if hb_note else ""
+
     # Technical state first — even an AVOID verdict on an overbought name
     # reduces to "wait for the cool-off," not "thesis broken."
     if rsi is not None and rsi >= 70:
@@ -221,7 +253,7 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
         )
         return ("wait", "🔴 WAIT — overbought",
                 f"Extended after a {f5:+.1f}% 5d run, RSI {rsi:.0f}, {tp}, IV rank {iv:.0f}.",
-                f"WAIT for RSI < 55 AND {pullback_phrase}.{side_note}")
+                f"WAIT for RSI < 55 AND {pullback_phrase}.{hb_sfx}{side_note}")
 
     if rsi is not None and 60 <= rsi < 70:
         pullback_phrase = (
@@ -230,7 +262,8 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
         )
         return ("wait", "🟡 WAIT — extended",
                 f"RSI {rsi:.0f}, {tp}, {f5:+.1f}% 5d — extended but not at the chase point.",
-                f"WAIT for RSI to retrace into 45-55 AND {pullback_phrase}. Covered calls attractive if held.")
+                f"WAIT for RSI to retrace into 45-55 AND {pullback_phrase}.{hb_sfx} "
+                f"Covered calls attractive if held.")
 
     # Thesis check — deep drawdown + weak technicals + below the 200-SMA.
     if dd >= 40 and rsi is not None and rsi < 45 and (sma_pct or 0) < -15:
@@ -381,6 +414,10 @@ def classify(r: dict, sr=None) -> tuple[str, str, str, str]:
                 f"toward ${nearest_sup.price:g} support" if nearest_sup
                 else "toward RSI 35-40"
             )
+            if hb_note:
+                # Feature 2 (2026-08-06): show BOTH the chart support and
+                # the Moneyvest Heavy-Buy rung when both are known.
+                scale_target = f"{scale_target} · {hb_note}"
             trigger = (
                 f"ENTER: small starter ({size_guidance}). Scale on further weakness "
                 f"{scale_target}. Average down on confirmed support."
@@ -430,7 +467,8 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
                                  generated_at: str = "",
                                  sr_by_sym: dict | None = None,
                                  gate_state=None,
-                                 verdict_state_path=None) -> str:
+                                 verdict_state_path=None,
+                                 mv_rows: dict | None = None) -> str:
     """Build the markdown report. Empty-string when no scout payload.
 
     ``sr_by_sym`` maps uppercase ticker → ``SupportResistance`` or its
@@ -455,6 +493,15 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
     if not scout_payload:
         return ""
 
+    # USER DECISION 2026-08-06 (feature 2) — Moneyvest Heavy-Buy scale-in
+    # rungs in trigger text. Config-gated: flag off → empty map → every
+    # trigger byte-identical to legacy.
+    try:
+        from analysis.mv_conviction import hb_ladder_enabled as _hb_on
+        _mv_rows_eff = (mv_rows or {}) if _hb_on(config) else {}
+    except ImportError:
+        _mv_rows_eff = {}
+
     gates_closed = gate_state is not None and not gate_state.open
     _gate_reason = (gate_state.reasons[0]
                     if (gates_closed and gate_state.reasons) else "capacity")
@@ -474,7 +521,9 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         DEFERRED so the user can see the live ticket and plan rotation), and
         downgrading ENTRY NOW when the candidates report disagrees
         (consistency contract §7)."""
-        status, label, read, trigger = classify(r, sr=sr)
+        status, label, read, trigger = classify(
+            r, sr=sr,
+            mv_row=_mv_rows_eff.get((r.get("ticker") or "").upper()))
         if gates_closed and status == "enter":
             # Keep the entry classification + full live ticket. Append a
             # ⏸ DEFERRED tag to the label and a one-line capacity note to
