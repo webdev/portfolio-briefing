@@ -114,30 +114,33 @@ def test_no_flip_section_when_verdicts_unchanged(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_override_candidate_labeled_not_favourable():
-    """A CSP candidate at RSI 53 with 74% drawdown + BUY rec qualifies only via
-    the override path — the card must say OVERRIDE, never '✅ RSI favourable'."""
-    r = _res(ticker="BIDU", rsi_14=53, drawdown_pct=74, third_party_rec="BUY")
+    """A CSP candidate at RSI 57 (outside the configured 35-55 entry band,
+    below the 60-70 extended-wait demotion) with 74% drawdown + BUY rec
+    qualifies only via the override path — the card must say OVERRIDE, never
+    '✅ RSI favourable'."""
+    r = _res(ticker="BIDU", rsi_14=57, drawdown_pct=74, third_party_rec="BUY")
     md = cr.render_candidate_report(_payload([r]), fv_by_ticker={}, config={},
                                     generated_at="T")
     card = _card(md, "BIDU")
-    assert "RSI 53 — OVERRIDE (drawdown 74% + BUY rec)" in card
+    assert "RSI 57 — OVERRIDE (drawdown 74% + BUY rec)" in card
     assert "✅ RSI favourable" not in card
     # The ticket itself carries the override tag too.
     assert "Entry (CSP):" in card
 
 
 def test_override_buy_entry_line_not_presented_as_favourable():
-    r = _res(ticker="INTC", rsi_14=55, drawdown_pct=60, third_party_rec="BUY",
+    r = _res(ticker="INTC", rsi_14=57, drawdown_pct=60, third_party_rec="BUY",
              verdict="BUY (pullback)", csp_entry=None)
     md = cr.render_candidate_report(_payload([r]), fv_by_ticker={}, config={},
                                     generated_at="T")
     card = _card(md, "INTC")
-    assert "RSI 55 — OVERRIDE" in card
+    assert "RSI 57 — OVERRIDE" in card
     assert "RSI favourable" not in card
 
 
 def test_in_band_candidate_unchanged():
-    """RSI 40 (inside 35-50) renders the normal favourable card — no OVERRIDE."""
+    """RSI 40 (inside the configured 35-55 band) renders the normal favourable
+    card — no OVERRIDE."""
     md = cr.render_candidate_report(_payload([_res()]), fv_by_ticker={},
                                     config={}, generated_at="T")
     card = _card(md, "AMD")
@@ -157,15 +160,19 @@ def test_missing_rsi_candidate_renders_no_ticket():
     assert "$135P" not in card
 
 
-def test_when_to_enter_classify_override_label():
+def test_when_to_enter_classify_in_band_rsi_needs_no_override():
+    """Band unification (2026-08-07 QQQ bug): RSI 53 sits INSIDE the configured
+    35-55 entry band — the read presents it as a pullback, never as an
+    OVERRIDE. (The old hardcoded 35-50 band in verdict_state mislabelled
+    in-band RSI 50-55 setups as overrides.)"""
     r = {"ticker": "BIDU", "spot": 50.0, "rsi_14": 53, "iv_rank": 50,
          "sma_200": 52, "drawdown_pct": 74, "fivedayret_pct": -1.0,
          "verdict": "BUY (pullback)", "rationale": [], "csp_entry": None,
          "days_to_earnings": None, "third_party_rec": "BUY"}
     status, label, read, _ = classify(r)
     assert status == "enter"
-    assert "RSI 53 — OVERRIDE (drawdown 74% + BUY rec)" in read
-    assert "in pullback zone" not in read
+    assert "RSI 53 in pullback zone" in read
+    assert "OVERRIDE" not in read
 
 
 def test_when_to_enter_classify_no_rsi_fails_closed():

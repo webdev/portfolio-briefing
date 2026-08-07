@@ -69,6 +69,15 @@ def _status(r: dict, rsi_th: dict):
         wait = rsi_discipline.put_extended_wait(r.get("rsi_14"), rsi_th)
         if wait:
             return "held_rsi", _dc_replace(rv, decision="wait", reason=wait)
+    # Rule #44 (2026-08-07 NOW/TEAM cards): a BUY-verdict candidate at RSI ≥ 60
+    # (extended band) demotes to the wait/On-Deck presentation regardless of
+    # the third-party BUY rec — "🎯 CANDIDATE · NOW · RSI 61 — OVERRIDE (BUY
+    # rec)" rendered an actionable new put-sale ticket in the extended band.
+    # Recs differentiate WITHIN the actionable set; they never loosen RSI gates.
+    if side == rsi_discipline.BUY:
+        wait = rsi_discipline.buy_extended_wait(r.get("rsi_14"), rsi_th)
+        if wait:
+            return "held_rsi", _dc_replace(rv, decision="wait", reason=wait)
     return "candidate", rv
 
 
@@ -134,13 +143,16 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     status, rv = _status(r, rsi_th)
     rsi_val = r.get("rsi_14")
     # RSI override labelling (12-entry-pipeline-spec §5): a CANDIDATE whose
-    # RSI sits outside the 35-50 entry band only qualifies via the override
-    # path (deep drawdown + third-party BUY) — label it explicitly instead of
-    # presenting the RSI as favourable.
+    # RSI sits outside the configured entry band (rsi_discipline
+    # ``put_entry_band``, default 35-55) only qualifies via the override path
+    # (deep drawdown + third-party BUY) — label it explicitly instead of
+    # presenting the RSI as favourable. The band comes from config (single
+    # source of truth) — never a hardcoded 35-50 (the 2026-08-07 QQQ bug).
     is_override = (status == "candidate" and rsi_val is not None
-                   and not verdict_state.rsi_in_band(rsi_val))
+                   and not verdict_state.rsi_in_band(rsi_val, rsi_th))
     ovr = (verdict_state.override_label(rsi_val, drawdown=r.get("drawdown_pct"),
-                                        buy_rec=verdict_state.has_buy_rec(r))
+                                        buy_rec=verdict_state.has_buy_rec(r),
+                                        thresholds=rsi_th)
            if is_override else "")
     badge = ""
     if is_override:
@@ -243,6 +255,19 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
             # A concrete ticket may never render without an RSI value
             # (12-entry-pipeline-spec §5 — fail closed, live-data rule #1).
             out.append("  - — no ticket: RSI unavailable (fail closed)")
+        elif q and abs(r.get("_spot_drift_pct") or 0.0) > _CHAIN_STALE_PCT:
+            # Stale chain ticket — fail closed (rule #10; 2026-08-07 TEAM bug:
+            # the scout-cache $99P was selected and priced against a $109.73
+            # pre-earnings spot while the live quote was $144.41). The strike
+            # stays visible (rule #24) but never as an actionable ticket.
+            drift = r.get("_spot_drift_pct") or 0.0
+            out.append(
+                f"  - ⚠ **Chain quote stale — no actionable ticket (fail closed).** "
+                f"Spot moved {drift:+.1f}% since the scout's chain fetch "
+                f"(now ${r.get('spot', 0):,.2f} vs ${r.get('_scout_spot', 0):,.2f} at "
+                f"scout time); the cached ${q.get('strike', 0):g}P quote was priced "
+                f"pre-move. Refetch the chain before placing."
+            )
         elif q:
             exp = q.get("expiration") or ""
             try:
@@ -250,11 +275,14 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
             except (ValueError, KeyError, TypeError):
                 pass
             ovr_s = f" · {ovr}" if is_override else ""
+            drift = r.get("_spot_drift_pct") or 0.0
+            drift_s = (f" · ⚠ spot moved {drift:+.1f}% since chain fetch — verify quote"
+                       if abs(drift) > _SPOT_DRIFT_REPRICE_PCT else "")
             tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (CSP):** "
             out.append(
                 f"  - {tag}SELL 1× {tk} ${q.get('strike', 0):g}P exp **{exp}** "
                 f"({q.get('dte', '?')} DTE) · mid ${q.get('mid', 0):.2f} "
-                f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}"
+                f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}{drift_s}"
             )
         elif (r.get("verdict") or "").upper().startswith("BUY"):
             if mv_add_demote:
@@ -614,6 +642,43 @@ def _long_put_cancellation(ticker: str, strike, existing_long_puts: dict | None)
     return None
 
 
+# Live-spot resolution thresholds (2026-08-07 TEAM bug — the candidate card
+# priced TEAM at the scout cache's pre-earnings $109.73 while the live E*TRADE
+# quote was $144.41 (+31% gap), and the card's "$99P · _Live E*TRADE chain_"
+# ticket was priced pre-move). The briefing surface must price every ticker
+# from the ONE canonical resolved quote (analysis.price_consistency).
+_SPOT_DRIFT_REPRICE_PCT = 2.0   # > this → header re-prices at the live quote
+_CHAIN_STALE_PCT = 5.0          # > this → cached chain ticket is stale (fail closed)
+
+
+def _with_live_spot(r: dict, quotes: dict | None, positions: list | None = None) -> dict:
+    """Return ``r`` re-priced at the canonical live spot when the scout
+    cache's spot has drifted beyond ``_SPOT_DRIFT_REPRICE_PCT``.
+
+    The rewritten result carries ``_scout_spot`` (the cached value) and
+    ``_spot_drift_pct`` so ``_format_card`` can fail-close the cached chain
+    ticket when the drift exceeds ``_CHAIN_STALE_PCT``. No live source or
+    in-tolerance drift → ``r`` unchanged (fail-open; the vintage guard still
+    annotates stale RSI reads globally)."""
+    try:
+        from analysis.price_consistency import resolve_spot
+    except ImportError:
+        return r
+    tk = (r.get("ticker") or "").upper()
+    cached = r.get("spot")
+    live = resolve_spot(tk, quotes, positions)
+    if live is None or not cached:
+        return r
+    try:
+        drift_pct = (live - float(cached)) / float(cached) * 100.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return r
+    if abs(drift_pct) <= _SPOT_DRIFT_REPRICE_PCT:
+        return r
+    return {**r, "spot": live, "_scout_spot": float(cached),
+            "_spot_drift_pct": drift_pct}
+
+
 def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict | None,
                               config: dict | None, generated_at: str,
                               as_section: bool = False,
@@ -669,6 +734,12 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     # A ticker can anchor several themes (e.g. QCOM in Semis + Applications) but
     # it's one trade — de-dup the flat briefing by ticker (the full per-theme
     # report keeps it under each theme).
+    # Canonical live-spot re-pricing (2026-08-07 TEAM bug): every candidate
+    # surface prices from the ONE resolved quote — the scout cache's spot is
+    # only a fallback when no live source exists this cycle.
+    _quotes_cb = (snapshot_data or {}).get("quotes") or {}
+    _positions_cb = (snapshot_data or {}).get("positions") or []
+
     cands: list[tuple[str, dict]] = []
     held: list[tuple[str, dict, object]] = []
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
@@ -681,6 +752,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
             tk = (r.get("ticker") or "").upper()
             if tk in seen:
                 continue
+            r = _with_live_spot(r, _quotes_cb, _positions_cb)
             status, rv = _status(r, rsi_th)
             if status == "candidate":
                 seen.add(tk)

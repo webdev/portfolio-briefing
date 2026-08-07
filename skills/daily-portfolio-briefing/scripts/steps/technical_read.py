@@ -70,13 +70,33 @@ def _bb_word(pos_pct: float) -> str:
     return "mid-band"
 
 
-def _fmt_card(ticker: str, deep: dict, sr: dict | None) -> list[str]:
+def _headline_spot(deep_spot, live_spot) -> str:
+    """The header price string — ONE resolved quote per ticker (2026-08-07
+    TEAM bug: the Technical Read header showed the $110.17 OHLC close while
+    the live quote was $144.41 after a +31% earnings gap; other surfaces
+    showed the live price, so the briefing carried three TEAM spots).
+
+    When the live quote deviates > 2% from the technicals' close, headline
+    the LIVE price and keep the close visible as the labelled reference the
+    indicators were computed from. No live quote / in-tolerance → the close
+    renders alone (legacy)."""
+    try:
+        d, lv = float(deep_spot), float(live_spot)
+        if d > 0 and lv > 0 and abs(lv - d) / d * 100.0 > 2.0:
+            return f"${lv:,.2f} (live · indicators from ${d:,.2f} close)"
+    except (TypeError, ValueError):
+        pass
+    return f"${float(deep_spot):,.2f}" if deep_spot else "$?"
+
+
+def _fmt_card(ticker: str, deep: dict, sr: dict | None,
+              live_spot: float | None = None) -> list[str]:
     """One compact per-ticker card. Every number comes from the deep snapshot /
     SR dict computed this cycle — nothing hardcoded (hard rule #19)."""
     spot = deep.get("spot")
     st = _ST_DISPLAY.get(deep.get("short_term_verdict", ""), deep.get("short_term_verdict", "?"))
     lt = _LT_DISPLAY.get(deep.get("long_term_verdict", ""), deep.get("long_term_verdict", "?"))
-    lines = [f"### {ticker} — ${spot:,.2f} · {lt} · {st}"]
+    lines = [f"### {ticker} — {_headline_spot(spot, live_spot)} · {lt} · {st}"]
 
     # Line 1: momentum
     rsi = deep.get("rsi_14")
@@ -193,12 +213,13 @@ def _load_directive_holds(memory_path: Path | None) -> set[str]:
     return set()
 
 
-def _one_line_read(ticker: str, deep: dict) -> str:
+def _one_line_read(ticker: str, deep: dict, live_spot: float | None = None) -> str:
     """Compact one-liner (2026-08-06 length diet) for tickers with NO action
     anywhere in this cycle's briefing: `TICKER $spot — RSI NN · LT verdict ·
-    ST verdict`. Every value measured from this cycle's deep read."""
+    ST verdict`. Every value measured from this cycle's deep read; the price
+    is the ONE resolved live quote when it drifted >2% from the close."""
     spot = deep.get("spot")
-    spot_s = f" ${spot:,.2f}" if spot else ""
+    spot_s = f" {_headline_spot(spot, live_spot)}" if spot else ""
     st = _ST_DISPLAY.get(deep.get("short_term_verdict", ""), deep.get("short_term_verdict", "?"))
     lt = _LT_DISPLAY.get(deep.get("long_term_verdict", ""), deep.get("long_term_verdict", "?"))
     return (f"- **{ticker}**{spot_s} — {rsi_discipline.tag(deep.get('rsi_14'))} · "
@@ -234,6 +255,15 @@ def render_technical_read_sections(
     action_set = {str(t).upper() for t in (action_tickers or set())}
     technicals = (snapshot_data or {}).get("technicals") or {}
     positions = (snapshot_data or {}).get("positions") or []
+    quotes = (snapshot_data or {}).get("quotes") or {}
+    # Canonical live-spot resolver (2026-08-07 TEAM bug) — the header price
+    # comes from the ONE resolved quote; the technicals close stays visible
+    # as the labelled indicator reference when the two deviate >2%.
+    try:
+        from analysis.price_consistency import resolve_spot as _resolve_spot
+    except ImportError:
+        def _resolve_spot(_tk, _q=None, _p=None):  # type: ignore
+            return None
     equity, puts, calls = _position_states(positions)
     # 2026-08-04 (PLTR): core = core_positions ∪ Tier A (position_tiers).
     try:
@@ -294,9 +324,10 @@ def render_technical_read_sections(
             tech = technicals.get(tk)
             deep = tech.get("deep") if isinstance(tech, dict) else None
             sr = tech.get("support_resistance") if isinstance(tech, dict) else None
+            _live = _resolve_spot(tk, quotes, positions)
             if collapse and tk not in action_set and deep:
                 # No action on this name this cycle → one measured line.
-                lines.append(_one_line_read(tk, deep))
+                lines.append(_one_line_read(tk, deep, _live))
                 any_card = True
                 continue  # no blank line between one-liners (list stays tight)
             # Full card / unavailable heading — needs a blank separator when
@@ -306,7 +337,7 @@ def render_technical_read_sections(
             if not deep:
                 lines.append(f"### {tk} — chart data unavailable, verify manually")
             else:
-                lines.extend(_fmt_card(tk, deep, sr))
+                lines.extend(_fmt_card(tk, deep, sr, _live))
                 any_card = True
             lines.append("")
     if lines and lines[-1] != "":

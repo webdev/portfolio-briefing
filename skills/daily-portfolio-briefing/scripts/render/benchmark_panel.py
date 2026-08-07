@@ -105,6 +105,7 @@ def _render_benchmark_table(lines: list[str], report) -> None:
     lines.append("")
     lines.append(f"| Window | Portfolio | {ticker} | Alpha |")
     lines.append("|---|---|---|---|")
+    window_notes: list[str] = []
     for w in _get(report, "windows", []) or []:
         name = _get(w, "name", "?")
         p = _get(w, "portfolio_return_pct")
@@ -117,7 +118,15 @@ def _render_benchmark_table(lines: list[str], report) -> None:
         warn = " ⚠️" if (a is not None and a < 0) else ""
         lines.append(f"| {name} | {_fmt_pct(p)} | {_fmt_pct(s)} | "
                      f"**{_fmt_pct(a)}**{warn} |")
+        # A valued row can still carry a note (flow-adjusted TWR window,
+        # benchmark data gap, ...) — render it, never a silent adjustment.
+        w_note = _get(w, "note", "") or ""
+        if w_note:
+            window_notes.append(f"_{name}: {w_note}_")
     lines.append("")
+    if window_notes:
+        lines.extend(window_notes)
+        lines.append("")
     note = _get(report, "note", "")
     if note:
         lines.append(f"_{note}_")

@@ -680,30 +680,52 @@ def _data_freshness_warning(snapshot_data: dict) -> str:
     return ""
 
 
-def render_summary_card(items: list, snapshot_data: dict | None = None) -> list:
+def render_summary_card(items: list, snapshot_data: dict | None = None,
+                        options_reviews: list | None = None,
+                        new_ideas: list | None = None) -> list:
     """Render a portfolio total-impact summary at the END of the action list.
 
     Aggregates: net cash flow today, total premium income at expiration if all
     short legs decay to zero, total tax avoided if no assignments, total upside
     protected. One-line dashboard so the user can decide do-everything vs do-top-N.
+
+    Net cash comes from the SHARED analysis/net_option_cash.py computation —
+    the same per-action numbers the 💰 Money Plan's "Net option cash today"
+    line uses (one voice, rule #43). The pre-fix regex here summed "Locks
+    $+X profit" strings (realized P/L, not cash) against roll debits and
+    rendered −$1,985 on 2026-08-07 while the Money Plan said $-948 for the
+    same three actions. The composition is now spelled out on the line.
     """
     if not items:
         return []
     # Crude regex-based extraction of dollar amounts and tax saved from rendered items.
     import re
     text = "\n".join(items)
-    # Net credit from CLOSE + ROLL + CSP + HEDGE (look for `+$X,XXX` and `-$X,XXX` / `−$X,XXX`)
-    credits = re.findall(r"[+]\$([\d,]+)\s+(?:net\s+)?credit", text, re.IGNORECASE)
-    credits += re.findall(r"\+\$([\d,]+)\s+profit", text, re.IGNORECASE)
-    credits += re.findall(r"locks\s+\$\+([\d,]+)\s+profit", text, re.IGNORECASE)
-    debits = re.findall(r"[−-]\$([\d,]+)\s+(?:net\s+)?debit", text, re.IGNORECASE)
-    hedge_costs = re.findall(r"~\$([\d,]+);\s+coverage", text)
 
-    net_cash = (
-        sum(int(c.replace(",", "")) for c in credits)
-        - sum(int(d.replace(",", "")) for d in debits)
-        - sum(int(h.replace(",", "")) for h in hedge_costs)
-    )
+    noc = None
+    try:
+        from analysis.net_option_cash import compute_net_option_cash
+        noc = compute_net_option_cash(
+            items, options_reviews=options_reviews, new_ideas=new_ideas)
+    except Exception:
+        noc = None
+    if noc is not None:
+        net_cash = noc["net_cash"]
+        net_cash_line = (f"- **Net cash today (mid-fills):** "
+                         f"{noc['composition']}")
+    else:  # pragma: no cover — legacy fallback (shared module unavailable)
+        credits = re.findall(r"[+]\$([\d,]+)\s+(?:net\s+)?credit", text, re.IGNORECASE)
+        credits += re.findall(r"\+\$([\d,]+)\s+profit", text, re.IGNORECASE)
+        credits += re.findall(r"locks\s+\$\+([\d,]+)\s+profit", text, re.IGNORECASE)
+        debits = re.findall(r"[−-]\$([\d,]+)\s+(?:net\s+)?debit", text, re.IGNORECASE)
+        hedge_costs = re.findall(r"~\$([\d,]+);\s+coverage", text)
+        net_cash = (
+            sum(int(c.replace(",", "")) for c in credits)
+            - sum(int(d.replace(",", "")) for d in debits)
+            - sum(int(h.replace(",", "")) for h in hedge_costs)
+        )
+        net_cash_line = (f"- **Net cash today (mid-fills):** "
+                         f"{'+' if net_cash >= 0 else '−'}${abs(net_cash):,.0f}")
 
     tax_avoided = sum(int(t.replace(",", "")) for t in re.findall(
         r"avoids?\s+\$([\d,]+)\s+tax", text, re.IGNORECASE))
@@ -718,8 +740,9 @@ def render_summary_card(items: list, snapshot_data: dict | None = None) -> list:
     # Worst-case fill drag on rolls (if both legs fill at the worst end of the bid-ask spread)
     # Roughly: each roll has best/worst spread of ~2% — cumulative drag ~3-5% on debit rolls
     worst_case_drag = 0
-    debit_count = len(re.findall(r"−\$([\d,]+)\s+net debit", text))
-    if debit_count > 0:
+    has_debit_roll = (noc is not None and noc["total_rolls"] < 0) or \
+        bool(re.findall(r"[−-]\$([\d,]+)\s+(?:net\s+)?debit", text))
+    if has_debit_roll:
         # Assume ~5% additional cost at worst-case fill on each debit roll
         worst_case_drag = -int(abs(net_cash) * 0.05) if net_cash < 0 else 0
 
@@ -728,7 +751,7 @@ def render_summary_card(items: list, snapshot_data: dict | None = None) -> list:
         "### 📋 Total Impact (if all actions executed)",
         "",
         f"- **Total actions:** {n_actions}",
-        f"- **Net cash today (mid-fills):** {'+' if net_cash >= 0 else '−'}${abs(net_cash):,}",
+        net_cash_line,
     ]
     if worst_case_drag:
         worst_total = net_cash + worst_case_drag
@@ -4602,8 +4625,12 @@ def render_action_list(
         lines.append("")
         lines.append(fresh_warn)
 
-    # Append the total-impact summary card (uses un-annotated items)
-    lines.extend(render_summary_card(items, snapshot_data))
+    # Append the total-impact summary card (uses un-annotated items).
+    # options_reviews / new_ideas feed the SHARED net-option-cash computation
+    # so this card and the 💰 Money Plan render the same number (rule #43).
+    lines.extend(render_summary_card(items, snapshot_data,
+                                     options_reviews=options_reviews,
+                                     new_ideas=new_ideas))
 
     lines.append("")
     return lines

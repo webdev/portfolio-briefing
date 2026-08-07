@@ -203,10 +203,16 @@ def evaluate_options_idea(
             kind="LEAP_CALL",
             ticker=ticker,
             trigger_reasons=[f"third-party {rec}", f"IV rank {iv_rank:.0f} (cheap)", "near 200-SMA"],
-            concrete_trade=f"BUY 1× {ticker} ${leap_strike:.0f}C ~365 DTE (ITM, delta ~0.70)",
+            # "target δ~0.70" is the SELECTION target, not a measurement —
+            # the briefing pipeline replaces it with the MEASURED chain delta
+            # (or demotes the ticket when no live quote exists). Rendering
+            # "delta ~0.70" here read as a measured value (rule #19 bug,
+            # 2026-08-07 MELI LEAP).
+            concrete_trade=f"BUY 1× {ticker} ${leap_strike:.0f}C ~365 DTE (ITM, target δ~0.70)",
             rationale=f"Stock-replacement LEAP: deep-ITM call captures most upside for ~{leap_premium_est/spot*100:.0f}% "
                       f"of the cost of buying shares. Time decay is slow on long-dated ITM. Cap: small.",
-            yield_or_cost=f"~${leap_premium_est*100:.0f} per contract — leverages ~$5K of capital into ${spot*100:,.0f} of exposure",
+            yield_or_cost=f"~${leap_premium_est*100:.0f} per contract (rule-of-thumb est — live quote required before placing) — "
+                          f"leverages that capital into ${spot*100:,.0f} of exposure",
             source="recommendation-list-fetcher + yfinance IV + 200-SMA",
         )
 

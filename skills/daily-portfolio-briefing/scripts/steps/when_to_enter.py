@@ -291,8 +291,10 @@ def classify(r: dict, sr=None, mv_row: dict | None = None) -> tuple[str, str, st
 
     # Favored pullback band
     if rsi is not None and 35 <= rsi <= 55:
-        # RSI override labelling (12-entry-pipeline-spec §5): the entry band is
-        # 35-50. A name entering with RSI above 50 only qualifies via the
+        # RSI override labelling (12-entry-pipeline-spec §5): the entry band
+        # comes from rsi_discipline's configured ``put_entry_band`` (default
+        # 35-55 — single source of truth, 2026-08-07 QQQ "outside 35-50 band"
+        # bug). A name entering with RSI outside it only qualifies via the
         # override path (deep drawdown + third-party BUY) — say so explicitly
         # instead of presenting the out-of-band RSI as a favourable pullback.
         if _vs is not None and not _vs.rsi_in_band(rsi):

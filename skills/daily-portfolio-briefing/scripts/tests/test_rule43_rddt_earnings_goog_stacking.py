@@ -154,9 +154,16 @@ def test_earnings_known_clean_no_warn():
 def test_earnings_known_inside_window_still_blocks():
     """The fail-closed WARN must not weaken the existing hard rule: a
     MEASURED print inside the window still BLOCKs (and the unknown WARN
-    stays silent — the date is known)."""
+    stays silent — the date is known).
+
+    Calendar-safe (fixed 2026-08-07): the original used the file-level
+    frozen ``TODAY`` (2026-07-31) + 6d, but the validator measures the
+    window against the REAL ``date.today()`` — from Aug 7 onward the frozen
+    print date sat in the past and the rule correctly stopped firing,
+    failing this test by date-rot. Anchor both dates to today instead."""
     findings = ptv.validate_proposed_trade(
-        _ctx(earnings_date=TODAY + timedelta(days=6)))
+        _ctx(earnings_date=date.today() + timedelta(days=6),
+             expiration=date.today() + timedelta(days=30)))
     by_rule = {f.rule_id: f for f in findings}
     assert "EARNINGS_WINDOW" in by_rule
     assert by_rule["EARNINGS_WINDOW"].severity == ptv.SEV_BLOCK

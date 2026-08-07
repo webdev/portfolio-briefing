@@ -53,6 +53,10 @@ class CapitalAction:
     tier: int = 3                # 1 = CRITICAL, 2 = IMPORTANT, 3 = OPTIONAL, 4 = DEFER
     tier_reason: str = ""
     skip_reason: str | None = None  # if non-None, the action is filtered
+    # True when the cash impact is NOT measurable this cycle (e.g. a LEAP
+    # with no live quote). Renders "net cash n/a" — never a fabricated $0
+    # (rules #10/#19; the 2026-08-07 "LT LEAP MELI — net cash +$0" bug).
+    cash_unknown: bool = False
 
     @property
     def net_cash(self) -> float:
@@ -516,10 +520,36 @@ def _classify_long_term(op: dict, weights: dict, third_party_recs: dict, rules: 
         if weight_pct >= skip_at:
             tier = 4
             skip_reason = f"already {weight_pct:.1f}% NLV — don't add LEAP on top"
+        # BUG C (2026-08-07): "LT LEAP MELI — BUY 1× MELI $1545C … — net
+        # cash +$0" — a ~$30K deep-ITM debit rendered as costing nothing
+        # because this branch never set cash_out. The REAL measured debit
+        # (attached by the pipeline's live-chain enrichment as
+        # ``live_debit_total``) is the row's cash out; with NO live quote
+        # the row is cash_unknown ("net cash n/a") and demoted to Skipped —
+        # never an actionable $0 (rules #10/#19).
+        live_debit = 0.0
+        cash_unknown = False
+        try:
+            live_debit = float(op.get("live_debit_total") or 0)
+        except (TypeError, ValueError):
+            live_debit = 0.0
+        if live_debit <= 0:
+            cash_unknown = True
+            if not skip_reason:
+                skip_reason = ("no live quote — chain unavailable, verify at "
+                               "broker (debit unknown; net cash n/a)")
+        elif op.get("reference_demoted") and not skip_reason:
+            # Priced but demoted upstream (e.g. debit exceeds the LT sizing
+            # intent / 5%-NLV cap) — surface the measured reason, keep the
+            # real debit visible.
+            skip_reason = str(op.get("reference_reason")
+                              or "demoted — see Long-Term Opportunities")
         return CapitalAction(
             kind="LT_LEAP",
             ticker=op.get("ticker", ""),
             description=f"LT LEAP {op.get('ticker','')} — {op.get('concrete_trade','')}",
+            cash_out=live_debit if live_debit > 0 else 0.0,
+            cash_unknown=cash_unknown,
             tier=tier,
             tier_reason=skip_reason or "stock-replacement LEAP",
             skip_reason=skip_reason,
@@ -1015,6 +1045,9 @@ def build_capital_plan(
         elif a.kind == "LT_ADD":
             # Long-term equity adds count as debits in the aggregate
             plan.total_debit_paid += a.cash_out
+        elif a.kind == "LT_LEAP":
+            # LEAP buys are real debits (live_debit_total from the chain)
+            plan.total_debit_paid += a.cash_out
 
     # Sort within each tier by descending net_cash (highest cash benefit first),
     # tie-break by EV descending where available.
@@ -1061,9 +1094,14 @@ def format_capital_plan_md(plan: CapitalPlan, max_actions_per_tier: int = 20) ->
         lines.append(f"### {tier_titles[t]}")
         lines.append("")
         for a in items[:max_actions_per_tier]:
-            cash_str = (
-                f"+${a.net_cash:,.0f}" if a.net_cash >= 0 else f"−${abs(a.net_cash):,.0f}"
-            )
+            if getattr(a, "cash_unknown", False):
+                # Rule #19: no measured price → "n/a", never a $0 that reads
+                # as "free" (the 2026-08-07 LT LEAP "+$0" bug).
+                cash_str = "n/a (unpriced — verify at broker)"
+            else:
+                cash_str = (
+                    f"+${a.net_cash:,.0f}" if a.net_cash >= 0 else f"−${abs(a.net_cash):,.0f}"
+                )
             ev_str = f" · EV ${a.ev:+,.0f}" if a.ev is not None else ""
             verdict_str = f" · {a.validator_verdict}" if a.validator_verdict else ""
             lines.append(f"- {a.description} — net cash {cash_str}{ev_str}{verdict_str}")

@@ -68,6 +68,15 @@ DEFAULT_THRESHOLDS = {
     # rec. Set to null in briefing.yaml to disable. The >70 hard block is
     # unchanged and takes precedence.
     "put_extended_wait_band": [60.0, 70.0],
+    # Candidate ENTRY band for new put-sale / pullback entries (rule #44:
+    # "favored band RSI 35-55 measured at LIVE spot"; rule #25: the scout's
+    # independent-setup band is 35 ≤ RSI ≤ 55). SINGLE SOURCE OF TRUTH —
+    # 2026-08-07 bug: verdict_state hardcoded 35-50 while the scout qualified
+    # candidates at 35-55, so QQQ at RSI 55 rendered "OVERRIDE (outside 35-50
+    # band)" on a setup that was in-band by the configured discipline. Every
+    # band consumer (verdict_state.rsi_in_band / override_label, the scout,
+    # when_to_enter) must read THIS value, never a hardcoded pair.
+    "put_entry_band": [35.0, 55.0],
 }
 
 
@@ -93,6 +102,15 @@ def load_thresholds(config: dict | None) -> dict:
             )
         except (TypeError, ValueError, IndexError):
             merged["put_extended_wait_band"] = None
+    # Candidate entry band (NOT nullable — the band always exists; an
+    # unparseable config value keeps the default rather than disabling it).
+    if "put_entry_band" in user:
+        band = user["put_entry_band"]
+        try:
+            if band:
+                merged["put_entry_band"] = [float(band[0]), float(band[1])]
+        except (TypeError, ValueError, IndexError):
+            pass
     return merged
 
 
@@ -284,9 +302,68 @@ def put_extended_wait(rsi: float | None, thresholds: dict | None = None) -> str 
         return None
     r = float(rsi)
     if lo <= r < hi:
+        e_lo, e_hi = put_entry_band(th)
         return (
             f"⏸ RSI {r:.0f} extended — selling puts into a green streak sets the "
-            f"strike against an inflated spot; wait for RSI 35-55 / a red day."
+            f"strike against an inflated spot; wait for RSI {e_lo:.0f}-{e_hi:.0f} / a red day."
+        )
+    return None
+
+
+def put_entry_band(thresholds: dict | None = None) -> tuple[float, float]:
+    """The configured candidate ENTRY band for new put-sale / pullback entries
+    (default 35-55 — rule #44 / scout rule #25). Single source of truth; band
+    consumers (verdict_state, when_to_enter, the scout) must call this rather
+    than hardcode a pair (the 2026-08-07 QQQ "outside 35-50 band" bug)."""
+    th = thresholds or DEFAULT_THRESHOLDS
+    band = th.get("put_entry_band") or DEFAULT_THRESHOLDS["put_entry_band"]
+    try:
+        return float(band[0]), float(band[1])
+    except (TypeError, ValueError, IndexError):
+        b = DEFAULT_THRESHOLDS["put_entry_band"]
+        return float(b[0]), float(b[1])
+
+
+def in_put_entry_band(rsi, thresholds: dict | None = None) -> bool:
+    """True when ``rsi`` sits inside the configured entry band (inclusive)."""
+    if rsi is None:
+        return False
+    try:
+        lo, hi = put_entry_band(thresholds)
+        return lo <= float(rsi) <= hi
+    except (TypeError, ValueError):
+        return False
+
+
+def buy_extended_wait(rsi: float | None, thresholds: dict | None = None) -> str | None:
+    """Extended-band demotion for NEW equity buys / BUY-verdict candidates.
+
+    Rule #44 (2026-08-07 briefing bug): candidate cards for NOW (RSI 61) and
+    TEAM (RSI 64) rendered "🎯 CANDIDATE ... RSI 61 — OVERRIDE (BUY rec)" with
+    an actionable new put-sale ticket. A third-party BUY rec differentiates
+    WITHIN the actionable set — it never loosens the RSI gate. RSI in
+    [buy.caution_above, buy.block_above) (default 60-70) → return the ⏸ wait
+    reason so the candidate demotes to the On-Deck/wait presentation (kept
+    visible per rule #24). The ≥70 hard block (``assess``/``hook``) is
+    separate and unchanged. Fail-open on unknown RSI.
+    """
+    th = thresholds or DEFAULT_THRESHOLDS
+    if rsi is None:
+        return None
+    try:
+        lo = float((th.get("buy") or {}).get(
+            "caution_above", DEFAULT_THRESHOLDS["buy"]["caution_above"]))
+        hi = float((th.get("buy") or {}).get(
+            "block_above", DEFAULT_THRESHOLDS["buy"]["block_above"]))
+        r = float(rsi)
+    except (TypeError, ValueError):
+        return None
+    if lo <= r < hi:
+        e_lo, e_hi = put_entry_band(th)
+        return (
+            f"⏸ RSI {r:.0f} extended — wait for a pullback to enter "
+            f"(RSI {e_lo:.0f}-{e_hi:.0f}); a BUY rec differentiates within the "
+            f"actionable set, it never loosens the RSI gate."
         )
     return None
 

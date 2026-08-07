@@ -863,7 +863,7 @@ def generate_long_term_opportunities_step(
     # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
     _enrich_with_live_premiums(
         op_dicts, iv_ranks=iv_ranks, technicals=technicals, config=config,
-        chain_iv=snapshot_data.get("chain_iv"),
+        chain_iv=snapshot_data.get("chain_iv"), nlv=nlv,
     )
 
     # Universal capacity-gate DEFERRED tag (hard rules #24 / #41, audit
@@ -1140,24 +1140,68 @@ def _enrich_long_dated_dates(
         op["target_dte"] = actual_dte
 
 
+def _demote_unpriced_leap(op: dict, reason: str) -> None:
+    """BUG C (observed 2026-08-07): "**Trade:** BUY 1× MELI $1545C exp Fri
+    Aug 20 '27 (378 DTE) (ITM, delta ~0.70)" rendered as an ACTIONABLE buy
+    with no quote at all (no bid/mid/ask, no debit) and "net cash +$0" in
+    the Capital Plan — a ~$30K+ deep-ITM debit shown as costing nothing,
+    with a hardcoded-looking delta (rules #10/#19).
+
+    An unpriced LEAP demotes: reference-only (never a numbered "Trade:"
+    slot), the BUY verb stripped, the target-delta placeholder replaced with
+    the demotion reason, and ``quote_unavailable`` set so the capital
+    planner renders net cash "n/a" — never $0.
+    """
+    import re as _re
+    op["quote_unavailable"] = True
+    op["reference_demoted"] = True
+    op["reference_reason"] = reason
+    ct = op.get("concrete_trade") or ""
+    if ct.upper().startswith("BUY "):
+        ct = ct[4:]
+    ct = _re.sub(r"\s*\(ITM,[^)]*\)", " (ITM target)", ct)
+    op["concrete_trade"] = f"{ct.strip()} — ⚠ {reason}"
+    if op.get("yield_or_cost") and "no live quote" not in op["yield_or_cost"]:
+        op["yield_or_cost"] += " — _no live quote; debit unknown_"
+
+
+def _demote_all_unpriced_leaps(op_dicts: list, reason: str) -> None:
+    for op in op_dicts:
+        if (op.get("kind") or "").upper() == "LEAP_CALL" \
+                and not op.get("skip_reason") \
+                and not op.get("quote_unavailable"):
+            _demote_unpriced_leap(op, reason)
+
+
 def _enrich_with_live_premiums(
     op_dicts: list,
     iv_ranks: dict | None = None,
     technicals: dict | None = None,
     config: dict | None = None,
     chain_iv: dict | None = None,
+    nlv: float | None = None,
 ) -> None:
-    """Fetch real put-chain bid/mid/ask via the etrade-chain-fetcher skill.
+    """Fetch real chain bid/mid/ask via the etrade-chain-fetcher skill —
+    puts for each LONG_DATED_CSP, calls for each LEAP_CALL.
 
     Per project rule: chain data for tradeable recommendations MUST come from
     E*TRADE, not yfinance. If E*TRADE is unavailable we DO NOT fall back to
-    yfinance — instead the yield_or_cost line is tagged with "(est, broker
-    unreachable)" so the user knows the premium is a guess.
+    yfinance — LT_CSP yield lines are tagged as estimates, and LEAP_CALL
+    tickets are DEMOTED outright ("chain unavailable — verify at broker"):
+    a BUY with no live price must never render as actionable (rule #10; the
+    2026-08-07 MELI $1545C bug — see ``_demote_unpriced_leap``).
+
+    ``nlv`` powers the LEAP sizing sanity check: a measured debit above the
+    5%-NLV per-trade cap or the LT sizing intent cap
+    (``long_term.leap_max_debit_usd``, default $10,000 — 2× the ~$5K
+    starter intent) demotes the ticket with the measured numbers shown.
 
     Runs E*TRADE chain fetches in parallel — typically ~2-4s for 8 chains.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import date as _date_class
+
+    _CHAIN_DOWN = "chain unavailable — verify at broker"
 
     # Load the etrade-chain-fetcher skill module by absolute path (no name
     # collision risk since this is its own module).
@@ -1169,9 +1213,11 @@ def _enrich_with_live_premiums(
     if not _fetcher_path.exists():
         print("  [warn] etrade-chain-fetcher not found; LT_CSP premiums stay as estimates",
               file=sys.stderr)
+        _demote_all_unpriced_leaps(op_dicts, _CHAIN_DOWN)
         return
     spec = _ilu.spec_from_file_location("etrade_chain_fetcher", _fetcher_path)
     if spec is None or spec.loader is None:
+        _demote_all_unpriced_leaps(op_dicts, _CHAIN_DOWN)
         return
     fetcher = _ilu.module_from_spec(spec)
     sys.modules["etrade_chain_fetcher"] = fetcher
@@ -1185,23 +1231,33 @@ def _enrich_with_live_premiums(
             if (op.get("kind") or "").upper() == "LONG_DATED_CSP":
                 if op.get("yield_or_cost") and "(est" not in op["yield_or_cost"]:
                     op["yield_or_cost"] += " — _est, broker unreachable_"
+        # LEAPs are BUY debits — an estimate is not a price. Demote (rule #10).
+        _demote_all_unpriced_leaps(op_dicts, _CHAIN_DOWN)
         return
 
     targets = []
     for op in op_dicts:
         kind = (op.get("kind") or "").upper()
-        if kind != "LONG_DATED_CSP":
+        if kind not in ("LONG_DATED_CSP", "LEAP_CALL"):
             continue
         if op.get("skip_reason"):
             continue  # already marked as skipped — no chain fetch needed
         ticker = op.get("ticker") or ""
         exp = op.get("target_expiration")
         import re as _re
-        sm = _re.search(r"\$(\d+(?:\.\d+)?)P\b", op.get("concrete_trade", ""))
+        if kind == "LEAP_CALL":
+            opt_type = "CALL"
+            sm = _re.search(r"\$(\d+(?:\.\d+)?)C\b", op.get("concrete_trade", ""))
+        else:
+            opt_type = "PUT"
+            sm = _re.search(r"\$(\d+(?:\.\d+)?)P\b", op.get("concrete_trade", ""))
         if not (ticker and exp and sm):
+            if kind == "LEAP_CALL":
+                _demote_unpriced_leap(
+                    op, _CHAIN_DOWN + " (no target contract resolvable)")
             continue
         target_strike = float(sm.group(1))
-        targets.append((op, ticker, exp, target_strike))
+        targets.append((op, ticker, exp, target_strike, opt_type))
 
     if not targets:
         return
@@ -1209,7 +1265,8 @@ def _enrich_with_live_premiums(
     # Shared cache so we don't refetch the same (ticker, expiration) tuple
     chain_cache = fetcher.ChainCache()
 
-    def _fetch_put(ticker: str, exp: str, target_strike: float) -> dict | None:
+    def _fetch_quote(ticker: str, exp: str, target_strike: float,
+                     opt_type: str) -> dict | None:
         try:
             exp_date = _date_class.fromisoformat(exp)
         except ValueError:
@@ -1220,7 +1277,7 @@ def _enrich_with_live_premiums(
             symbol=ticker,
             strike=target_strike,
             expiration=exp_date,
-            opt_type="PUT",
+            opt_type=opt_type,
             cache=chain_cache,
         )
         if q:
@@ -1231,20 +1288,22 @@ def _enrich_with_live_premiums(
             expiration=exp_date,
             strike_near=target_strike,
             n_strikes=20,
-            chain_type="PUT",
+            chain_type=opt_type,
             cache=chain_cache,
         )
-        if not chain or not chain.get("puts"):
+        rows_key = "puts" if opt_type == "PUT" else "calls"
+        if not chain or not chain.get(rows_key):
             return None
-        best = min(chain["puts"], key=lambda r: abs(r.strike - target_strike))
+        best = min(chain[rows_key], key=lambda r: abs(r.strike - target_strike))
         from etrade_chain_fetcher import _row_to_dict  # type: ignore
-        return _row_to_dict(best, expiration=exp_date, opt_type="PUT")
+        return _row_to_dict(best, expiration=exp_date, opt_type=opt_type)
 
     fetched: dict = {}
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="lt-prem") as ex:
         future_to_op = {
-            ex.submit(_fetch_put, ticker, exp, strike): (op, ticker, strike)
-            for (op, ticker, exp, strike) in targets
+            ex.submit(_fetch_quote, ticker, exp, strike, opt_type):
+                (op, ticker, strike)
+            for (op, ticker, exp, strike, opt_type) in targets
         }
         for fut in as_completed(future_to_op):
             op, ticker, requested_strike = future_to_op[fut]
@@ -1255,8 +1314,13 @@ def _enrich_with_live_premiums(
             if data:
                 fetched[id(op)] = data
 
-    for (op, ticker, exp, requested_strike) in targets:
+    for (op, ticker, exp, requested_strike, opt_type) in targets:
         data = fetched.get(id(op))
+        if opt_type == "CALL":
+            _apply_leap_quote(op, data, requested_strike,
+                              config=config, nlv=nlv,
+                              chain_down_reason=_CHAIN_DOWN)
+            continue
         if not data:
             # Mark estimate as such
             if op.get("yield_or_cost") and "(est)" not in op["yield_or_cost"]:
@@ -1331,6 +1395,98 @@ def _enrich_with_live_premiums(
         op["live_mid"] = mid
         op["live_ask"] = ask
         op["live_strike"] = actual_strike
+
+
+def _apply_leap_quote(op: dict, data: dict | None, requested_strike: float,
+                      *, config: dict | None, nlv: float | None,
+                      chain_down_reason: str) -> None:
+    """Attach the live E*TRADE CALL quote to a LEAP_CALL op — or demote it.
+
+    Success: the ticket renders bid/mid/ask, the MEASURED delta (never the
+    composer's target — rule #19), and the real debit; ``live_debit_total``
+    feeds the Capital Plan row's net cash (BUG C: "net cash +$0" on a ~$30K
+    MELI $1545C debit). Sizing sanity runs on the MEASURED debit:
+    exceeding the 5%-NLV per-trade cap or ``long_term.leap_max_debit_usd``
+    (default $10,000 — 2× the ~$5K LT starter intent) demotes the card with
+    the measured numbers visible (rule #24 — demoted, never hidden).
+
+    No usable quote → ``_demote_unpriced_leap`` (never an actionable BUY,
+    never $0).
+    """
+    import re as _re
+
+    if not data:
+        _demote_unpriced_leap(op, chain_down_reason)
+        return
+    bid = data.get("bid") or 0.0
+    ask = data.get("ask") or 0.0
+    mid = data.get("mid") or 0.0
+    premium_per_share = mid or ask or bid
+    if premium_per_share <= 0:
+        _demote_unpriced_leap(op, chain_down_reason + " (no usable quote)")
+        return
+
+    actual_strike = float(data["strike"])
+    debit_total = premium_per_share * 100.0
+    delta = data.get("delta")
+
+    # Snap the rendered strike to the chain's actual strike when different.
+    if abs(actual_strike - requested_strike) > 0.01:
+        new_s = f"${int(actual_strike) if actual_strike == int(actual_strike) else actual_strike}C"
+        old_s = f"${int(requested_strike) if requested_strike == int(requested_strike) else requested_strike}C"
+        op["concrete_trade"] = (op.get("concrete_trade") or "").replace(old_s, new_s)
+
+    # Replace the composer's target-delta placeholder with the MEASURED
+    # delta (or an explicit δ n/a when the chain carries no Greeks).
+    dstr = (f"δ {abs(float(delta)):.2f} measured" if delta is not None
+            else "δ n/a — chain has no Greeks")
+    op["concrete_trade"] = _re.sub(
+        r"\(ITM,[^)]*\)", f"(ITM, {dstr})", op.get("concrete_trade") or "")
+
+    source_tag = data.get("source", "etrade_live")
+    src = "Live E*TRADE chain" if source_tag == "etrade_live" else source_tag
+    if bid and ask:
+        spread_pct = ((ask - bid) / mid * 100) if mid else 0
+        op["yield_or_cost"] = (
+            f"debit ${debit_total:,.0f} per contract (mid ${mid:.2f}, "
+            f"bid ${bid:.2f} / ask ${ask:.2f}, spread {spread_pct:.0f}%) · "
+            f"_Source: {src}_")
+    else:
+        op["yield_or_cost"] = (
+            f"debit ${debit_total:,.0f} per contract "
+            f"(${premium_per_share:.2f}/sh) · _Source: {src}_")
+
+    op["live_premium_per_share"] = premium_per_share
+    op["live_bid"] = bid
+    op["live_mid"] = mid
+    op["live_ask"] = ask
+    op["live_strike"] = actual_strike
+    op["live_delta"] = float(delta) if delta is not None else None
+    op["live_debit_total"] = round(debit_total, 2)
+
+    # Sizing sanity — MEASURED debit vs the LT sizing intent and the
+    # 5%-NLV per-trade cap (the MELI $1545C at ~$30K against a "$5K
+    # starter" intent is exactly this flag).
+    lt_cfg = ((config or {}).get("long_term") or {})
+    try:
+        max_debit = float(lt_cfg.get("leap_max_debit_usd", 10_000) or 0)
+    except (TypeError, ValueError):
+        max_debit = 10_000.0
+    reasons = []
+    if max_debit and debit_total > max_debit:
+        reasons.append(
+            f"real debit ${debit_total:,.0f} is {debit_total / 5_000:.1f}× "
+            f"the ~$5K LT sizing intent (cap ${max_debit:,.0f})")
+    if nlv and debit_total > 0.05 * float(nlv):
+        reasons.append(
+            f"real debit ${debit_total:,.0f} exceeds the 5%-NLV per-trade "
+            f"cap (${0.05 * float(nlv):,.0f})")
+    if reasons:
+        op["size_demoted"] = True
+        op["reference_demoted"] = True
+        op["reference_reason"] = ("; ".join(reasons)
+                                  + " — size down (lower strike / call "
+                                    "spread) or skip")
 
 
 def _third_friday_of_month(target: "date") -> str:  # noqa: F821

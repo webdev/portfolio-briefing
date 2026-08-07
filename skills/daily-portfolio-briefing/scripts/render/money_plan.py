@@ -48,10 +48,16 @@ _BANK_KIND_RE = re.compile(
 _DEPLOY_KINDS = {"NEW_CSP", "PULLBACK_CSP", "NEW_WEEKLY"}
 
 # A block containing any of these markers is NOT actionable today.
-_SKIP_MARKERS = (
-    "🚫", "⏸", "Skip —", "SKIPPED", "capacity gated", "capacity-gated",
-    "EARNINGS CONFLICT", "WASH-SALE BLOCKED", "DEFERRED",
-)
+# Single source: analysis/net_option_cash.py (the shared net-cash module) —
+# imported so the Money Plan and the Total Impact card can never disagree on
+# what counts as actionable. Fallback tuple kept for standalone use.
+try:
+    from analysis.net_option_cash import SKIP_MARKERS as _SKIP_MARKERS
+except ImportError:  # pragma: no cover — standalone use
+    _SKIP_MARKERS = (
+        "🚫", "⏸", "Skip —", "SKIPPED", "capacity gated", "capacity-gated",
+        "EARNINGS CONFLICT", "WASH-SALE BLOCKED", "DEFERRED",
+    )
 
 _NET_CREDIT_RE = re.compile(r"net \+\$([\d,]+(?:\.\d+)?) credit")
 
@@ -358,10 +364,30 @@ def build_money_plan(
 
     # ── Rollups ──────────────────────────────────────────────────────────
     total_realized = sum(b["realized"] for b in banks)
-    total_btc = sum(b["btc_cost"] for b in banks)
-    total_roll_credit = sum(b["roll_credit"] for b in banks)
     total_premium = sum(d["premium"] for d in deploys)
-    net_cash = total_premium + total_roll_credit - total_btc
+
+    # Net option cash — ONE shared computation with the action list's
+    # 📋 Total Impact card (analysis/net_option_cash.py). Rule #43 bug on the
+    # 2026-08-07 briefing: this panel said "$-948" (buybacks of the two
+    # profit closes only — the QCOM roll's −$2,615 net debit was dropped
+    # because ROLL kinds were neither a bank nor a deploy) while Total
+    # Impact said "−$1,985" (it netted "Locks $+X profit" P/L against the
+    # roll debit). One number now, composition spelled out, reused verbatim
+    # by both surfaces.
+    noc = None
+    try:
+        from analysis.net_option_cash import compute_net_option_cash
+        noc = compute_net_option_cash(
+            action_list_lines, options_reviews=options_reviews,
+            new_ideas=new_ideas, playbook=playbook)
+    except Exception:
+        noc = None
+    if noc is not None:
+        net_cash = noc["net_cash"]
+    else:  # pragma: no cover — legacy fallback (shared module unavailable)
+        total_btc = sum(b["btc_cost"] for b in banks)
+        total_roll_credit = sum(b["roll_credit"] for b in banks)
+        net_cash = total_premium + total_roll_credit - total_btc
     dtes = [d["dte"] for d in deploys if d["dte"] > 0]
     avg_dte = round(sum(dtes) / len(dtes)) if dtes else None
 
@@ -438,8 +464,12 @@ def build_money_plan(
     else:
         lines.append("- **Deploy today:** none actionable this cycle")
 
-    cash_line = (f"- **Net option cash today:** ${net_cash:+,.0f} "
-                 f"(entry premium + roll credits − buybacks)")
+    if noc is not None:
+        cash_line = (f"- **Net option cash today (mid-fills):** "
+                     f"{noc['composition']}")
+    else:  # pragma: no cover — legacy fallback
+        cash_line = (f"- **Net option cash today:** ${net_cash:+,.0f} "
+                     f"(entry premium + roll credits − buybacks)")
     if cov_now is not None and cov_after is not None \
             and abs(cov_after - cov_now) >= 0.005:
         cash_line += f" · **Coverage after:** {cov_now:.2f}× → ~{cov_after:.2f}×"
@@ -515,6 +545,9 @@ def build_money_plan(
         "total_realized": round(total_realized, 2),
         "total_premium": round(total_premium, 2),
         "net_cash": round(net_cash, 2),
+        # Shared per-component breakdown (analysis/net_option_cash.py) —
+        # the same dict the Total Impact card derives its line from.
+        "net_cash_components": noc,
         "avg_deploy_dte": avg_dte,
         "coverage_now": cov_now,
         "coverage_after": cov_after,

@@ -28,14 +28,29 @@ try:
 except Exception:  # pragma: no cover - PyYAML always present in the pipeline
     yaml = None
 
+try:
+    from analysis import rsi_discipline as _rd
+except ImportError:  # pragma: no cover - flat-path fallback
+    try:
+        import rsi_discipline as _rd  # type: ignore
+    except ImportError:
+        _rd = None
+
 # skills/daily-portfolio-briefing/state/scout_verdicts.yaml
 DEFAULT_STATE_PATH = Path(__file__).resolve().parents[2] / "state" / "scout_verdicts.yaml"
 
 # The RSI entry band (12-entry-pipeline-spec §5). A candidate whose RSI falls
 # outside this band only qualifies via the override path (deep drawdown +
 # third-party BUY) and must be labelled as an OVERRIDE, never as "favourable".
+#
+# 2026-08-07 unification: the band is READ from rsi_discipline's configured
+# ``put_entry_band`` (default 35-55 — rule #44 / scout rule #25), never
+# hardcoded here. The previous hardcoded 35-50 disagreed with the scout's
+# 35-55 qualifying band, producing "RSI 55 — OVERRIDE (outside 35-50 band)"
+# on QQQ — an in-band setup mislabelled by a second band definition. These
+# constants remain only as the no-rsi_discipline fallback.
 RSI_BAND_LOW = 35.0
-RSI_BAND_HIGH = 50.0
+RSI_BAND_HIGH = 55.0
 
 # Drawdown threshold that legitimizes an out-of-band override (spec §5).
 OVERRIDE_DRAWDOWN_PCT = 50.0
@@ -48,18 +63,29 @@ def has_buy_rec(r: dict) -> bool:
     return (str(r.get("third_party_rec") or "")).upper() in _BUY_RECS
 
 
-def rsi_in_band(rsi) -> bool:
-    """True when RSI sits inside the 35-50 entry band."""
+def _band(thresholds: dict | None = None) -> tuple[float, float]:
+    """The configured entry band from rsi_discipline (single source of truth)."""
+    if _rd is not None:
+        return _rd.put_entry_band(thresholds)
+    return RSI_BAND_LOW, RSI_BAND_HIGH
+
+
+def rsi_in_band(rsi, thresholds: dict | None = None) -> bool:
+    """True when RSI sits inside the configured entry band (default 35-55)."""
     try:
-        return rsi is not None and RSI_BAND_LOW <= float(rsi) <= RSI_BAND_HIGH
+        lo, hi = _band(thresholds)
+        return rsi is not None and lo <= float(rsi) <= hi
     except (TypeError, ValueError):
         return False
 
 
-def override_label(rsi, drawdown=None, buy_rec: bool = False) -> str:
-    """Explicit override tag for a name qualifying despite RSI outside 35-50,
-    e.g. ``RSI 53 — OVERRIDE (drawdown 74% + BUY rec)`` (spec §5). Never
-    presents the out-of-band RSI as favourable."""
+def override_label(rsi, drawdown=None, buy_rec: bool = False,
+                   thresholds: dict | None = None) -> str:
+    """Explicit override tag for a name qualifying despite RSI outside the
+    configured entry band, e.g. ``RSI 57 — OVERRIDE (drawdown 74% + BUY rec)``
+    (spec §5). Never presents the out-of-band RSI as favourable. The band in
+    the fallback text derives from the ACTUAL configured values (rule #19 —
+    never a hardcoded "35-50" string)."""
     parts: list[str] = []
     try:
         if drawdown is not None and float(drawdown) >= OVERRIDE_DRAWDOWN_PCT:
@@ -68,8 +94,9 @@ def override_label(rsi, drawdown=None, buy_rec: bool = False) -> str:
         pass
     if buy_rec:
         parts.append("BUY rec")
+    lo, hi = _band(thresholds)
     cause = " + ".join(parts) if parts else (
-        f"outside {RSI_BAND_LOW:.0f}-{RSI_BAND_HIGH:.0f} band")
+        f"outside {lo:.0f}-{hi:.0f} band")
     return f"RSI {float(rsi):.0f} — OVERRIDE ({cause})"
 
 

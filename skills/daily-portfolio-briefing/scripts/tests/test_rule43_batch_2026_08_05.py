@@ -128,17 +128,29 @@ class TestNlvMigration:
         bal = json.loads((tmp_path / "2026-08-04" / "balance.json").read_text())
         assert "accountValue_corrected" not in bal
 
-    def test_reader_prefers_corrected_nlv(self, tmp_path):
-        """load_nlv_history / balance_nlv prefer accountValue_corrected over
-        the inflated original."""
+    def test_reader_prefers_broker_tav_then_corrected_nlv(self, tmp_path):
+        """Broker truth beats reconstruction (2026-08-07 finding: the
+        migration's accountValue_corrected rebuilt NLV from E*TRADE's
+        cashAvailableForInvestment — margin availability, not cash — and
+        fabricated the $901,634 2026-07-08 baseline behind the bogus
+        "30d +20.8% / alpha +17.6%" row). load_nlv_history / balance_nlv
+        now prefer the broker's own totalAccountValue; the corrected value
+        remains the fallback when no broker figure exists."""
         _write_snapshot(tmp_path, "2026-07-22", dict(OLD_ERA_BALANCE),
                         OLD_ERA_POSITIONS)
         migrate(tmp_path, quiet=True)
         hist = load_nlv_history(tmp_path)
-        assert abs(hist[date(2026, 7, 22)] - 937877.96) < 0.01
+        # Broker totalAccountValue wins over the corrected reconstruction.
+        assert abs(hist[date(2026, 7, 22)] - 1020111.32) < 0.01
         bal = json.loads((tmp_path / "2026-07-22" / "balance.json").read_text())
         assert balance_option_inclusive(bal)
-        assert abs(balance_nlv(bal) - 937877.96) < 0.01
+        assert abs(balance_nlv(bal) - 1020111.32) < 0.01
+        # Without a broker figure, accountValue_corrected still beats the
+        # inflated original accountValue.
+        no_tav = {k: v for k, v in bal.items() if k != "totalAccountValue"}
+        assert abs(balance_nlv(no_tav) - 937877.96) < 0.01
+        assert abs(balance_nlv({"accountValue": 100.0,
+                                "totalAccountValue": 0}) - 100.0) < 0.01
 
     def test_rebase_fires_only_on_uncorrectable_prefix(self, tmp_path):
         """`nlv_rebase_dates: ["2026-08-04"]` is belt-and-suspenders: it must

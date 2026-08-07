@@ -983,6 +983,20 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] tenor-cap sweep failed: {_e}", file=_sys.stderr)
 
+    # Price-consistency sweep (2026-08-07 TEAM bug): a briefing must never
+    # show two spot prices >2% apart for the same ticker (TEAM rendered
+    # $109.73 / $110.17 / $144.41 across three surfaces after a +31% earnings
+    # gap — the scout cache and the OHLC close were both stale vs the live
+    # E*TRADE quote). Conservative scan: header/action spot patterns only —
+    # strikes, targets and FV notes are never matched.
+    try:
+        from analysis import price_consistency as _pc
+        _pc_offenders = _pc.price_disagreements("\n".join(lines))
+        lines.extend(_pc.render_panel(_pc_offenders))
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] price-consistency sweep failed: {_e}", file=_sys.stderr)
+
     lines.extend(render_inconsistencies(flagged_inconsistencies))
 
     # Task #40 fix 9 / task #43 fix 1: detect user-executed rolls from the

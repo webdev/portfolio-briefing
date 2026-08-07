@@ -190,6 +190,112 @@ def clean_nlv_history(hist: dict[date, float],
         return hist, ""
 
 
+# A single-day NLV move beyond this fraction that PERSISTS (the level does
+# not mean-revert over the next snapshots) is treated as an external flow
+# (deposit / withdrawal / account-scope change), not a market return. Below
+# the clean_nlv_history 40% baseline-reset threshold; above any plausible
+# one-day market move for this book (worst genuine day on record: -6.3%,
+# 2026-07-29). Rule #19: a number that looks like performance must BE
+# performance — flow-driven return must never render as alpha.
+FLOW_JUMP_THRESHOLD = 0.08
+
+
+def detect_flow_days(hist: dict[date, float],
+                     threshold: float = FLOW_JUMP_THRESHOLD
+                     ) -> dict[date, float]:
+    """Detect persistent single-day NLV level shifts → external flows.
+
+    Returns {flow_date: estimated_flow_usd}. A jump only counts when the
+    following snapshots (up to 3) stay nearer the NEW level than the old —
+    a V-shaped dip that mean-reverts is market noise / an intraday artifact,
+    not a flow (no false positive on volatile-but-clean series). A jump on
+    the last snapshot (no persistence evidence yet) is NOT flagged —
+    fail-open, never mark a flow on unconfirmed data.
+    """
+    flows: dict[date, float] = {}
+
+    def _median(vals: list[float]) -> float | None:
+        vals = sorted(v for v in vals if v)
+        return vals[len(vals) // 2] if vals else None
+
+    try:
+        days = sorted(hist)
+        for i in range(1, len(days)):
+            a, b = hist[days[i - 1]], hist[days[i]]
+            if not a or not b or a <= 0:
+                continue
+            if abs(b / a - 1.0) <= threshold:
+                continue
+            # Persistence: the LEVEL around the jump must actually shift.
+            # Median of up to 5 preceding vs up to 3 following snapshots —
+            # a V-dip (and its recovery leg) leaves the level unchanged and
+            # is NOT a flow; a deposit/withdrawal/scope change shifts it.
+            pre = _median([hist[d] for d in days[max(0, i - 5):i]])
+            post = _median([hist[d] for d in days[i + 1:i + 4]])
+            if pre is None or post is None or pre <= 0:
+                continue  # cannot confirm persistence — fail-open
+            if abs(post - pre) <= threshold * pre:
+                continue  # mean-reverted → market noise, not a flow
+            flows[days[i]] = b - a
+    except Exception:  # noqa: BLE001 — fail-open
+        return {}
+    return flows
+
+
+def _chained_return(hist: dict[date, float], current_nlv: float,
+                    start: date, end: date,
+                    flow_days: set[date]) -> float | None:
+    """TWR-style chain-linked return over [start, end], excluding the
+    day-over-day move onto each flow day (external flows are not
+    performance). Percent; None when uncomputable."""
+    try:
+        pts = {d: float(v) for d, v in hist.items()
+               if start <= d <= end and v and float(v) > 0}
+        if current_nlv and float(current_nlv) > 0:
+            pts[end] = float(current_nlv)
+        days = sorted(pts)
+        if len(days) < 2:
+            return None
+        growth = 1.0
+        for prev, cur in zip(days, days[1:]):
+            if cur in flow_days:
+                continue
+            growth *= pts[cur] / pts[prev]
+        return (growth - 1.0) * 100.0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fmt_flow(amt: float) -> str:
+    sign = "+" if amt >= 0 else "-"
+    return f"{sign}${abs(amt):,.0f}"
+
+
+def _apply_flow_adjustment(w: "WindowResult", current_nlv: float, as_of: date,
+                           hist: dict[date, float],
+                           flows: dict[date, float]) -> None:
+    """Replace a window's simple end/start return with the flow-adjusted
+    TWR when detected flow days fall inside the window; re-derives alpha
+    and annotates the window note (never a silent adjustment)."""
+    if w.portfolio_return_pct is None or not flows or w.snapshot_start is None:
+        return
+    in_window = {d: amt for d, amt in flows.items()
+                 if w.snapshot_start < d <= as_of}
+    if not in_window:
+        return
+    twr = _chained_return(hist, current_nlv, w.snapshot_start, as_of,
+                          set(in_window))
+    if twr is None:
+        return
+    w.portfolio_return_pct = twr
+    if w.spy_return_pct is not None:
+        w.alpha_pct = w.portfolio_return_pct - w.spy_return_pct
+    flows_s = ", ".join(f"{d.isoformat()} ({_fmt_flow(amt)})"
+                        for d, amt in sorted(in_window.items()))
+    w.note = ((w.note + "; " if w.note else "")
+              + f"flow-adjusted (TWR) — excluded external flow day(s): {flows_s}")
+
+
 def _pct(end: float, start: float) -> float | None:
     """(end/start - 1) * 100, None when start is unusable."""
     try:
@@ -306,6 +412,19 @@ def compute_benchmark(current_nlv: float,
                if k is not None and v is not None and float(v) > 0}
 
         hist, discontinuity_note = clean_nlv_history(hist)
+        # External flows below the 40% baseline-reset threshold (deposits /
+        # withdrawals / scope changes that persist as a level shift) —
+        # windowed returns are flow-adjusted (TWR) so a flow never renders
+        # as alpha (rule #19).
+        flows = detect_flow_days(hist)
+        if flows:
+            flows_s = ", ".join(f"{d.isoformat()} ({_fmt_flow(amt)})"
+                                for d, amt in sorted(flows.items()))
+            flow_note = (f"external flow(s) detected (persistent level shift "
+                         f"> {FLOW_JUMP_THRESHOLD:.0%} d/d): {flows_s} — "
+                         f"windowed returns are flow-adjusted (TWR)")
+            discontinuity_note = ((discontinuity_note + "; "
+                                   if discontinuity_note else "") + flow_note)
 
         report = BenchmarkReport(status="ok", as_of=as_of_d,
                                  benchmark_ticker=benchmark_ticker,
@@ -360,6 +479,11 @@ def compute_benchmark(current_nlv: float,
                 # Unknown mode — skip silently rather than crash.
                 continue
 
+        # Flow-adjust every computed window (TWR) — after the loop so all
+        # three window modes (days / YTD / inception) get the same treatment.
+        for w in report.windows:
+            _apply_flow_adjustment(w, float(current_nlv), as_of_d, hist, flows)
+
         report.series = _build_series(float(current_nlv), as_of_d, hist, spy)
         return report
     except Exception as e:  # noqa: BLE001 — fail-open, briefing must ship
@@ -374,16 +498,41 @@ def compute_benchmark(current_nlv: float,
 # ---------------------------------------------------------------------------
 
 def balance_nlv(bal: dict) -> float | None:
-    """Preferred NLV from a balance.json dict.
+    """Preferred NLV from a balance.json dict — broker truth beats
+    reconstruction (same principle as ``_compose_balance``, 2026-08-04).
 
-    ``accountValue_corrected`` (written by scripts/recompute_nlv_history.py —
-    the option-mark-inclusive recompute) wins over the original
-    ``accountValue``; longMarketValue + cash is the last-resort fallback.
-    Never overwrites anything — the migration stores corrected ALONGSIDE the
-    original, and this reader simply prefers it.
+    2026-08-07 defect: the briefing rendered "30d | Portfolio +20.8% | SPY
+    +3.2% | Alpha +17.6%" off a 2026-07-08 baseline of $901,634 — an
+    ``accountValue_corrected`` artifact. The migration rebuilt NLV as
+    ``cash + longMV + position marks``, but old-era ``cash`` is E*TRADE's
+    ``cashAvailableForInvestment`` — a margin-availability figure that
+    swings with collateral holds, NOT actual cash — so the corrected series
+    carried fake ±5-12% daily volatility. The broker's own
+    ``totalAccountValue`` for 2026-07-08 was $1,002,569 (true 30d return
+    +8.6%), and it matches the corrected recompute to the penny on days the
+    marks were clean, proving it is the same INDIVIDUAL-scoped NLV.
+
+    Preference order:
+      1. ``totalAccountValue`` — E*TRADE's own real-time net account value
+         (option-mark-inclusive by construction; present in every live
+         snapshot).
+      2. ``accountValue_corrected`` (scripts/recompute_nlv_history.py).
+      3. ``accountValue``.
+      4. longMarketValue + cash (last resort).
+    Never overwrites anything — this is a reader-side preference only.
     """
     try:
-        nlv = bal.get("accountValue_corrected")
+        nlv = None
+        raw_tav = bal.get("totalAccountValue")
+        if raw_tav is not None:
+            try:
+                tav = float(raw_tav)
+                if tav > 0:
+                    nlv = tav
+            except (TypeError, ValueError):
+                nlv = None
+        if nlv is None:
+            nlv = bal.get("accountValue_corrected")
         if nlv is None:
             nlv = bal.get("accountValue")
         if nlv is None:
@@ -395,12 +544,18 @@ def balance_nlv(bal: dict) -> float | None:
 
 def balance_option_inclusive(bal: dict) -> bool:
     """True when this balance's NLV already includes signed option marks —
-    either the broker-true era (optionMarketValue / nlv_reconciliation
-    present, 2026-08-04 onward) or a migrated snapshot
-    (accountValue_corrected present)."""
+    a broker ``totalAccountValue`` (which :func:`balance_nlv` now prefers,
+    and which is option-mark-inclusive by construction), the broker-true
+    era (optionMarketValue / nlv_reconciliation present, 2026-08-04
+    onward), or a migrated snapshot (accountValue_corrected present)."""
     if not isinstance(bal, dict):
         return False
-    return (bal.get("accountValue_corrected") is not None
+    try:
+        tav = float(bal.get("totalAccountValue") or 0)
+    except (TypeError, ValueError):
+        tav = 0.0
+    return (tav > 0
+            or bal.get("accountValue_corrected") is not None
             or bal.get("optionMarketValue") is not None
             or bool(bal.get("nlv_reconciliation")))
 
