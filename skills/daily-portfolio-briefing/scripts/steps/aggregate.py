@@ -1040,6 +1040,23 @@ def aggregate_briefing(
     except Exception:
         _executed_rolls = None
 
+    # 2026-08-10 bug 1a: user-executed OPENS were invisible (the MELI
+    # $1460P Jun '27 — a $146K obligation, 13.3% of NLV — appeared with no
+    # 'Since Yesterday' mention and an unexplained coverage drop). Detect
+    # fresh short opens from the same position diff, with measured
+    # obligation / % NLV / coverage counterfactual. Fail-open.
+    _executed_opens = None
+    try:
+        from analysis.briefing_diff import detect_executed_opens
+        _bal_for_opens = snapshot_data.get("balance", {}) or {}
+        _executed_opens = detect_executed_opens(
+            (aging_info or {}).get("prev_positions"),
+            snapshot_data.get("positions"),
+            nlv=_bal_for_opens.get("accountValue"),
+            cash=_bal_for_opens.get("cash"))
+    except Exception:
+        _executed_opens = None
+
     # Insert "Since Yesterday" diff panel (best-effort — silent on first run)
     try:
         snapshot_root = snapshot_dir.parent if snapshot_dir else Path("state/briefing_snapshots")
@@ -1053,7 +1070,8 @@ def aggregate_briefing(
         diff_panel = render_diff_panel(today_so_far, yesterday_md,
                                        recon_status=recon_for_diff,
                                        executed_rolls=_executed_rolls,
-                                       today_iso=date_str)
+                                       today_iso=date_str,
+                                       executed_opens=_executed_opens)
         if diff_panel:
             # Insert near the top, after the header but before market context
             # For simplicity, append at the end before manifest
@@ -1509,8 +1527,22 @@ def aggregate_briefing(
         print(f"[aggregate] capacity re-tag failed (non-fatal): {_rt_e}",
               file=_sys.stderr)
 
+    # 2026-08-10 bug 4: capacity-gated/deferred planning cards must sort
+    # BELOW executable actions — the digest's action #1 was a Deferred
+    # PULLBACK CSP ranked above the executable CLOSE. Reorder (stable),
+    # renumber; the deferred card stays fully visible (rule #24/#41).
+    try:
+        from render.panels import sort_deferred_actions
+        briefing_markdown = sort_deferred_actions(briefing_markdown)
+    except Exception as _sd_e:
+        import sys as _sys
+        print(f"[aggregate] deferred-action sort failed (non-fatal): {_sd_e}",
+              file=_sys.stderr)
+
     # 2026-08-05 defect 3: the header count must reflect the FINAL composed
     # action list — recount numbered items after every composer/post-pass.
+    # 2026-08-10 bug 4: the count renders executable vs deferred separately
+    # ("Action Items: 1 (+1 deferred)").
     try:
         from render.panels import sync_action_item_count
         briefing_markdown = sync_action_item_count(briefing_markdown)

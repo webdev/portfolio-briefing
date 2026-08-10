@@ -102,10 +102,13 @@ def test_rsi_55_in_band_no_override_text():
     """Observed: '**🎯 CANDIDATE · `QQQ` · $716.31** ... RSI 55 — OVERRIDE
     (outside 35-50 band)'. The configured entry band is 35-55, so RSI 55 is
     IN band — the card must carry the normal RSI read, no OVERRIDE at all."""
+    # (mid raised from the observed $2.92 so the ticket clears the 2026-08-10
+    # delivered-yield floor — this test pins the OVERRIDE labelling, not the
+    # yield gate, which has its own tests in test_2026_08_10_briefing_fixes.)
     r = _res(ticker="QQQ", spot=716.31, rsi_14=55.0, drawdown_pct=3.9,
              third_party_rec=None,
              verdict="CSP ENTRY (independent setup)",
-             csp_entry={"strike": 645, "mid": 2.92, "bid": 2.91, "ask": 2.94,
+             csp_entry={"strike": 645, "mid": 8.20, "bid": 8.10, "ask": 8.30,
                         "expiration": "2026-09-11", "dte": 36})
     md = cr.render_candidate_briefing(
         _payload([r]), fv_by_ticker={}, config={}, generated_at="T")

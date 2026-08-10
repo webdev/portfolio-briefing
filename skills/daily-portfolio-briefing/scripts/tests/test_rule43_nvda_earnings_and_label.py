@@ -131,9 +131,12 @@ def test_label_paid_to_wait_with_state_line(monkeypatch):
     md = _render_nvda(monkeypatch, _nvda_snap(earnings=None), SPANNING_EXP)
     assert "**CSP — PAID-TO-WAIT** NVDA — sell $185P" in md
     assert "**PULLBACK CSP**" not in md                     # old label gone
-    assert "Strategy: sell a put below spot" in md
-    assert "does not claim the stock is currently pulling back" in md
-    assert "today's state: RSI 53 (neutral)" in md
+    # 2026-08-10 bug 5: the explainer states only the strategy + today's
+    # measured state — the old "The name does not claim the stock is
+    # currently pulling back" meta-commentary is gone.
+    assert "Paid-to-wait: keep the premium if no dip comes" in md
+    assert "does not claim the stock is currently pulling back" not in md
+    assert "Today: RSI 53 (neutral)" in md
 
 
 def test_label_kind_stays_pullback_csp_internally(monkeypatch):

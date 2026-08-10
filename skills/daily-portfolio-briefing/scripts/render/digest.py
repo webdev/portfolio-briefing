@@ -141,6 +141,42 @@ def _strip_italic_footers(lines: list[str]) -> list[str]:
     return [ln for ln in lines if not _ITALIC_LINE.match(ln)]
 
 
+def _drop_childless_h3(lines: list[str]) -> list[str]:
+    """Drop any ``###`` sub-header left with NO content beneath it (until the
+    next header / end). Observed 2026-08-10: '### 🔄 Detected User-Executed
+    Rolls (1)' rendered in the digest with zero bullets because its only item
+    was a standalone italic line the footer strip removed — a header claiming
+    a count of 1 with nothing under it. Either the items render or the header
+    goes."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("### "):
+            j = i + 1
+            has_content = False
+            while j < len(lines) and not lines[j].startswith("#"):
+                if lines[j].strip():
+                    has_content = True
+                    break
+                j += 1
+            if not has_content:
+                i += 1
+                while i < len(lines) and not lines[i].startswith("#") \
+                        and not lines[i].strip():
+                    i += 1
+                continue
+        out.append(ln)
+        i += 1
+    return out
+
+
+def _since_yesterday_filter(lines: list[str]) -> list[str]:
+    """Since Yesterday: strip italic footers, then drop headers the strip
+    left childless (2026-08-10 bug 2)."""
+    return _drop_childless_h3(_strip_italic_footers(lines))
+
+
 def _strip_health_explainers(lines: list[str]) -> list[str]:
     """Drop the Greeks panel's fixed educational sub-bullets ("What it
     means" / "Rule of thumb") — identical boilerplate every day; the
@@ -449,8 +485,9 @@ def _build_digest_inner(full_md: str, config: dict | None,
     # 5. Red Flags & Priorities
     _emit(_find(blocks, "red flags"))
 
-    # 6. Since Yesterday (if present), minus transparency footers
-    _emit(_find(blocks, "since yesterday"), _strip_italic_footers)
+    # 6. Since Yesterday (if present), minus transparency footers; headers
+    #    left childless by the strip are dropped too (2026-08-10 bug 2)
+    _emit(_find(blocks, "since yesterday"), _since_yesterday_filter)
 
     # 7. Top-N candidate entry tickets
     cand_block = _find(blocks, "candidate trades")

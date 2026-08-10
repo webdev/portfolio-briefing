@@ -1502,28 +1502,120 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
 # post-pass recounts the numbered items in the FINAL composed markdown and
 # rewrites the header line to match. Fail-open: any shape it doesn't
 # recognize leaves the markdown untouched.
-_ACTION_COUNT_RE = re.compile(r"^(\*\*Action Items:\*\*)\s*\d+\s*$", re.M)
+_ACTION_COUNT_RE = re.compile(
+    r"^(\*\*Action Items:\*\*)\s*\d+(?:\s*\(\+\d+ deferred\))?\s*$", re.M)
 _ACTION_SECTION_HEAD_RE = re.compile(r"^##\s+Today's Action List", re.M)
 _NUMBERED_ITEM_RE = re.compile(r"^\s{0,3}\d+\.\s")
+# Capacity-gated planning-card marker (hard rule #41's tag) — a numbered
+# item whose block carries it is DEFERRED, not executable today.
+_DEFERRED_CAPACITY_RE = re.compile(r"⏸ Deferred \(capacity gated\)")
+
+
+def _split_action_section(markdown: str):
+    """Split the Action List section into (before, preamble, item_blocks,
+    tail, after). ``item_blocks`` are the numbered cards (header line +
+    sub-lines); ``tail`` starts at the first ``###`` sub-header after the
+    items (e.g. "### 📋 Total Impact"). Returns None when the shape isn't
+    recognized (caller fails open)."""
+    head = _ACTION_SECTION_HEAD_RE.search(markdown)
+    if head is None:
+        return None
+    sec_start = head.start()
+    after_head = markdown[head.end():]
+    nxt = re.search(r"^##\s", after_head, re.M)
+    sec_end = head.end() + (nxt.start() if nxt is not None else len(after_head))
+    before = markdown[:sec_start]
+    section = markdown[sec_start:sec_end]
+    after = markdown[sec_end:]
+
+    lines = section.splitlines()
+    preamble: list[str] = []
+    blocks: list[list[str]] = []
+    tail: list[str] = []
+    cur: list[str] | None = None
+    in_tail = False
+    for ln in lines:
+        if in_tail:
+            tail.append(ln)
+            continue
+        if _NUMBERED_ITEM_RE.match(ln):
+            if cur is not None:
+                blocks.append(cur)
+            cur = [ln]
+        elif cur is not None and ln.startswith("### "):
+            blocks.append(cur)
+            cur = None
+            in_tail = True
+            tail.append(ln)
+        elif cur is not None:
+            cur.append(ln)
+        else:
+            preamble.append(ln)
+    if cur is not None:
+        blocks.append(cur)
+    return before, preamble, blocks, tail, after
+
+
+def sort_deferred_actions(markdown: str) -> str:
+    """Sort capacity-gated / deferred planning cards BELOW executable
+    actions in the Action List, renumbering (2026-08-10 bug 4: the digest's
+    action #1 was '**CSP — PAID-TO-WAIT** VRT … ⏸ Deferred (capacity
+    gated)' — a non-executable planning card ranked ABOVE the executable
+    CLOSE RDDT). Stable within each group; the deferred cards stay fully
+    visible (rule #24/#41). Fail-open on any unrecognized shape."""
+    try:
+        parts = _split_action_section(markdown or "")
+        if parts is None:
+            return markdown
+        before, preamble, blocks, tail, after = parts
+        if len(blocks) < 2:
+            return markdown
+        executable = [b for b in blocks
+                      if not _DEFERRED_CAPACITY_RE.search("\n".join(b))]
+        deferred = [b for b in blocks
+                    if _DEFERRED_CAPACITY_RE.search("\n".join(b))]
+        if not deferred or len(executable) == len(blocks):
+            return markdown
+        reordered = executable + deferred
+        out_blocks: list[str] = []
+        for i, b in enumerate(reordered, 1):
+            first = re.sub(r"^(\s{0,3})\d+\.", rf"\g<1>{i}.", b[0], count=1)
+            out_blocks.append("\n".join([first] + b[1:]))
+        section = "\n".join(preamble + out_blocks + tail)
+        # splitlines() drops trailing newlines — restore EXACTLY the raw
+        # section's trailing-newline run so the pass is byte-idempotent.
+        raw_section = markdown[len(before):len(markdown) - len(after)] \
+            if after else markdown[len(before):]
+        trailing = raw_section[len(raw_section.rstrip("\n")):]
+        section = section.rstrip("\n") + trailing
+        return before + section + after
+    except Exception:  # noqa: BLE001 — cosmetic sort must never break the ship
+        return markdown
 
 
 def sync_action_item_count(markdown: str) -> str:
     """Rewrite the header's "**Action Items:** N" from the FINAL composed
     action-list section (defect 3, 2026-08-05: header said 2, list rendered
-    3 — the count was taken before a later composer appended an item)."""
+    3 — the count was taken before a later composer appended an item).
+
+    2026-08-10 bug 4: deferred (capacity-gated) planning cards no longer
+    inflate the executable count — the header renders them separately as
+    "**Action Items:** 1 (+1 deferred)"."""
     try:
         if not markdown:
             return markdown
-        head = _ACTION_SECTION_HEAD_RE.search(markdown)
-        if head is None or _ACTION_COUNT_RE.search(markdown) is None:
+        if _ACTION_COUNT_RE.search(markdown) is None:
             return markdown
-        section = markdown[head.end():]
-        nxt = re.search(r"^#{1,2}\s", section, re.M)
-        if nxt is not None:
-            section = section[:nxt.start()]
-        count = sum(1 for ln in section.splitlines()
-                    if _NUMBERED_ITEM_RE.match(ln))
-        return _ACTION_COUNT_RE.sub(rf"\1 {count}", markdown, count=1)
+        parts = _split_action_section(markdown)
+        if parts is None:
+            return markdown
+        _, _, blocks, _, _ = parts
+        deferred = sum(1 for b in blocks
+                       if _DEFERRED_CAPACITY_RE.search("\n".join(b)))
+        executable = len(blocks) - deferred
+        label = (f"{executable} (+{deferred} deferred)" if deferred
+                 else f"{executable}")
+        return _ACTION_COUNT_RE.sub(rf"\1 {label}", markdown, count=1)
     except Exception:  # noqa: BLE001 — cosmetic sync must never break the ship
         return markdown
 
@@ -4379,11 +4471,14 @@ def render_action_list(
                 f"RSI {_csp_rsi:.0f} ({rsi_discipline.market_state(_csp_rsi)})"
                 if _csp_rsi is not None else "RSI unavailable"
             )
+            # 2026-08-10 bug 5: the old explainer appended meta-commentary
+            # about the recommendation's NAME ("The name does not claim the
+            # stock is currently pulling back; today's state: …") — awkward
+            # boilerplate. State only the strategy + today's measured state.
             items.append(
-                f"   - _Strategy: sell a put below spot — keep the premium if no "
-                f"dip comes, or re-acquire at {(target_strike/spot - 1)*100:.0f}% "
-                f"if it does. The name does not claim the stock is currently "
-                f"pulling back; today's state: {_csp_state_txt}._"
+                f"   - _Paid-to-wait: keep the premium if no dip comes, or "
+                f"re-acquire at {(target_strike/spot - 1)*100:.0f}% below "
+                f"spot if one does. Today: {_csp_state_txt}._"
             )
             if _csp_chase_caution:
                 # Rule #44 fail-open path: spot measurable but no close

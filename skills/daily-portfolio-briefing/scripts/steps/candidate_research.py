@@ -560,6 +560,67 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
 # is treated as "the same trade" (duplicate), not a fresh candidate.
 _STRIKE_OVERLAP_PCT = 0.05
 
+# Rule #44 delivered-yield floors (2026-08-10 bug 3: 'PEP … $125P … mid
+# $0.29' — $29 on $12,500 collateral, ~2.6% ann — rendered as a top
+# candidate with a 🔥 conviction badge; MCD $245P ~1.6% ann ditto). Same
+# floors + config keys as rotation_playbook._phase2_gate_battery.
+_DEFAULT_MIN_ANN_YIELD = 0.12
+_DEFAULT_MIN_PREM_PCT = 0.005
+
+
+def _yield_floor_failure(q: dict | None, config: dict | None) -> dict | None:
+    """Check a live CSP ticket against the delivered-yield floors
+    (``rotation_playbook.playbook_min_annualized_yield``, default 12%, and
+    ``playbook_min_premium_pct_of_collateral``, default 0.5%).
+
+    Returns None when the ticket passes — or when premium/strike/DTE aren't
+    measurable (fail-open: data absence is handled by the ticket guards,
+    never by a fabricated yield). On failure returns the MEASURED numbers
+    plus a rendered reason like "⏸ premium too thin — $29 on $12,500
+    (2.6% ann < 12% floor)" (rule #19/#24)."""
+    if not q:
+        return None
+    try:
+        mid = float(q.get("mid") or 0)
+        strike = float(q.get("strike") or 0)
+        dte = float(q.get("dte") or 0)
+    except (TypeError, ValueError):
+        return None
+    if mid <= 0 or strike <= 0 or dte <= 0:
+        return None
+    cfg = (config or {}).get("rotation_playbook") \
+        if isinstance(config, dict) else None
+    cfg = cfg if isinstance(cfg, dict) else {}
+    try:
+        min_ann = float(cfg.get("playbook_min_annualized_yield",
+                                _DEFAULT_MIN_ANN_YIELD))
+    except (TypeError, ValueError):
+        min_ann = _DEFAULT_MIN_ANN_YIELD
+    try:
+        min_prem_pct = float(cfg.get("playbook_min_premium_pct_of_collateral",
+                                     _DEFAULT_MIN_PREM_PCT))
+    except (TypeError, ValueError):
+        min_prem_pct = _DEFAULT_MIN_PREM_PCT
+    premium_usd = mid * 100.0
+    collateral_usd = strike * 100.0
+    prem_pct = mid / strike
+    ann = prem_pct * 365.0 / dte
+    if ann >= min_ann and prem_pct >= min_prem_pct:
+        return None
+    if ann < min_ann:
+        why = f"{ann * 100:.1f}% ann < {min_ann * 100:.0f}% floor"
+    else:
+        why = (f"{prem_pct * 100:.2f}% of collateral < "
+               f"{min_prem_pct * 100:.1f}% floor")
+    return {
+        "premium_usd": premium_usd,
+        "collateral_usd": collateral_usd,
+        "ann_pct": ann * 100.0,
+        "prem_pct": prem_pct * 100.0,
+        "reason": (f"⏸ premium too thin — ${premium_usd:,.0f} on "
+                   f"${collateral_usd:,.0f} ({why})"),
+    }
+
 
 def short_puts_by_ticker(positions: list | None) -> dict:
     """Tally the user's OPEN short puts from snapshot positions.
@@ -779,6 +840,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     cands: list[tuple[str, dict]] = []
     held: list[tuple[str, dict, object]] = []
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
+    thin_premium: list[tuple[str, dict, dict]] = []  # rule #44 yield floor (bug 3)
     seen: set[str] = set()
     for theme_key, results in rbt.items():
         tname = themes_meta.get(theme_key, {}).get("name", theme_key)
@@ -795,6 +857,16 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 # Position-aware: if this CSP candidate duplicates a put the
                 # user already holds, it's not a new trade — pull it out.
                 q = r.get("csp_entry") or {}
+                # Rule #44 delivered-yield floor (2026-08-10 bug 3): a CSP
+                # ticket below the annualized-yield or premium-%-of-collateral
+                # floor is not income — demote to a visible "premium too thin"
+                # row with the measured numbers (rule #24), forfeit conviction
+                # badges, and never occupy a Top-N digest slot. The sector-
+                # diversification bonus cannot resurrect it.
+                thin = _yield_floor_failure(q, config) if q else None
+                if thin:
+                    thin_premium.append((tname, r, thin))
+                    continue
                 # CRITICAL: long-put cancellation check first — a short put at
                 # the same strike as a held LONG put cancels protection (the
                 # META collar-floor case). That's a hard refuse, not a "stack."
@@ -950,6 +1022,30 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
         lines.append("")
         lines.append("_No RSI-favorable candidates right now — the universe is broadly extended. "
                      "The On-Deck names below would activate on a pullback into the favorable RSI zone._")
+        lines.append("")
+
+    if thin_premium:
+        # Rule #44 (2026-08-10 bug 3) — visible with measured numbers
+        # (rule #24), never a candidate slot, no conviction badges.
+        lines.append(f"{_h_sub} ⏸ Premium too thin — below the "
+                     f"delivered-yield floor ({len(thin_premium)})")
+        lines.append("_A premium-selling ticket below the delivered-yield "
+                     "floors (12% annualized / 0.5% of collateral, rule #44) "
+                     "is not income — shown with measured numbers; conviction "
+                     "badges forfeited; a diversification bonus cannot "
+                     "resurrect it._")
+        lines.append("")
+        for tname, r, thin in sorted(thin_premium,
+                                     key=lambda x: (x[0], x[1].get("ticker", ""))):
+            tk = (r.get("ticker") or "").upper()
+            q = r.get("csp_entry") or {}
+            spot = r.get("spot")
+            spot_s = f"${spot:,.2f}" if spot else "?"
+            lines.append(
+                f"- **`{tk}`** ({tname}, {spot_s}) — SELL "
+                f"${q.get('strike', 0):g}P mid ${q.get('mid', 0):.2f} → "
+                f"{thin['reason']}"
+            )
         lines.append("")
 
     if held:

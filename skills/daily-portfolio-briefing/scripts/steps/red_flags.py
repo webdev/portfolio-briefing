@@ -270,6 +270,90 @@ def compute_red_flags(
         ))
 
     # ----------------------------------------------------------------
+    # 4c. Obligation-inclusive per-name concentration (2026-08-10 —
+    # the MELI case: a fresh $1460P Jun '27 short put is a $146,000
+    # obligation — 13.3% of NLV on a single name, over the 10% Tier C
+    # cap — yet the equity-MV-only check above saw 0% because there are
+    # no MELI shares). Per-name exposure = equity MV + strike×100×qty of
+    # short puts on the name, as % of NLV, measured against the TIER cap
+    # (position_tiers.concentration_cap_for_tier — Tier A 22% respected).
+    # Only fires when the put obligation is what pushes the name over
+    # (equity-only ≤ cap) so it never duplicates flag #4 / drift alerts.
+    # ----------------------------------------------------------------
+    if nlv > 0:
+        try:
+            from analysis.position_tiers import (tier_for,
+                                                 concentration_cap_for_tier)
+        except Exception:
+            tier_for = concentration_cap_for_tier = None
+        if tier_for is not None:
+            equity_mv: dict = {}
+            put_oblig: dict = {}
+            for p in positions:
+                atype = (p.get("assetType") or "").upper()
+                try:
+                    qty = float(p.get("qty", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if atype == "EQUITY" and qty > 0:
+                    t = (p.get("symbol") or "").upper()
+                    try:
+                        mv = float(p.get("marketValue") or 0) or (
+                            qty * float(p.get("price") or 0))
+                    except (TypeError, ValueError):
+                        mv = 0.0
+                    if t:
+                        equity_mv[t] = equity_mv.get(t, 0.0) + mv
+                elif (atype == "OPTION" and qty < 0
+                        and (p.get("type") or "").upper() == "PUT"):
+                    t = (p.get("underlying") or "").upper()
+                    try:
+                        ob = float(p.get("strike") or 0) * 100 * abs(qty)
+                    except (TypeError, ValueError):
+                        ob = 0.0
+                    if t and ob > 0:
+                        put_oblig[t] = put_oblig.get(t, 0.0) + ob
+            for t, ob in sorted(put_oblig.items()):
+                eq_mv = equity_mv.get(t, 0.0)
+                eq_pct = eq_mv / nlv * 100.0
+                total_pct = (eq_mv + ob) / nlv * 100.0
+                cap_pct = concentration_cap_for_tier(
+                    tier_for(t, config), config)
+                if total_pct <= cap_pct or eq_pct > cap_pct:
+                    continue  # under cap, or equity alone already flagged
+                tier = tier_for(t, config)
+                severity = "HIGH" if total_pct >= 1.5 * cap_pct else "MEDIUM"
+                flags.append(RedFlag(
+                    severity=severity,
+                    headline=(
+                        f"Obligation-inclusive concentration: {t} at "
+                        f"{total_pct:.1f}% of NLV (equity {eq_pct:.1f}% + "
+                        f"${ob:,.0f} short-put obligation) — over the "
+                        f"{cap_pct:.0f}% Tier {tier} cap"
+                    ),
+                    detail=(
+                        f"**{t}** carries **${ob:,.0f} of short-put "
+                        f"obligation** (strike × 100 × contracts) on top of "
+                        f"${eq_mv:,.0f} of equity — assignment-inclusive "
+                        f"exposure is **{total_pct:.1f}% of NLV**, over the "
+                        f"{cap_pct:.0f}% Tier {tier} cap. The equity-only "
+                        f"concentration check does not see put obligations, "
+                        f"so this exposure is invisible until assignment "
+                        f"makes it real."
+                    ),
+                    do=[
+                        f"Close or roll down the {t} put(s) to bring "
+                        f"obligation-inclusive exposure under {cap_pct:.0f}%.",
+                        "Treat the obligation as committed capital when "
+                        "sizing anything else today.",
+                    ],
+                    dont=[
+                        f"Add more short puts or shares on {t} while over "
+                        f"the cap.",
+                    ],
+                ))
+
+    # ----------------------------------------------------------------
     # 4b. Sector look-through over the per-sector cap (2026-08-07 —
     # George: "It seems like I'm pretty heavily invested in tech. Is it
     # the right thing?"). Reads the SAME exposure computed for the Sector
