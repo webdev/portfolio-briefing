@@ -1449,6 +1449,11 @@ html[data-theme="solarized-dark"] body {
 .rep-badge-gold  { color: #FBBF24; background: rgba(251, 191, 36, 0.10); border-color: rgba(251, 191, 36, 0.30); }
 .rep-badge-green { color: var(--color-positive); background: rgba(52, 211, 153, 0.10); border-color: rgba(52, 211, 153, 0.30); }
 .rep-badge-amber { color: var(--color-warning);  background: rgba(251, 191, 36, 0.10); border-color: rgba(251, 191, 36, 0.30); }
+/* RSI zone badge tones (George 2026-08-10) — red = overbought (blocked
+   hot), blue = oversold / falling knife (blocked cold), muted = wait. */
+.rep-badge-red   { color: var(--color-negative); background: rgba(248, 113, 113, 0.10); border-color: rgba(248, 113, 113, 0.30); }
+.rep-badge-blue  { color: var(--color-info, #60A5FA); background: rgba(96, 165, 250, 0.10); border-color: rgba(96, 165, 250, 0.30); }
+.rep-badge-muted { color: var(--color-text-secondary); background: rgba(148, 163, 184, 0.08); border-color: var(--color-border-subtle); }
 
 /* Metric chips row */
 .rep-metrics {
@@ -2916,6 +2921,16 @@ html[data-theme="solarized-light"] .tech-card {
     border-color: var(--color-accent, var(--color-border));
     font-weight: 600;
 }
+
+/* ─── RSI zone filter bar (George 2026-08-10) ───
+   "what is within the CSP range and what is within the covered call
+   range ... at a glance." Reuses the .uc-sort chip pattern (theme-token
+   colors — WCAG-safe across themes); counts filled live by app.js. */
+.rsi-filter-bar { margin: .4rem 0 .6rem; }
+.rsi-filter-chip .rsi-count { opacity: .75; font-variant-numeric: tabular-nums; }
+/* Zone chip on the tech card — sits next to the RSI chip; dashed outline
+   distinguishes the derived zone read from the measured-signal chips. */
+.tc-zone-chip { border: 1px dashed currentColor; font-weight: 600; }
 
 /* ════════════════════════════════════════════════════════════════════
    Tech legend (task #13) — collapsible "how to read the signals" panel

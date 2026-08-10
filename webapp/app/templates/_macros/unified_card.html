@@ -33,6 +33,9 @@
    (uc-muted) so a demoted ticket never reads as a recommendation. #}
 <article class="uc-card uc-{{ tab_kind }}{% if tab_kind == 'idea' and base.group in ('waiting', 'gated') %} uc-muted{% endif %}"
          data-ticker="{{ _tk or '' }}"
+         {# RSI zone filter (George 2026-08-10) — zones come from the tech
+            view-model (measured RSI); no RSI → 'unknown' (All-only). #}
+         data-rsi-zones="{{ rsi_card_zones(tech) }}"
          {% if tab_kind == 'equity' and base.pl_pct is not none %}data-pl="{{ base.pl_pct }}"{% endif %}
          {% if tab_kind == 'equity' and base.weight is not none %}data-weight="{{ base.weight }}"{% endif %}
          {% if tab_kind == 'option' and _opl is not none %}data-pl="{{ _opl }}"{% endif %}

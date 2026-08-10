@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_macros/tech_card.html" import tech_card %}
 {% from "_macros/tech_legend.html" import tech_legend %}
+{% from "_macros/rsi_filter.html" import rsi_filter_bar %}
 {% block title %}{{ report_title }} — {{ date }}{% endblock %}
 
 {% macro status_chip(status, tone, icon, label) %}
@@ -23,7 +24,10 @@
    claiming "chart data unavailable" on a page that simply didn't ask for
    it would be a false statement (hard rule #19). #}
 {% macro card(c, tech=None, tech_enabled=False) %}
-<article class="rep-card rep-card-{{ c.status_tone }}" id="card-{{ c.ticker }}">
+{# RSI zone filter (George 2026-08-10): zones from the measured tech RSI
+   first, else the card's own RSI metric chip; no RSI → 'unknown'. #}
+{% set rsi_badge = rsi_card_badge(tech, c) %}
+<article class="rep-card rep-card-{{ c.status_tone }}" id="card-{{ c.ticker }}" data-rsi-zones="{{ rsi_card_zones(tech, c) }}">
     <header class="rep-card-head">
         <div class="rep-card-head-left">
             {{ status_chip(c.status, c.status_tone, c.status_icon, c.status_label) }}
@@ -32,6 +36,9 @@
             <span class="rep-card-price">{{ c.price }}</span>
         </div>
         <div class="rep-card-head-right">
+            {% if rsi_badge %}
+                <span class="rep-badge rep-badge-{{ rsi_badge.rep_tone }}" title="{{ rsi_badge.title }}">{{ rsi_badge.text }}</span>
+            {% endif %}
             {% if c.flags and c.flags.top_conviction %}
                 <span class="rep-badge rep-badge-gold" title="Top conviction signal">🏆 Top conviction</span>
             {% endif %}
@@ -226,6 +233,12 @@
             <sl-button size="small" data-filter="bad" onclick="filterCards('bad', this)">🔴 Avoid</sl-button>
         </sl-button-group>
     </div>
+
+    {# ─── RSI zone filter (George 2026-08-10) ───
+       "what is within the CSP range and what is within the covered call
+       range ... at a glance." Chips + counts wired by app.js off the
+       data-rsi-zones attribute on every rep-card. #}
+    {{ rsi_filter_bar('report:' ~ (report_base_url | default('/report')), '.rep-card') }}
 
     {# ─── Actionable hero (Tier 1 UX simplification) ───
        Lead with actionable cards from ALL sections in a single row so

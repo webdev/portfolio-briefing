@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import ingest
+from . import ingest, rsi_zones
 
 # ─── Chip tone bands (from the infographic's exact color usage) ──────
 # Tones map to CSS classes .tc-chip-<tone>; the palette lives in app.css
@@ -227,6 +227,11 @@ def skeleton(ticker: str, name: str | None = None, spot: float | None = None) ->
         "name": name,
         "available": False,
         "spot_str": f"${spot:,.2f}" if spot else None,
+        # RSI zone filtering (2026-08-10): no deep read → no RSI → the
+        # card is 'unknown' and stays visible only under the All filter.
+        "rsi": None,
+        "rsi_zones": rsi_zones.zones_attr(None),
+        "rsi_zone_badge": None,
     }
 
 
@@ -265,11 +270,22 @@ def build_card(
     if deep.get("vol_ratio_30d") is not None:
         vol_bits += f" · vol {deep['vol_ratio_30d']:.1f}× avg"
 
+    rsi_val = deep.get("rsi_14")
+    try:
+        rsi_val = float(rsi_val) if rsi_val is not None else None
+    except (TypeError, ValueError):
+        rsi_val = None
+
     return {
         "ticker": ticker,
         "name": name,
         "available": True,
         "spot_str": f"${spot:,.2f}",
+        # RSI zone filtering (George 2026-08-10) — non-exclusive zone tags
+        # + humanized at-a-glance badge; single source: rsi_zones.py.
+        "rsi": rsi_val,
+        "rsi_zones": rsi_zones.zones_attr(rsi_val),
+        "rsi_zone_badge": rsi_zones.zone_badge(rsi_val),
         "returns": [r for r in returns if r],
         "chips": [
             rsi_chip(deep.get("rsi_14")),

@@ -46,7 +46,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import contract, counterpoints, diff, home, icons, ideas, inline_md, ingest, jobs, md_render, position_state, program_edge, red_flags, report_parser, setups, tech_card, unified_card
+from . import contract, counterpoints, diff, home, icons, ideas, inline_md, ingest, jobs, md_render, position_state, program_edge, red_flags, report_parser, rsi_zones, setups, tech_card, unified_card
 from .chips import (
     clear_recs_cache,
     parkev_chip_renderer,
@@ -76,6 +76,10 @@ inline_md.register_jinja_filters(templates.env)
 # Pretty-print option contract symbols (LITE_PUT_660_20260918 →
 # LITE $660P · Sep 18 '26) so action IDs are scannable, not cryptic.
 contract.register_jinja_filters(templates.env)
+# RSI zone filtering (George 2026-08-10) — filter-chip definitions + card
+# zone/badge helpers. Bands come from the pipeline's rsi_discipline via
+# the config bridge; templates only consume what these globals emit.
+rsi_zones.register_jinja_globals(templates.env)
 
 
 # ─── App + shared connection ──────────────────────────────────────────────

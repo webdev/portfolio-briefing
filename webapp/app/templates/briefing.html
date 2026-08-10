@@ -8,6 +8,9 @@
    expand. Shown at the top of the page so users don't have to remember
    what BB 85% or "Death cross" means. #}
 {% from "_macros/tech_legend.html" import tech_legend %}
+{# RSI zone filter (George 2026-08-10) — CSP range vs CC range at a glance.
+   Chip definitions come from the rsi_filter_chips() global (rsi_zones.py). #}
+{% from "_macros/rsi_filter.html" import rsi_filter_bar %}
 {% block title %}Briefing {{ briefing.date.isoformat() }}{% endblock %}
 
 {# Sort chip strip — client-side reorder of a .uc-grid. Default = server
@@ -234,6 +237,9 @@
                 <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('deferred', this)">Deferred</button>
                 <button type="button" class="uc-sort-chip" onclick="ucIdeaFilter('skipped', this)">Skipped</button>
             </div>
+            {# RSI zone filter (George 2026-08-10) — spans all three idea
+               group grids (scoped to this section by app.js). #}
+            {{ rsi_filter_bar('briefing-ideas', '.uc-card') }}
 
             {# ── Rule #43 UX: three sections at descending visual weight.
                Grouping comes from ideas.idea_group (the pipeline's own
@@ -298,6 +304,10 @@
                 52w range · drawdown · returns), computed from this cycle's OHLC pull.
                 Verdicts: short-term = 1-4 weeks, long-term = 3-12 months.
             </p>
+            {# RSI zone filter (George 2026-08-10) — "what is within the CSP
+               range and what is within the covered call range, at a glance."
+               Filters every tech card in this tab across all groups. #}
+            {{ rsi_filter_bar('briefing-technical', '.tech-card') }}
             {% for group in tech_read.groups %}
             <h3 style="margin: 1.25rem 0 .6rem;">{{ group.title }} ({{ group.cards|length }})</h3>
             <div class="tc-grid">

@@ -1,0 +1,29 @@
+{# ─── rsi_filter_bar(key, cards_selector) — RSI zone filter chips ───
+   George (2026-08-10): "I want to see what is within the CSP range and
+   what is within the covered call range, so I can clearly see it at a
+   glance."
+
+   Renders the chip bar for client-side RSI zone filtering (app.js
+   `initRsiFilterBars`). Chip definitions (zones, humanized labels,
+   band-bound titles) come from the backend via the `rsi_filter_chips()`
+   Jinja global (app/rsi_zones.py) — no bands hardcoded here or in JS.
+
+     key            localStorage persistence key (per page/surface)
+     cards_selector CSS selector for the filterable cards, scoped to the
+                    bar's parent element (e.g. '.uc-card', '.tech-card',
+                    '.rep-card')
+
+   Counts are filled live by JS from the data-rsi-zones attributes.
+   Multi-select: clicking chips toggles zones; "All" resets. #}
+{% macro rsi_filter_bar(key, cards_selector) %}
+<div class="uc-sort rsi-filter-bar" data-rsi-key="{{ key }}" data-rsi-cards="{{ cards_selector }}" role="group" aria-label="Filter cards by RSI zone">
+    <span class="uc-sort-label">RSI zone:</span>
+    {% for chip in rsi_filter_chips() %}
+    <button type="button"
+            class="uc-sort-chip rsi-filter-chip{% if chip.zone == 'all' %} uc-sort-active{% endif %}"
+            data-zone="{{ chip.zone }}"
+            title="{{ chip.title }}"
+            aria-pressed="{{ 'true' if chip.zone == 'all' else 'false' }}">{{ chip.label }} (<span class="rsi-count">0</span>)</button>
+    {% endfor %}
+</div>
+{% endmacro %}
