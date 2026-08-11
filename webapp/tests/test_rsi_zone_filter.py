@@ -121,8 +121,14 @@ def test_zone_badge_humanized_and_prioritized():
     b47 = rsi_zones.zone_badge(47.0)
     assert b47["label"] == "🎯 CSP zone"
     assert b47["text"] == "RSI 47 · 🎯 CSP zone"
-    b72 = rsi_zones.zone_badge(72.0)  # blocked_hot outranks cc_zone
-    assert "Overbought" in b72["label"]
+    # George 2026-08-10: "RSI 80 should be CC." Overbought IS prime
+    # covered-call territory — the badge leads with the actionable read
+    # and keeps the heat as a qualifier.
+    b72 = rsi_zones.zone_badge(72.0)
+    assert "CC zone" in b72["label"] and "overbought" in b72["label"]
+    assert b72["zone"] == "cc_zone"
+    b80 = rsi_zones.zone_badge(80.0)
+    assert b80["text"] == "RSI 80 · 📞 CC zone · 🔥 overbought"
     b62 = rsi_zones.zone_badge(62.0)
     assert b62["label"] == "📞 CC zone"
     b30 = rsi_zones.zone_badge(30.0)

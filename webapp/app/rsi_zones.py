@@ -177,6 +177,25 @@ def zone_badge(rsi: float | None) -> dict[str, str] | None:
     if tags == ["unknown"]:
         return None
     meta = _zone_meta()
+    # RSI > put_block means overbought AND prime covered-call territory —
+    # the run-up inflates call premium, which is exactly when the CC
+    # seller gets paid (George 2026-08-10: "RSI 80 should be CC").
+    # Lead with the actionable read; keep the heat as a qualifier.
+    if "blocked_hot" in tags and "cc_zone" in tags:
+        b = bands()
+        label = "📞 CC zone · 🔥 overbought"
+        return {
+            "zone": "cc_zone",
+            "label": label,
+            "text": f"RSI {float(rsi):.0f} · {label}",
+            "tone": "orange",
+            "rep_tone": "amber",
+            "title": (
+                f"RSI > {b['put_block']:.0f} — overbought run-up inflates "
+                "call premium: prime covered-call write zone. No new "
+                "puts or buys (chasing)."
+            ),
+        }
     for zone in _BADGE_PRIORITY:
         if zone in tags:
             m = meta[zone]
