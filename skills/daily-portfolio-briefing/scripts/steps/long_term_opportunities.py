@@ -858,7 +858,15 @@ def generate_long_term_opportunities_step(
     # Snap each LONG_DATED_CSP / LEAP_CALL to a real chain expiration so the
     # briefing renders a concrete date instead of "~75 DTE".
     chains = snapshot_data.get("chains", {}) or {}
-    _enrich_long_dated_dates(op_dicts, chains, target_dte_csp=75, target_dte_leap=365)
+    _enrich_long_dated_dates(
+        op_dicts, chains, target_dte_csp=75, target_dte_leap=365,
+        # Expiration policy (2026-08-10): prefer standard monthly (3rd-Friday)
+        # chain expirations; LEAPs prefer the January or monthly expiration
+        # nearest the target. Off → legacy selection, no kind labels.
+        prefer_monthly=bool(
+            ((config or {}).get("expiration_policy") or {}).get("prefer_monthly")
+        ),
+    )
     # Pull REAL premium/bid/ask from live yfinance chains for each LT_CSP so
     # the briefing doesn't ship spot×2.5% rule-of-thumb estimates.
     _enrich_with_live_premiums(
@@ -1054,13 +1062,18 @@ def _enrich_long_dated_dates(
     target_dte_csp: int = 75,
     target_dte_leap: int = 365,
     chain_match_tolerance_days: int = 21,
+    prefer_monthly: bool = False,
 ) -> None:
     """For each LONG_DATED_CSP / LEAP_CALL, replace '~N DTE' with a real
     expiration date.
 
     Selection rules:
       1. If the snapshot has a chain expiration within `chain_match_tolerance_days`
-         of the target DTE, use it (Friday preferred over Thursday).
+         of the target DTE, use it (Friday preferred over Thursday). With
+         ``prefer_monthly`` (expiration_policy, 2026-08-10), a standard
+         monthly (3rd-Friday) chain expiration in tolerance wins — for a
+         LEAP_CALL, a January OR monthly expiration wins (LEAPs list on the
+         January cycle; institutional OI concentrates there).
       2. Otherwise use the 3rd Friday of the target month — every listed
          equity option has this standard monthly expiration.
 
@@ -1071,6 +1084,15 @@ def _enrich_long_dated_dates(
     from datetime import date, timedelta
 
     today = date.today()
+
+    if prefer_monthly:
+        try:
+            from analysis.expiration_policy import is_monthly as _is_monthly
+        except ImportError:  # pragma: no cover - policy module missing
+            _is_monthly = None
+            prefer_monthly = False
+    else:
+        _is_monthly = None
 
     # Group chain expirations by ticker (chain keys are TICKER_YYYY-MM-DD)
     chain_exps_by_ticker: dict[str, list[str]] = {}
@@ -1108,6 +1130,7 @@ def _enrich_long_dated_dates(
         # Option 1: real chain expiration within tolerance, Friday preferred.
         if ticker in chain_exps_by_ticker:
             candidates = []
+            preferred = []  # monthly (or January for LEAPs) in-tolerance picks
             for e in chain_exps_by_ticker[ticker]:
                 d = date.fromisoformat(e)
                 if d < today:
@@ -1118,7 +1141,15 @@ def _enrich_long_dated_dates(
                 # Friday=4. Prefer Friday over weekday for cleaner ticket.
                 weekday_penalty = 0 if d.weekday() == 4 else 3
                 candidates.append((distance + weekday_penalty, e))
-            if candidates:
+                # Expiration policy: monthly (3rd-Friday) preferred; a
+                # LEAP_CALL also prefers the January-cycle expiration.
+                if prefer_monthly and _is_monthly is not None:
+                    if _is_monthly(d) or (kind == "LEAP_CALL" and d.month == 1):
+                        preferred.append((distance, e))
+            if preferred:
+                preferred.sort()
+                chosen = preferred[0][1]
+            elif candidates:
                 candidates.sort()
                 chosen = candidates[0][1]
 
@@ -1129,7 +1160,15 @@ def _enrich_long_dated_dates(
         actual_dte = (date.fromisoformat(chosen) - today).days
         pretty = date.fromisoformat(chosen).strftime("%a %b %d '%y")
 
-        date_phrase = f"exp {pretty} ({actual_dte} DTE)"
+        # Monthly/weekly kind label — computed from the REAL chosen date
+        # (rule #19); only rendered when the expiration policy is enabled.
+        _kind_seg = ""
+        if prefer_monthly and _is_monthly is not None:
+            _kind = "monthly" if _is_monthly(date.fromisoformat(chosen)) else "weekly"
+            op["exp_kind"] = _kind
+            _kind_seg = f", {_kind}"
+
+        date_phrase = f"exp {pretty} ({actual_dte} DTE{_kind_seg})"
         if op.get("concrete_trade"):
             op["concrete_trade"] = op["concrete_trade"].replace(placeholder, date_phrase)
         if op.get("rationale"):

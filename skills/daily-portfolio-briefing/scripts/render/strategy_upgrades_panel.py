@@ -100,6 +100,22 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         ask = cc.get("ask") or 0
         chain_source = cc.get("chain_source", "estimate_broker_unreachable")
         target_exp = (date.today() + timedelta(days=dte)).strftime("%a %b %d '%y")
+        # Expiration policy (2026-08-10): when the selector recorded the REAL
+        # chain expiration + monthly/weekly kind, render that date (no "~")
+        # with the kind suffix — computed, never assumed (rules #6/#19).
+        # Policy off → exp_kind is None → legacy byte-identical rendering.
+        exp_prefix = "~"
+        kind_seg = ""
+        _exp_iso = cc.get("expiration")
+        if cc.get("exp_kind") and _exp_iso:
+            try:
+                from datetime import datetime as _dt_ep
+                target_exp = _dt_ep.strptime(
+                    str(_exp_iso)[:10], "%Y-%m-%d").strftime("%a %b %d '%y")
+                exp_prefix = ""
+                kind_seg = f", {cc['exp_kind']}"
+            except (ValueError, TypeError):
+                pass
 
         # Real, measured strike geometry — never a hardcoded delta. otm_pct is
         # computed from the actual strike vs spot; delta is the chain's value
@@ -126,8 +142,8 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         badge = "⛔ DEFER (earnings inside window)" if earnings_blocked else header_badge
         lines.append(f"**{symbol} — {int(shares)} shares (no CC yet, {weight:.1f}% NLV)** {badge}{_promo_badge(cc)}")
         lines.append(
-            f"  - SELL {contracts}× {symbol} ${strike:g}C exp ~{target_exp} "
-            f"({dte} DTE, {otm_str}, {delta_str}{anchor_str})"
+            f"  - SELL {contracts}× {symbol} ${strike:g}C exp {exp_prefix}{target_exp} "
+            f"({dte} DTE{kind_seg}, {otm_str}, {delta_str}{anchor_str})"
         )
         if cc.get("rsi_14") is not None:
             lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
@@ -282,9 +298,12 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                     f", at ${float(anchor['price']):g} resistance "
                     f"({source}, {touches_phrase})"
                 )
+            # Monthly/weekly kind label — from the REAL selected expiration
+            # (rule #19); empty when the expiration policy is disabled.
+            _idx_kind_seg = f", {u['exp_kind']}" if u.get("exp_kind") else ""
             lines.append(
                 f"  - SELL {contracts}× {sym} ${strike:g}C exp {exp_fmt} "
-                f"({dte} DTE, {otm_str}, {delta_str}{anchor_str})"
+                f"({dte} DTE{_idx_kind_seg}, {otm_str}, {delta_str}{anchor_str})"
             )
             if u.get("rsi_14") is not None:
                 lines.append(f"  - **RSI:** {u.get('rsi_tag')} — {u.get('rsi_note', '')}")

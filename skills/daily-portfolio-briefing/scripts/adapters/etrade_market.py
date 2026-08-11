@@ -192,6 +192,7 @@ def find_put_strike_near(
     target_dte_min: int = 25,
     target_dte_max: int = 45,
     spot: float = None,
+    prefer_monthly: bool = False,
 ) -> Optional[Dict[str, any]]:
     """Find a real put strike near the target OTM % in the specified DTE band.
 
@@ -201,9 +202,15 @@ def find_put_strike_near(
         target_dte_min: minimum DTE to consider
         target_dte_max: maximum DTE to consider
         spot: current spot price (required for OTM calculation)
+        prefer_monthly: expiration policy (2026-08-10) — prefer the standard
+            monthly (3rd-Friday) expiration within the DTE band, where
+            institutional OI/liquidity concentrates. The band itself is the
+            tenor bound; the preference never selects outside it. False →
+            byte-identical legacy selection.
 
     Returns:
         Dict with keys: strike, expiration, bid, ask, mid, delta
+        (plus exp_kind "monthly"/"weekly" when prefer_monthly is on)
         Or None if no suitable contract found or no chain data available.
     """
     if not spot or spot <= 0:
@@ -229,6 +236,18 @@ def find_put_strike_near(
     target_dte = (target_dte_min + target_dte_max) / 2
     candidates.sort(key=lambda x: abs(x[0] - target_dte))
     chosen_dte, chosen_exp = candidates[0]
+
+    exp_kind = None
+    if prefer_monthly:
+        try:
+            from analysis.expiration_policy import is_monthly as _is_monthly
+            monthlies = [c for c in candidates if _is_monthly(c[1])]
+            if monthlies:
+                # candidates already sorted by target proximity
+                chosen_dte, chosen_exp = monthlies[0]
+            exp_kind = "monthly" if _is_monthly(chosen_exp) else "weekly"
+        except ImportError:  # pragma: no cover - policy module missing
+            exp_kind = None
 
     # Fetch the chain centered around target strike
     target_strike = spot * (1 - target_otm_pct / 100)
@@ -258,7 +277,7 @@ def find_put_strike_near(
     ask = best_put.ask or 0
     mid = (bid + ask) / 2 if bid and ask else ask or bid or 0
 
-    return {
+    out = {
         "strike": best_put.strike,
         "expiration": chosen_exp.isoformat(),
         "bid": bid,
@@ -266,6 +285,9 @@ def find_put_strike_near(
         "mid": mid,
         "delta": best_put.delta,
     }
+    if exp_kind:
+        out["exp_kind"] = exp_kind
+    return out
 
 
 def get_option_chain(

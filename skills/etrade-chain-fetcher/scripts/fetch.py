@@ -130,20 +130,75 @@ def list_expirations(
     return exps
 
 
+def _load_expiration_policy():
+    """Lazy-load the canonical expiration policy (daily-portfolio-briefing).
+
+    _ADAPTER_DIR (daily-portfolio-briefing/scripts) is already on sys.path,
+    so ``analysis.expiration_policy`` resolves. Fail-soft: None on any
+    import problem → callers keep byte-identical legacy selection.
+    """
+    try:
+        from analysis import expiration_policy as _ep  # type: ignore
+        return _ep
+    except Exception:
+        return None
+
+
+def expiration_kind(exp) -> str | None:
+    """"monthly" (3rd-Friday standard) / "weekly" / None if unparseable.
+
+    Delegates to the canonical analysis.expiration_policy module — never a
+    guessed label (rule #19).
+    """
+    _ep = _load_expiration_policy()
+    if _ep is None:
+        return None
+    return _ep.expiration_kind(exp)
+
+
 def choose_expiration(
     symbol: str,
     target_dte: int,
     tolerance_days: int = 14,
     prefer_friday: bool = True,
     cache: ChainCache | None = None,
+    prefer_monthly: bool = False,
+    max_dte: int | None = None,
+    spreads_by_exp: dict | None = None,
+    spread_override_pct: float = 0.5,
 ) -> date | None:
     """Pick the listed expiration closest to today + target_dte.
 
     Returns None if no expiration is within tolerance_days of target.
+
+    ``prefer_monthly`` (expiration_policy.prefer_monthly, 2026-08-10):
+    institutional OI/liquidity concentrates on standard monthly (3rd-Friday)
+    expirations → tighter spreads, better fills, easier rolls. When True, a
+    monthly listed within the tolerance band wins over the nearest weekly
+    (unless measured spreads in ``spreads_by_exp`` show the weekly materially
+    tighter). ``max_dte`` is a hard tenor cap the preference NEVER violates.
+    Default False → byte-identical legacy selection.
     """
     exps = list_expirations(symbol, cache=cache)
     if not exps:
         return None
+
+    if prefer_monthly:
+        _ep = _load_expiration_policy()
+        if _ep is not None:
+            choice = _ep.prefer_monthly_expiration(
+                exps,
+                target_dte=target_dte,
+                band=tolerance_days,
+                spreads_by_exp=spreads_by_exp,
+                spread_override_pct=spread_override_pct,
+                max_dte=max_dte,
+            )
+            if choice is not None:
+                return choice.expiration
+            return None
+        # Policy module unavailable → fall through to legacy selection.
+
     target = date.today() + timedelta(days=target_dte)
 
     def _score(d: date) -> tuple[int, int]:

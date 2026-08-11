@@ -31,6 +31,75 @@ def _fmt_exp_short(exp: str) -> str:
         return str(exp)
 
 
+def _is_monthly_expiration(exp: str) -> bool:
+    """True iff ``exp`` is a standard equity/ETF monthly (3rd Friday).
+
+    Canonical policy lives in daily-portfolio-briefing
+    ``analysis/expiration_policy.py``; this advisor may run as a standalone
+    subprocess, so the identical 3rd-Friday math is applied inline when the
+    canonical module isn't importable.
+    """
+    try:
+        from analysis.expiration_policy import is_monthly  # type: ignore
+        return bool(is_monthly(exp))
+    except Exception:
+        pass
+    from datetime import timedelta
+    try:
+        d = datetime.strptime(str(exp)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return False
+    first = d.replace(day=1)
+    days_to_first_friday = (4 - first.weekday()) % 7  # Friday = weekday 4
+    return d == first + timedelta(days=days_to_first_friday + 14)
+
+
+def _prefer_monthly_roll_exp(
+    default_exp: Optional[str],
+    all_expirations: List[str],
+    dte_by_exp: Dict[str, int],
+    current_exp: Optional[str],
+    current_dte: int,
+    max_tenor_days: Optional[int],
+) -> Optional[str]:
+    """Snap a roll STO-leg target expiration to a nearby standard monthly.
+
+    Expiration policy (2026-08-10): institutional OI/liquidity concentrates
+    on 3rd-Friday monthlies → tighter spreads, easier future rolls. Rules:
+    - only among the chain's REAL listed expirations (rule #6);
+    - never before/at the current expiration (a roll must extend);
+    - never past ``max_tenor_days`` over the current DTE (tenor cap — the
+      monthly preference NEVER violates it);
+    - stay near the legacy pick (within −21d/+35d) so the roll's tenor
+      character is preserved;
+    - a default that is already monthly is untouched.
+    Falls back to ``default_exp`` when no qualifying monthly exists.
+    """
+    if not default_exp or _is_monthly_expiration(default_exp):
+        return default_exp
+    default_dte = dte_by_exp.get(default_exp)
+    if default_dte is None:
+        return default_exp
+    best = None
+    best_dist = None
+    for e in all_expirations:
+        if current_exp and e <= current_exp:  # ISO strings sort by date
+            continue
+        if not _is_monthly_expiration(e):
+            continue
+        dte = dte_by_exp.get(e)
+        if dte is None:
+            continue
+        if dte < default_dte - 21 or dte > default_dte + 35:
+            continue
+        if max_tenor_days is not None and (dte - current_dte) > max_tenor_days:
+            continue
+        dist = abs(dte - default_dte)
+        if best_dist is None or dist < best_dist:
+            best, best_dist = e, dist
+    return best or default_exp
+
+
 @dataclass
 class RollCandidate:
     """Single roll candidate with pricing and strategy."""
@@ -126,6 +195,29 @@ def enumerate_roll_candidates(
                 if current_exp_idx >= 0 and current_exp_idx + 1 < len(all_expirations) else None)
     later_exp = (all_expirations[current_exp_idx + 3]
                  if current_exp_idx >= 0 and current_exp_idx + 3 < len(all_expirations) else None)
+
+    # Expiration policy (2026-08-10, threaded via advise from the briefing's
+    # expiration_policy.prefer_monthly config): snap the OUT-leg targets to a
+    # nearby standard monthly (3rd-Friday) among the chain's REAL expirations.
+    # Bounded by monthly_snap_max_tenor_days (the same cap the ranker
+    # enforces) so the preference never extends past the tenor cap. Absent
+    # config → byte-identical legacy selection.
+    _ep_cfg = (params.get("expiration_policy") or {}) if isinstance(params, dict) else {}
+    if _ep_cfg.get("prefer_monthly"):
+        _dte_by_exp: Dict[str, int] = {}
+        for _cc in chain.get("candidates", []):
+            _e = _cc.get("expirationDate")
+            _dd = _cc.get("daysToExpiry")
+            if _e and _dd is not None and _e not in _dte_by_exp:
+                _dte_by_exp[_e] = int(_dd)
+        _cap = params.get("monthly_snap_max_tenor_days")
+        _cap = int(_cap) if _cap is not None else None
+        next_exp = _prefer_monthly_roll_exp(
+            next_exp, all_expirations, _dte_by_exp,
+            current_exp, current_dte, _cap)
+        later_exp = _prefer_monthly_roll_exp(
+            later_exp, all_expirations, _dte_by_exp,
+            current_exp, current_dte, _cap)
 
     candidate_exps = []
     if is_call:

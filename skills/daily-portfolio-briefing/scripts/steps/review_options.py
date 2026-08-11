@@ -186,8 +186,15 @@ def review_options(
     regime_data: dict,
     directives_active: list,
     snapshot_dir: Path,
+    config: dict | None = None,
 ) -> list:
-    """Review each option position by calling the wheel-roll-advisor skill."""
+    """Review each option position by calling the wheel-roll-advisor skill.
+
+    ``config`` (briefing.yaml params, optional): threads the
+    ``expiration_policy`` block into the advisor context so roll-candidate
+    STO legs prefer standard monthly (3rd-Friday) expirations
+    (2026-08-10). ``None`` → legacy behavior exactly.
+    """
     options_reviews = []
     positions = snapshot_data.get("positions", [])
     open_orders = snapshot_data.get("open_orders", [])
@@ -234,6 +241,15 @@ def review_options(
         # Cross-reference open orders before calling advisor
         if contract_label in open_order_symbols:
             advisor_input["context"]["existingOpenOrder"] = True
+
+        # Expiration policy (2026-08-10): thread prefer-monthly into the
+        # advisor so roll-candidate STO legs prefer standard monthly
+        # (3rd-Friday) expirations within the existing tenor caps.
+        _ep_cfg = ((config or {}).get("expiration_policy") or {})
+        if _ep_cfg.get("prefer_monthly"):
+            advisor_input["context"]["expiration_policy"] = {
+                "prefer_monthly": True,
+            }
 
         # Real call
         decision = _call_advisor(advisor_input)

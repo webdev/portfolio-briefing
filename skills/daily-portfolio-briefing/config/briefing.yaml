@@ -794,3 +794,14 @@ sector_exposure:
   cap_pct: 35            # wheelhouz sector rule — any sector over this red-flags
   underweight_pct: 5     # sectors at/below this earn the +1 diversification bonus
   cache_ttl_hours: 24    # FMP profile-sector fallback cache TTL (state/.../sector_cache.json)
+
+# 2026-08-10 — Expiration policy (George: "Institutions Trade Monthly Options
+# on the 3rd Friday of each month. We must incorporate this."). PREFERENCE for
+# standard monthly (3rd-Friday) expirations when composing NEW tickets —
+# institutional OI/liquidity concentrates there → tighter spreads, better
+# fills, easier rolls (the PEP Sep 11 weekly bid $0.14/ask $0.45 case). NOT
+# opex-day timing logic. Single source of truth: analysis/expiration_policy.py.
+# prefer_monthly: false → byte-identical legacy selection everywhere.
+expiration_policy:
+  prefer_monthly: true
+  spread_override_pct: 0.5   # weekly wins only if its measured spread% < half the monthly's

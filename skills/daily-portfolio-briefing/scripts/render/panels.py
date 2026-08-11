@@ -2674,6 +2674,17 @@ def render_action_list(
                     return str(s) if s else "?"
             cur_exp_pretty = _fmt_exp(cur_exp)
             new_exp_pretty = _fmt_exp(new_exp_raw)
+            # Monthly/weekly label on the roll's STO leg — computed from the
+            # REAL candidate expiration (rule #19); no-op when the expiration
+            # policy is disabled (legacy byte-identical output).
+            try:
+                from analysis.expiration_policy import label_exp as _lbl_b3, policy_enabled as _pe_b3
+                new_exp_pretty = _lbl_b3(
+                    new_exp_pretty, new_exp_raw,
+                    enabled=_pe_b3((snapshot_data or {}).get("_config", {}) or {}),
+                )
+            except Exception:
+                pass
             # Per-share credit math (broker convention is per-share limit on combos):
             # spread_bid (conservative)   = new_bid - cur_mid
             # spread_mid (target fill)    = new_mid - cur_mid
@@ -3240,9 +3251,14 @@ def render_action_list(
                         cache = mod.ChainCache()
                         # ±60 day tolerance for the 1-year roll target — equity
                         # chains often have quarterly LEAPS rather than every
-                        # week, so a 30-day window can miss.
+                        # week, so a 30-day window can miss. Expiration policy
+                        # (2026-08-10): prefer the standard monthly / LEAP-cycle
+                        # (3rd-Friday) expiration in the band.
+                        _ep_cfg = ((snapshot_data or {}).get("_config", {}) or {}
+                                   ).get("expiration_policy") or {}
                         target_exp = mod.choose_expiration(
                             symbol=underlying, target_dte=365, tolerance_days=60, cache=cache,
+                            prefer_monthly=bool(_ep_cfg.get("prefer_monthly")),
                         )
                         if target_exp and cur_strike_local:
                             same_strike_quote = mod.quote_contract(
@@ -3268,6 +3284,20 @@ def render_action_list(
                 f"diagonal-up or same-strike calendar roll."
             )
 
+            # Monthly/weekly kind labeler for the roll STO legs — computed
+            # from the REAL selected chain date (rule #19); no-op when the
+            # expiration policy is disabled (legacy byte-identical output).
+            def _label_roll_exp(pretty: str, exp_iso_s: str) -> str:
+                try:
+                    from analysis.expiration_policy import label_exp, policy_enabled
+                    return label_exp(
+                        pretty, exp_iso_s,
+                        enabled=policy_enabled(
+                            (snapshot_data or {}).get("_config", {}) or {}),
+                    )
+                except Exception:
+                    return pretty
+
             # Concrete order tickets with real bid/mid/ask
             if same_strike_quote:
                 exp_iso = same_strike_quote["expiration"]
@@ -3276,6 +3306,7 @@ def render_action_list(
                     exp_pretty = datetime.strptime(exp_iso, "%Y-%m-%d").strftime("%a %b %d '%y")
                 except Exception:
                     pass
+                exp_pretty = _label_roll_exp(exp_pretty, exp_iso)
                 sto_bid = same_strike_quote["bid"]
                 sto_mid = same_strike_quote["mid"]
                 sto_ask = same_strike_quote["ask"]
@@ -3296,6 +3327,7 @@ def render_action_list(
                     exp_pretty = datetime.strptime(exp_iso, "%Y-%m-%d").strftime("%a %b %d '%y")
                 except Exception:
                     pass
+                exp_pretty = _label_roll_exp(exp_pretty, exp_iso)
                 sto_bid = up_strike_quote["bid"]
                 sto_mid = up_strike_quote["mid"]
                 sto_ask = up_strike_quote["ask"]
@@ -3456,8 +3488,20 @@ def render_action_list(
                     if _mod.is_available():
                         _c = _mod.ChainCache()
                         # Target ~90d DTE within the 120d action-list cap.
+                        # Expiration policy (2026-08-10): prefer the standard
+                        # monthly (3rd-Friday) in the band; the tenor cap
+                        # (roll.max_action_tenor_days) is a hard bound the
+                        # monthly preference NEVER violates.
+                        _cfg_b4 = (snapshot_data or {}).get("_config", {}) or {}
+                        _ep_b4 = _cfg_b4.get("expiration_policy") or {}
+                        _pm_b4 = bool(_ep_b4.get("prefer_monthly"))
+                        _tenor_cap_b4 = int(
+                            (_cfg_b4.get("roll") or {}).get(
+                                "max_action_tenor_days", 120) or 120)
                         _target_exp = _mod.choose_expiration(
                             symbol=_und_g, target_dte=90, tolerance_days=45, cache=_c,
+                            prefer_monthly=_pm_b4,
+                            max_dte=_tenor_cap_b4 if _pm_b4 else None,
                         )
                         if _target_exp and _spot_g:
                             _qd = None
@@ -3509,6 +3553,15 @@ def render_action_list(
                                     sto_exp_pretty = _dtR.strptime(str(_exp_iso)[:10], "%Y-%m-%d").strftime("%a %b %d '%y")
                                 except Exception:
                                     sto_exp_pretty = str(_exp_iso)
+                                # Monthly/weekly label from the REAL selected
+                                # date (rule #19); no-op when policy disabled.
+                                try:
+                                    from analysis.expiration_policy import label_exp as _lbl_ep
+                                    if _pm_b4:
+                                        sto_exp_pretty = _lbl_ep(
+                                            sto_exp_pretty, _exp_iso, enabled=True)
+                                except Exception:
+                                    pass
                                 try:
                                     _ed = _dtR.strptime(str(_exp_iso)[:10], "%Y-%m-%d").date()
                                     from datetime import date as _dateR
@@ -4340,10 +4393,16 @@ def render_action_list(
                 continue
             _lt_warning = _lt_gate.get("warning")
 
-            # Query live E*TRADE chain for put near 12% OTM, 30-40 DTE
+            # Query live E*TRADE chain for put near 12% OTM, 30-40 DTE.
+            # Expiration policy (2026-08-10): prefer the standard monthly
+            # (3rd-Friday) inside the band — the PEP Sep 11 weekly
+            # ($0.14/$0.45, 107% spread) case; the band is the tenor bound.
             chain_data = find_put_strike_near(
                 ticker, target_otm_pct=12.0, target_dte_min=25,
-                target_dte_max=40, spot=spot
+                target_dte_max=40, spot=spot,
+                prefer_monthly=bool(
+                    (config_local.get("expiration_policy") or {}).get("prefer_monthly")
+                ),
             )
             if not chain_data:
                 # No live chain available — suppress recommendation
@@ -4442,9 +4501,17 @@ def render_action_list(
             # and the explainer line below states the stock's CURRENT state
             # explicitly. Internal kind stays PULLBACK_CSP (label aliased in
             # briefing_diff/capital-planner so keys/kinds are unchanged).
+            # Expiration policy label: when the selector recorded the kind,
+            # render weekday+YEAR + "(monthly)"/"(weekly)" (rules #6/#19);
+            # policy off → legacy byte-identical string.
+            if chain_data.get("exp_kind"):
+                _csp_exp_txt = (exp_date.strftime("%a %b %d '%y")
+                                + f" ({chain_data['exp_kind']})")
+            else:
+                _csp_exp_txt = exp_date.strftime('%a %b %d')
             _csp_header = (
                 f"{n}. **CSP — PAID-TO-WAIT** {ticker} — sell ${target_strike:g}P "
-                f"exp {exp_date.strftime('%a %b %d')} for ${est_premium:.2f} premium "
+                f"exp {_csp_exp_txt} for ${est_premium:.2f} premium "
                 f"(would re-acquire 100 shares @ {(target_strike/spot - 1)*100:.0f}% below spot)"
             )
             # Rule #46: non-fresh RSI vintages carry their read inline so the

@@ -313,7 +313,8 @@ def main():
         # Step 5: Review options
         print("[Step 5] Reviewing options book...")
         options_reviews = review_options(
-            snapshot_data, regime_data, directives_active, snapshot_dir
+            snapshot_data, regime_data, directives_active, snapshot_dir,
+            config=config,
         )
 
         # Step 5.5: Portfolio capacity gates — hard blocks on new short-put
@@ -409,6 +410,11 @@ def main():
             ttl_hours=24,
             parallel=bool(_ts_cfg.get("parallel", True)),
             max_workers=int(_ts_cfg.get("max_workers", 8)),
+            # Expiration policy (2026-08-10): prefer standard monthly
+            # (3rd-Friday) expirations for CSP entry tickets.
+            prefer_monthly=bool(
+                (config.get("expiration_policy") or {}).get("prefer_monthly")
+            ),
         )
 
         # Step 7.4: Fill reconciliation + recommendation aging (spec Step 7.5).

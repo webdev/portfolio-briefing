@@ -51,15 +51,29 @@ MIN_DTE = 25
 MAX_DTE = 50
 
 
-def _next_monthly_expiration(available: list[date]) -> date | None:
+def _next_monthly_expiration(
+    available: list[date],
+    prefer_monthly: bool = False,
+    today: date | None = None,
+) -> date | None:
     """Pick the closest expiration in MIN_DTE..MAX_DTE. Returns date or None.
+
+    Despite the historical name, the legacy behavior picks the expiration
+    NEAREST 35 DTE regardless of weekly/monthly — which is how the PEP ticket
+    landed on Sep 11 '26 (a 2nd-Friday weekly, bid $0.14/ask $0.45, 107%
+    spread) while the Sep 18 monthly sat in the same band. With
+    ``prefer_monthly=True`` (config ``expiration_policy.prefer_monthly``),
+    a standard monthly (3rd-Friday) among the qualifying candidates wins;
+    the nearest-to-35 fallback is unchanged when no monthly qualifies.
 
     Args:
         available: list of date objects (from pyetrade get_option_expirations)
+        prefer_monthly: prefer 3rd-Friday standard monthlies among candidates
+        today: injectable for tests; defaults to date.today()
     """
     if not available:
         return None
-    today = date.today()
+    today = today or date.today()
     candidates = []
     for d in available:
         if not isinstance(d, date):
@@ -77,6 +91,15 @@ def _next_monthly_expiration(available: list[date]) -> date | None:
                 candidates.append((d, dte))
     if not candidates:
         return None
+    if prefer_monthly:
+        try:
+            from analysis.expiration_policy import is_monthly
+            monthlies = [c for c in candidates if is_monthly(c[0])]
+            if monthlies:
+                monthlies.sort(key=lambda c: abs(c[1] - 35))
+                return monthlies[0][0]
+        except ImportError:  # pragma: no cover - policy module missing
+            pass
     # Prefer one closest to 35 DTE (sweet spot)
     candidates.sort(key=lambda c: abs(c[1] - 35))
     return candidates[0][0]
@@ -205,7 +228,8 @@ def _pick_csp_strike(put_rows: list, spot: float,
     return rows[0]
 
 
-def _fetch_chain_with_timeout(target_underlying: str, timeout_s: float) -> tuple | None:
+def _fetch_chain_with_timeout(target_underlying: str, timeout_s: float,
+                              prefer_monthly: bool = False) -> tuple | None:
     """Fetch (expirations, exp_date, put_rows) via pyetrade with timeout.
 
     Returns:
@@ -218,7 +242,7 @@ def _fetch_chain_with_timeout(target_underlying: str, timeout_s: float) -> tuple
     if expirations is None or not expirations:
         return ("ERROR", "no_expirations", None)
 
-    exp_date = _next_monthly_expiration(expirations)
+    exp_date = _next_monthly_expiration(expirations, prefer_monthly=prefer_monthly)
     if exp_date is None:
         return ("ERROR", "no_acceptable_expiration", None)
 
@@ -242,14 +266,16 @@ def _fetch_chain_with_timeout(target_underlying: str, timeout_s: float) -> tuple
 
 
 def _build_concrete_idea(rec: dict, spot: float, target_underlying: str,
-                         mv_ladder: dict | None = None) -> dict | None:
+                         mv_ladder: dict | None = None,
+                         prefer_monthly: bool = False) -> dict | None:
     """Fetch the chain for the recommendation's ticker and pick a concrete CSP.
 
     Returns:
         Complete idea dict with strike/expiration/premium/yield on success
         None if no tradable contract found
     """
-    fetched = _fetch_chain_with_timeout(target_underlying, PER_TICKER_TIMEOUT_S)
+    fetched = _fetch_chain_with_timeout(target_underlying, PER_TICKER_TIMEOUT_S,
+                                        prefer_monthly=prefer_monthly)
     if fetched is None:
         return None  # timeout; skip this candidate
     if isinstance(fetched, tuple) and len(fetched) == 3 and fetched[0] == "ERROR":
@@ -280,6 +306,19 @@ def _build_concrete_idea(rec: dict, spot: float, target_underlying: str,
     exp_pretty = exp_date.strftime("%a %b %d '%y").replace(" 0", " ")
     exp_iso = exp_date.isoformat()
 
+    # Monthly/weekly kind — computed from the REAL selected chain date
+    # (rules #6/#19), rendered as a ticket-label suffix only when the
+    # expiration policy is enabled (legacy output otherwise).
+    exp_kind = None
+    if prefer_monthly:
+        try:
+            from analysis.expiration_policy import expiration_kind
+            exp_kind = expiration_kind(exp_date)
+            if exp_kind:
+                exp_pretty = f"{exp_pretty} ({exp_kind})"
+        except ImportError:  # pragma: no cover - policy module missing
+            exp_kind = None
+
     delta_str = f"~{abs(abs_delta):.2f}" if abs_delta is not None else "N/A"
 
     return {
@@ -294,6 +333,7 @@ def _build_concrete_idea(rec: dict, spot: float, target_underlying: str,
         "strike": round(strike, 2),
         "expiration": exp_iso,
         "expiration_pretty": exp_pretty,
+        "exp_kind": exp_kind,
         "dte": dte,
         "contracts": contracts,
         "bid": round(bid, 2),
@@ -345,6 +385,13 @@ def generate_new_ideas(
     ideas: list = []
     regime = (regime_data or {}).get("regime", "NORMAL")
     suppress_longs = regime in ("RISK_OFF", "CAUTION")
+
+    # Expiration policy (2026-08-10) — prefer standard monthly (3rd-Friday)
+    # expirations where institutional OI/liquidity concentrates (the PEP
+    # Sep 11 weekly $0.14/$0.45 case). Config-gated; off → legacy selection.
+    _prefer_monthly = bool(
+        (((config or {}).get("expiration_policy")) or {}).get("prefer_monthly")
+    )
 
     # Portfolio capacity gates — CLOSED means no new CSP entries anywhere
     # (06-wheel-parameters.md §7A). Emit one blocked note, not zero ideas,
@@ -436,7 +483,8 @@ def generate_new_ideas(
         # candidate only — task #46; gates below are untouched)
         ticker_start = _time.monotonic()
         idea = _build_concrete_idea(rec, spot, ticker,
-                                    mv_ladder=_mv_ladders.get(ticker))
+                                    mv_ladder=_mv_ladders.get(ticker),
+                                    prefer_monthly=_prefer_monthly)
         ticker_elapsed = _time.monotonic() - ticker_start
 
         # Look up RSI(14) for this underlying once and route through the central

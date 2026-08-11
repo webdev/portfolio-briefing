@@ -293,6 +293,8 @@ def _etrade_call_quote(
     target_delta: float = 0.25,
     delta_tolerance: float = 0.12,
     sr_resistances: list | None = None,
+    prefer_monthly: bool = False,
+    max_dte: int | None = None,
 ) -> dict | None:
     """Pull a covered-call quote via the canonical E*TRADE chain fetcher.
 
@@ -320,11 +322,29 @@ def _etrade_call_quote(
     mod, cache = _load_chain_fetcher()
     if mod is None:
         return None
+    # Monthly preference (expiration_policy.prefer_monthly) — a standard
+    # 3rd-Friday monthly within the band wins for liquidity; ``max_dte``
+    # (the tier / index DTE envelope cap) is NEVER violated by it.
     exp_date = mod.choose_expiration(
-        symbol=symbol, target_dte=target_dte, tolerance_days=14, cache=cache
+        symbol=symbol, target_dte=target_dte, tolerance_days=14, cache=cache,
+        prefer_monthly=prefer_monthly, max_dte=max_dte,
     )
     if exp_date is None:
         return None
+    # Kind label from the REAL selected date (rule #19) — attached to every
+    # quote path below via _tag_kind; None when policy is off or the fetcher
+    # stub doesn't expose expiration_kind.
+    _exp_kind = None
+    if prefer_monthly and hasattr(mod, "expiration_kind"):
+        try:
+            _exp_kind = mod.expiration_kind(exp_date)
+        except Exception:
+            _exp_kind = None
+
+    def _tag_kind(quote: dict | None) -> dict | None:
+        if quote is not None and _exp_kind:
+            quote["exp_kind"] = _exp_kind
+        return quote
     # Delta-band first — adapts strike distance to each name's volatility.
     q = mod.find_strike_near_delta(
         symbol=symbol,
@@ -374,11 +394,11 @@ def _etrade_call_quote(
                     if snapped:
                         snapped["selected_by"] = "sr_anchor"
                         snapped["sr_anchor"] = anchor
-                        return snapped
+                        return _tag_kind(snapped)
                     # Chain didn't list that exact strike — keep the delta pick
                     # but record that we considered an anchor for transparency.
                     q["sr_anchor"] = None
-        return q
+        return _tag_kind(q)
     # Fallback: nearest strike ~N% OTM (chain had no usable deltas). delta=None.
     q = mod.find_strike_at_otm_pct(
         symbol=symbol,
@@ -391,7 +411,7 @@ def _etrade_call_quote(
     if q:
         q["selected_by"] = "otm_pct"
         q["sr_anchor"] = None
-    return q
+    return _tag_kind(q)
 
 
 def compute_strategy_upgrades(
@@ -841,6 +861,12 @@ def compute_strategy_upgrades(
             target_dte=target_dte, target_delta=cc_target_delta,
             delta_tolerance=cc_delta_tol,
             sr_resistances=sr_resistances,
+            # Monthly preference within the tier's DTE envelope — the tier
+            # max_dte cap is a hard bound the preference never violates.
+            prefer_monthly=bool(
+                (params.get("expiration_policy") or {}).get("prefer_monthly")
+            ),
+            max_dte=tier_max_dte,
         )
 
         # Real, measured values — never a hardcoded/fabricated delta. delta may
@@ -1031,6 +1057,10 @@ def compute_strategy_upgrades(
             "current_price": round(price, 2),
             "target_strike": float(target_strike),
             "target_dte": actual_dte,
+            # Real selected chain expiration + monthly/weekly kind (rules
+            # #6/#19) — kind is only set when expiration_policy is enabled.
+            "expiration": (chain_quote.get("expiration") if chain_quote else None),
+            "exp_kind": (chain_quote.get("exp_kind") if chain_quote else None),
             "target_delta": (round(abs(float(cc_delta)), 2) if cc_delta is not None else None),
             "otm_pct": (round(otm_pct_actual, 1) if otm_pct_actual is not None else None),
             "strike_selected_by": strike_selected_by,
@@ -1190,6 +1220,12 @@ def compute_strategy_upgrades(
                 target_delta=float(idx_cfg.get("target_delta", 0.18)),
                 delta_tolerance=float(idx_cfg.get("delta_tolerance", 0.07)),
                 sr_resistances=sr_resistances,
+                # Monthly preference within the index DTE window — idx_max_dte
+                # is a hard cap the preference never violates.
+                prefer_monthly=bool(
+                    (params.get("expiration_policy") or {}).get("prefer_monthly")
+                ),
+                max_dte=idx_max_dte,
             )
 
             # Real DTE from the ACTUAL selected expiration (rule #19); a
@@ -1240,6 +1276,9 @@ def compute_strategy_upgrades(
                 "chain_source": "etrade_live",
                 "target_strike": target_strike,
                 "expiration": chain_quote.get("expiration"),
+                # Monthly/weekly kind from the REAL selected date (rule #19);
+                # None when the expiration policy is disabled.
+                "exp_kind": chain_quote.get("exp_kind"),
                 "target_dte": actual_dte,
                 "target_delta": (
                     round(abs(float(idx_delta)), 2) if idx_delta is not None else None

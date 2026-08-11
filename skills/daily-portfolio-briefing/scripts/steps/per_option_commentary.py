@@ -327,6 +327,20 @@ def render_watch_with_commentary(
             # 🚨-urgent check can inspect it).
             commentary = generate_commentary(review, snapshot_data, equity_reviews)
 
+            # Monthly opex-week awareness (2026-08-10, informational and
+            # non-directional — rule #9): a position expiring on a standard
+            # monthly (3rd Friday) gets ONE mechanics line during its final
+            # week. Gated on expiration_policy.prefer_monthly; fail-open →
+            # no line, never a fabricated one.
+            _opex_line = None
+            try:
+                from analysis.expiration_policy import (
+                    opex_week_line, policy_enabled)
+                if policy_enabled((snapshot_data or {}).get("_config", {}) or {}):
+                    _opex_line = opex_week_line(exp)
+            except Exception:
+                _opex_line = None
+
             # ── Compact mode (2026-08-06): HOLD-family, nothing urgent →
             # ONE summary line (position · P&L · capture % · verdict + one-
             # phrase why). The position is always present — never dropped.
@@ -349,6 +363,8 @@ def render_watch_with_commentary(
                 if why:
                     summary += f" — {_truncate_phrase(why)}"
                 lines.append(summary)
+                if _opex_line:
+                    lines.append(f"  • {_opex_line}")
                 lines.append("")
                 continue
 
@@ -358,6 +374,10 @@ def render_watch_with_commentary(
             if pl_dollars is not None and pl_pct is not None:
                 lines.append(f"  P&L: +${pl_dollars:,.0f} ({pl_pct:+.0f}%) | {dte}d left" if pl_dollars > 0
                             else f"  P&L: ${pl_dollars:,.0f} ({pl_pct:.0f}%) | {dte}d left")
+
+            # Monthly opex-week note (informational, non-directional)
+            if _opex_line:
+                lines.append(f"  • {_opex_line}")
 
             # Disciplined RSI read for this short position (context, never a gate)
             rsi_note = _rsi_management_note(opt_rsi, opt_type, qty)

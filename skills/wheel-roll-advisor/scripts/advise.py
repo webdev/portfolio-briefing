@@ -145,7 +145,24 @@ def advise(
     roll_warnings: List[str] = []
     if enumerate:
         try:
-            roll_candidates = enumerate_roll_candidates(position, chain, params)
+            # Expiration policy (2026-08-10): when the caller's context carries
+            # expiration_policy.prefer_monthly, the enumerator prefers standard
+            # monthly (3rd-Friday) STO-leg expirations — bounded by the SAME
+            # tenor cap the ranker enforces (context max_tenor_days override,
+            # else 360 core / 120 non-core), so the monthly preference can
+            # NEVER extend a candidate past the cap.
+            _enum_params = params
+            _ep_ctx = (context.get("expiration_policy")
+                       if isinstance(context, dict) else None)
+            if isinstance(_ep_ctx, dict) and _ep_ctx.get("prefer_monthly"):
+                _ctx_tenor_e = (context.get("max_tenor_days")
+                                if isinstance(context, dict) else None)
+                _core_e = bool(context.get("is_core")) if isinstance(context, dict) else False
+                _cap_e = (int(_ctx_tenor_e) if _ctx_tenor_e is not None
+                          else (360 if _core_e else 120))
+                _enum_params = {**params, "expiration_policy": _ep_ctx,
+                                "monthly_snap_max_tenor_days": _cap_e}
+            roll_candidates = enumerate_roll_candidates(position, chain, _enum_params)
         except Exception as _e:
             roll_warnings.append(f"roll_enumeration_failed: {type(_e).__name__}: {_e}")
 

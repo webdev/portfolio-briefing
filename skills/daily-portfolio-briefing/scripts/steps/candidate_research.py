@@ -296,9 +296,12 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
             drift_s = (f" · ⚠ spot moved {drift:+.1f}% since chain fetch — verify quote"
                        if abs(drift) > _SPOT_DRIFT_REPRICE_PCT else "")
             tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (CSP):** "
+            # Monthly/weekly kind — computed at selection time from the REAL
+            # chain date (rule #19); absent when the policy is disabled.
+            _kind_seg = f", {q['exp_kind']}" if q.get("exp_kind") else ""
             out.append(
                 f"  - {tag}SELL 1× {tk} ${q.get('strike', 0):g}P exp **{exp}** "
-                f"({q.get('dte', '?')} DTE) · mid ${q.get('mid', 0):.2f} "
+                f"({q.get('dte', '?')} DTE{_kind_seg}) · mid ${q.get('mid', 0):.2f} "
                 f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}{drift_s}"
             )
         elif (r.get("verdict") or "").upper().startswith("BUY"):

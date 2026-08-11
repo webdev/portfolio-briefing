@@ -75,6 +75,7 @@ def run_thematic_research(
     ttl_hours: int = 24,
     parallel: bool = True,
     max_workers: int = 8,
+    prefer_monthly: bool = False,
 ) -> dict | None:
     """Run the scout and return the results dict. Cache to disk for ttl_hours.
 
@@ -115,6 +116,10 @@ def run_thematic_research(
     verdict_cfg.setdefault("csp_target_otm_pct", 10)
     verdict_cfg.setdefault("csp_target_dte", 35)
     verdict_cfg.setdefault("iv_rank_elevated", 50)
+    # Expiration policy (2026-08-10): prefer standard monthly (3rd-Friday)
+    # expirations for CSP entry tickets. Driven by briefing.yaml
+    # `expiration_policy.prefer_monthly` (theme_universes.yaml may override).
+    verdict_cfg.setdefault("prefer_monthly_expiration", bool(prefer_monthly))
 
     recs_map = recs_map or {}
     held_weights = held_weights or {}
@@ -654,9 +659,12 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4,
                     exp_pretty = _date.fromisoformat(q["expiration"]).strftime("%a %b %d '%y")
                 except (ValueError, KeyError, TypeError):
                     pass
+                # Monthly/weekly kind — computed at selection time from the
+                # REAL chain date (rule #19); absent when policy disabled.
+                _kind_seg = f", {q['exp_kind']}" if q.get("exp_kind") else ""
                 lines.append(
                     f"  - **CSP entry:** SELL 1× {r['ticker']} ${q.get('strike', 0):g}P "
-                    f"exp **{exp_pretty}** ({q.get('dte', '?')} DTE) · "
+                    f"exp **{exp_pretty}** ({q.get('dte', '?')} DTE{_kind_seg}) · "
                     f"mid ${q.get('mid', 0):.2f} "
                     f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) "
                     f"· _Source: Live E*TRADE chain_"

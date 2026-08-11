@@ -361,17 +361,25 @@ def _fetch_earnings_date(ticker: str) -> str | None:
 # E*TRADE chain lookup for CSP entry
 # --------------------------------------------------------------------------
 
-def _csp_entry_quote(ticker: str, spot: float, otm_pct: float, target_dte: int) -> dict | None:
+def _csp_entry_quote(ticker: str, spot: float, otm_pct: float, target_dte: int,
+                     prefer_monthly: bool = False) -> dict | None:
     """Look up the closest CSP strike via the canonical E*TRADE chain fetcher.
 
     Returns {strike, bid, mid, ask, expiration, dte} or None if E*TRADE
     is unreachable / no strike near target.
+
+    ``prefer_monthly`` (2026-08-10 expiration policy): prefer the standard
+    monthly (3rd-Friday) expiration within the DTE band — institutional
+    OI/liquidity concentrates there (tighter spreads, better fills). The
+    quote gains ``exp_kind`` ("monthly"/"weekly") computed from the REAL
+    selected chain date so renderers can label the ticket (rule #19).
     """
     mod, cache = _load_chain_fetcher()
     if mod is None or cache is None:
         return None
     exp_date = mod.choose_expiration(
-        symbol=ticker, target_dte=target_dte, tolerance_days=14, cache=cache
+        symbol=ticker, target_dte=target_dte, tolerance_days=14, cache=cache,
+        prefer_monthly=prefer_monthly,
     )
     if exp_date is None:
         return None
@@ -383,6 +391,11 @@ def _csp_entry_quote(ticker: str, spot: float, otm_pct: float, target_dte: int) 
         return None
     # Add DTE for convenience
     quote["dte"] = (exp_date - date.today()).days
+    if prefer_monthly and hasattr(mod, "expiration_kind"):
+        try:
+            quote["exp_kind"] = mod.expiration_kind(exp_date)
+        except Exception:
+            pass
     return quote
 
 
@@ -616,6 +629,7 @@ def _research_ticker(ticker: str, theme: str, cfg: dict,
                 ticker=ticker, spot=res.spot,
                 otm_pct=cfg["csp_target_otm_pct"],
                 target_dte=cfg["csp_target_dte"],
+                prefer_monthly=bool(cfg.get("prefer_monthly_expiration", False)),
             )
             if quote:
                 res.csp_entry = quote
@@ -881,6 +895,9 @@ def main() -> int:
     verdict_cfg.setdefault("csp_target_otm_pct", 10)
     verdict_cfg.setdefault("csp_target_dte", 35)
     verdict_cfg.setdefault("iv_rank_elevated", 50)
+    # Prefer standard monthly (3rd-Friday) expirations for CSP tickets —
+    # institutional OI/liquidity (2026-08-10). Standalone CLI default: on.
+    verdict_cfg.setdefault("prefer_monthly_expiration", True)
 
     # Resolve theme keys
     requested = (args.themes or "all").strip()
