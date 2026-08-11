@@ -1156,3 +1156,18 @@ def test_report_parser_extracts_cards_from_real_fixture():
                 # Found a parse — verify structure
                 assert rep.get("sections"), "parser found cards but no sections"
                 break
+
+
+def test_static_assets_are_cache_busted(client):
+    """George (2026-08-10): 'RSI zone filters don't work on the technical
+    read page.' Root cause: fresh HTML (filter chips) + stale cached
+    /static/app.js in the browser — no listener code bound. Static asset
+    URLs must carry a content-hash version param so browsers refetch
+    exactly when the file changes."""
+    r = client.get("/")
+    assert r.status_code == 200
+    import re
+    assert re.search(r'/static/app\.js\?v=[0-9a-f]{10}', r.text), \
+        "app.js must be cache-busted with a content hash"
+    assert re.search(r'/static/app\.css\?v=[0-9a-f]{10}', r.text), \
+        "app.css must be cache-busted with a content hash"

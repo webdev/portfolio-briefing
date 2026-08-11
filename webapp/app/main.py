@@ -67,6 +67,35 @@ from .models import load_briefing
 
 HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
+
+
+def _asset_v(filename: str) -> str:
+    """Cache-busted static URL: /static/app.js?v=<content-hash>.
+
+    Regression guard (George 2026-08-10): 'RSI zone filters don't work on
+    the technical read page' — the server shipped fresh HTML (filter
+    chips) while the browser kept a stale cached /static/app.js with no
+    listener code. Un-versioned static URLs let every JS/CSS deploy go
+    stale in browsers; a content-hash query param forces a refetch
+    exactly when the file changes. Computed lazily and memoized per
+    process so a webapp restart (the deploy step) picks up new hashes.
+    """
+    cached = _asset_v_cache.get(filename)
+    if cached:
+        return cached
+    import hashlib
+    path = HERE / "static" / filename
+    try:
+        digest = hashlib.md5(path.read_bytes()).hexdigest()[:10]
+        url = f"/static/{filename}?v={digest}"
+    except OSError:
+        url = f"/static/{filename}"  # fail-open: unversioned beats broken
+    _asset_v_cache[filename] = url
+    return url
+
+
+_asset_v_cache: dict[str, str] = {}
+templates.env.globals["asset_v"] = _asset_v
 # Register action/severity/state icon helpers as Jinja filters so templates
 # can render visual cues on action verbs (e.g. "🔚 CLOSE", "🛡️ HEDGE").
 icons.register_jinja_filters(templates.env)
