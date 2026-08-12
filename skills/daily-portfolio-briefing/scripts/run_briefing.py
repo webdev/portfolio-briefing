@@ -916,6 +916,20 @@ def main():
         except Exception as _bue:
             print(f"  WARNING: broad-universe screener failed: {_bue}", file=sys.stderr)
 
+        # Entry-timing audit companion (standalone entry_timing_audit.py
+        # output, George 2026-08-12) — pointer only when today's report
+        # already exists next to the briefing or in <skill>/reports/.
+        try:
+            from analysis.entry_audit import companion_pointer as _eta_ptr
+            _eta_name = _eta_ptr(
+                today_date_str, output_path.parent,
+                Path(__file__).resolve().parent.parent / "reports")
+            if _eta_name and _eta_name not in companion_report_names:
+                companion_report_names.append(_eta_name)
+        except Exception as _etae:
+            print(f"  WARNING: entry-audit pointer check failed: {_etae}",
+                  file=sys.stderr)
+
         if is_draft:
             print(f"\nWARNING: Briefing marked as DRAFT due to quality gate issues.")
 
