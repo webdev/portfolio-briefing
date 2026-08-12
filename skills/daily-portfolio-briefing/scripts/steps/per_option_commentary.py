@@ -207,7 +207,8 @@ def _watch_needs_full_block(review: dict, commentary: list[str],
     # Demotion notes: the Watch panel is their ONLY surface — never collapse.
     if (review.get("_roll_gate_demotion") or review.get("_churn_guard_demotion")
             or review.get("_debit_cap_demotion")
-            or review.get("_close_floor_demotion")):
+            or review.get("_close_floor_demotion")
+            or review.get("_redeploy_hold_demotion")):
         return True
     # Advisor's own roll table recommends an actual roll (not A=HOLD).
     rec_id = review.get("recommended_candidate_id")
@@ -414,6 +415,14 @@ def render_watch_with_commentary(
             _floor_note = review.get("_close_floor_demotion")
             if _floor_note:
                 lines.append(f"  • ⏸ _{_floor_note}_")
+            # Redeploy-aware TP (George 2026-08-10: "If we don't have a path
+            # to redeployment, then it doesn't make sense to close it.") —
+            # a yield-motivated winner close held for the 75%+ zone because
+            # the freed collateral has nowhere to go. Watch note with the
+            # measured reason — visible, never hidden (rule #24).
+            _rd_note = review.get("_redeploy_hold_demotion")
+            if _rd_note:
+                lines.append(f"  • {_rd_note}")
             if (opt_type or "").upper() == "PUT" and (qty or 0) < 0:
                 try:
                     from render.panels import _exit_cost_anatomy

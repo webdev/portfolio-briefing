@@ -282,6 +282,42 @@ def aggregate_briefing(
         print(f"[aggregate] exit-verdict persistence failed (non-fatal): "
               f"{_xv_e}", file=_sys.stderr)
 
+    # Redeploy-aware take-profit (George 2026-08-10: "I'm happy to exit
+    # options and close it if we have a path to redeployment.") — pre-collect
+    # the graded CSP setups pool BEFORE the action list renders, so the
+    # winner-close gate can ask "is at least one A/B setup waiting for the
+    # freed collateral?". The full 🏆 spotlight (incl. the CC side from
+    # strategy upgrades) is still collected later; this pre-pass covers the
+    # CSP side, which is what freed put collateral redeploys into. Fail-open:
+    # any error → no pool stashed → the gate falls back to coverage-only
+    # logic (and to legacy behavior when coverage itself is unresolvable).
+    try:
+        from analysis import redeploy_path as _rdp_pre
+        if _rdp_pre.enabled(config):
+            from analysis import setup_grade as _sg_pre
+            if _sg_pre.setup_grade_enabled(config):
+                _pre_scout: list = []
+                for _rows in ((scout_payload or {}).get(
+                        "results_by_theme") or {}).values():
+                    _pre_scout.extend(
+                        [r for r in (_rows or []) if isinstance(r, dict)])
+                snapshot_data["_redeploy_best_setups"] = \
+                    _sg_pre.collect_best_setups(
+                        new_ideas=new_ideas,
+                        long_term_opportunities=long_term_opportunities,
+                        strategy_upgrades=None,
+                        scout_results=_pre_scout,
+                        snapshot_data=snapshot_data,
+                        capacity_tag=None,
+                        gates_closed=(gate_state is not None
+                                      and not getattr(gate_state, "open",
+                                                      True)),
+                        config=config)
+    except Exception as _rdp_e:
+        import sys as _sys
+        print(f"[aggregate] redeploy best-setups pre-pass failed "
+              f"(non-fatal): {_rdp_e}", file=_sys.stderr)
+
     # Generate action list to count items (must happen before header render).
     # Step 7.5: aging_info (fill reconciliation + recommendation aging) is
     # threaded through render_action_list, which mutates it in place with

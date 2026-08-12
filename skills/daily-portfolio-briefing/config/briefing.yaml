@@ -837,3 +837,25 @@ setup_grade:
   spotlight:
     enabled: true
     top_n: 3                   # per side; fewer qualify → show what exists, never pad
+
+# 2026-08-12 — Redeployability-aware take-profit (George 2026-08-10: "I'm
+# happy to exit options and close it if we have a path to redeployment. If
+# we don't have a path to redeployment, then it doesn't make sense to close
+# it."). Yield-motivated winner closes (the 50-65% matrix floors + the
+# time-adjusted fast-winner layer) on SHORT PUTS demote to a visible
+# "⏳ Holding for 75%+" Watch note when the freed collateral has nowhere to
+# go: entry gates closed, the close itself would NOT push coverage back over
+# the capacity floor, and no A/B-graded setup sits above the yield floor
+# today. Risk-driven closes are UNAFFECTED (loss stops, CLOSE NOW,
+# earnings-window exits, gamma escape DTE ≤ 10 @ ≥ 30%, hard ceiling ≥ 85%,
+# crash/tail-risk). With a path, today's behavior is unchanged and the rec
+# line carries the measured path reason ("closing frees $54,000 → coverage
+# 0.51× (gates reopen)" / "2 A/B setups waiting"). The Money Plan's Bank
+# line excludes held winners and Blocked money names them. Fail-open:
+# unresolvable coverage → legacy behavior (missing data never traps winners
+# at a raised floor). Single source of truth:
+# scripts/analysis/redeploy_path.py. enabled: false → byte-identical legacy.
+redeploy_aware_tp:
+  enabled: true
+  hold_target_pct: 0.75   # hold healthy winners toward this capture when no path exists
+  hard_ceiling_pct: 0.85  # ≥ this capture always closes (matches the smart-TP ceiling)

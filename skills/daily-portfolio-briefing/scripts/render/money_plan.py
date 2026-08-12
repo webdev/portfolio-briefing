@@ -425,7 +425,21 @@ def build_money_plan(
         if isinstance(a, dict) and a.get("days_flagged"):
             hedge_days = a["days_flagged"]
 
-    if not (banks or deploys or gated or hedge_nag or mtd):
+    # Redeploy-aware TP (George 2026-08-10: "If we don't have a path to
+    # redeployment, then it doesn't make sense to close it.") — winners the
+    # action list held for the 75%+ zone are NOT banked closes; they show up
+    # in Blocked money so the plan explains why the bank line is smaller.
+    held_for_more = [
+        r for r in (options_reviews or [])
+        if isinstance(r, dict) and r.get("_redeploy_hold_demotion")
+    ]
+    try:
+        _rd_target = float(((config or {}).get("redeploy_aware_tp") or {})
+                           .get("hold_target_pct", 0.75))
+    except (TypeError, ValueError):
+        _rd_target = 0.75
+
+    if not (banks or deploys or gated or hedge_nag or mtd or held_for_more):
         return [], {}
 
     # ── Render (≤6 lines) ────────────────────────────────────────────────
@@ -528,6 +542,12 @@ def build_money_plan(
             f"~${_f(spread_reference.get('spread_bp')):,.0f} BP vs "
             f"${_f(spread_reference.get('csp_collateral')):,.0f} "
             f"cash-secured")
+    if held_for_more:
+        _hl = ", ".join(_contract_label(r) for r in held_for_more[:4])
+        blocked_bits.append(
+            f"{len(held_for_more)} winner"
+            f"{'' if len(held_for_more) == 1 else 's'} held for "
+            f"{_rd_target * 100:.0f}%+ (no redeploy path: {_hl})")
     if hedge_nag and hedge_days:
         blocked_bits.append(
             f"hedge undecided {int(hedge_days)}d — standing question")
@@ -559,6 +579,13 @@ def build_money_plan(
         "theta_per_day": (round(theta_day, 2)
                           if theta_day is not None else None),
         "gated_entry_count": len(gated),
+        # Redeploy-aware TP: winners held for the raised capture floor
+        # because no redeployment path exists (not banked closes).
+        "held_for_more": [
+            {"label": _contract_label(r),
+             "note": r.get("_redeploy_hold_demotion")}
+            for r in held_for_more
+        ],
         # Task #42 — spread-mode BP rollup for gated entries (informational).
         "spread_reference": spread_reference,
         "monthly_unlock": (round(unlock, 2) if unlock is not None else None),

@@ -575,6 +575,16 @@ def render_risk_alerts(
                 f"{_vc_prefix}🎯 {contract} → **⏸ ROLL DEMOTED**: "
                 f"{_truncate_at_word(str(_demotion_note), 120)}"
             )
+        elif rec in ("CLOSE", "CLOSE_FOR_PROFIT") \
+                and rev.get("_redeploy_hold_demotion"):
+            # Redeploy-aware TP (George 2026-08-10): the action list held
+            # this winner for more — the alert must not contradict it with
+            # a bare CLOSE_FOR_PROFIT scream (the AVGO two-surfaces lesson).
+            alerts.append(
+                f"{_vc_prefix}⏳ {contract} → **TP HELD — no redeploy "
+                f"path**: "
+                f"{_truncate_at_word(str(rev.get('_redeploy_hold_demotion')), 120)}"
+            )
         elif rec in actionable_decisions:
             # Task #43 fix 4 (2026-07-31): word-boundary truncation. Observed
             # '🎯 PLTR_PUT_130_20270115 → **ROLL_OUT_AND_DOWN**: 🎯 Strike
@@ -2282,6 +2292,66 @@ def render_action_list(
                         )
                         seen_contracts.add(contract)
                         continue
+                # ── Redeployability-aware take-profit (George 2026-08-10:
+                # "I'm happy to exit options and close it if we have a path
+                # to redeployment. If we don't have a path to redeployment,
+                # then it doesn't make sense to close it.") ─────────────────
+                # A yield-motivated winner close on a SHORT PUT demotes to a
+                # visible "⏳ Holding for 75%+" Watch note when the freed
+                # collateral has nowhere to go: gates closed, the close
+                # itself would NOT reopen them, and no A/B setup is waiting.
+                # Risk-driven closes are exempt and fire exactly as today:
+                # pre-print (earnings ≤ 2d), gamma escape, loss-stop /
+                # crash / tail-risk cells, CLOSE_URGENT verdicts, and the
+                # hard ceiling / hold target (capture already at the raised
+                # floor). Config-gated (redeploy_aware_tp.enabled); fail-open
+                # on unresolvable coverage — missing data never traps a
+                # winner at a raised floor. Source: analysis/redeploy_path.py.
+                _rd_reason = None
+                try:
+                    from analysis import redeploy_path as _rdp
+                    _rd_cfg_all = (snapshot_data or {}).get("_config", {}) or {}
+                    if _rdp.enabled(_rd_cfg_all) \
+                            and (rev.get("type") or "").upper() == "PUT":
+                        _rd_target = _rdp.hold_target_pct(_rd_cfg_all)
+                        _rd_pre_print = (_d2e_close is not None
+                                         and 0 <= _d2e_close <= 2)
+                        _rd_cell = (rev.get("matrix_cell_id") or "").upper()
+                        _rd_risk_cell = any(t in _rd_cell for t in (
+                            "LOSS_STOP", "HARD_CEILING", "GAMMA_ESCAPE",
+                            "EARNINGS_IMMINENT", "CRASH_STOP", "TAIL_RISK"))
+                        _rd_ceiling = (capture_pct
+                                       >= _rdp.hard_ceiling_pct(_rd_cfg_all)
+                                       * 100.0)
+                        if not _ov_anatomy_computed:
+                            try:
+                                _ov_anatomy, _ov_status = _exit_cost_anatomy(
+                                    rev, snapshot_data, equity_reviews,
+                                    date_str, include_near_money=True)
+                                _ov_anatomy_computed = True
+                            except Exception:
+                                pass
+                        _rd_urgent = (_ov_anatomy is not None
+                                      and getattr(_ov_anatomy, "verdict", None)
+                                      == "CLOSE_URGENT")
+                        if not (_rd_pre_print or _gamma_escape or _rd_risk_cell
+                                or _rd_ceiling or _rd_urgent
+                                or capture_pct >= _rd_target * 100.0):
+                            _rd_ok, _rd_why = _rdp.redeployment_path(
+                                analytics,
+                                (snapshot_data or {}).get(
+                                    "_redeploy_best_setups"),
+                                _rdp.close_impact_from_review(rev),
+                                config=_rd_cfg_all)
+                            if not _rd_ok:
+                                rev["_redeploy_hold_demotion"] = _rdp.hold_note(
+                                    capture_pct, _rd_why, _rd_target)
+                                seen_contracts.add(contract)
+                                continue
+                            if _rd_why:
+                                _rd_reason = _rd_why
+                except Exception:
+                    _rd_reason = None  # advisory — never break the list
                 strike = _strike_from_contract(contract, rev.get("strike"))
                 opt_type = (rev.get("type") or "").upper()
                 if opt_type == "PUT" and strike:
@@ -2341,6 +2411,11 @@ def render_action_list(
                     f"   - **Gain:** Locks ${pl_dollars:+,.0f} profit and {collateral_label}; "
                     f"redeploy that collateral into a fresh higher-premium opportunity."
                 )
+                # Redeploy-aware TP: when the gates are closed but a path
+                # exists, the rec line carries the MEASURED path reason
+                # (George 2026-08-10 — the close is justified BY the path).
+                if _rd_reason:
+                    items.append(f"   - **Redeploy path:** {_rd_reason}")
                 # Exit-cost anatomy footer — NEVER silent (2026-08-05 defect
                 # 2): full anatomy when computable (incl. near-money), a
                 # fail-closed "verify at broker" warning with yesterday's
@@ -3623,6 +3698,45 @@ def render_action_list(
                 seen_contracts.add(contract)
                 continue
 
+            # ── Redeployability-aware take-profit (George 2026-08-10) — the
+            # block-#4 twin of the CLOSE WINNERS gate: a yield-motivated
+            # CLOSE_FOR_PROFIT (matrix 50-65% floors, GUARDRAIL_TIME_ADJUSTED
+            # fast-winner layer) on a SHORT PUT demotes to the visible
+            # hold-for-more note when no redeployment path exists.
+            # Risk-driven cells (loss stop, hard ceiling, gamma escape,
+            # earnings imminent, crash, tail risk) and plain CLOSE recs are
+            # exempt and fire exactly as today. Fail-open everywhere.
+            _rd4_reason = None
+            if rec == "CLOSE_FOR_PROFIT":
+                try:
+                    from analysis import redeploy_path as _rdp4
+                    _cfg4 = (snapshot_data or {}).get("_config", {}) or {}
+                    if _rdp4.enabled(_cfg4) \
+                            and (rev.get("type") or "").upper() == "PUT":
+                        _cell4 = (rev.get("matrix_cell_id") or "").upper()
+                        _risk4 = any(t in _cell4 for t in (
+                            "LOSS_STOP", "HARD_CEILING", "GAMMA_ESCAPE",
+                            "EARNINGS_IMMINENT", "CRASH_STOP", "TAIL_RISK"))
+                        _tgt4 = _rdp4.hold_target_pct(_cfg4)
+                        if not _risk4 and profit_pct < _tgt4 * 100.0 \
+                                and profit_pct < (_rdp4.hard_ceiling_pct(
+                                    _cfg4) * 100.0):
+                            _ok4, _why4 = _rdp4.redeployment_path(
+                                analytics,
+                                (snapshot_data or {}).get(
+                                    "_redeploy_best_setups"),
+                                _rdp4.close_impact_from_review(rev),
+                                config=_cfg4)
+                            if not _ok4:
+                                rev["_redeploy_hold_demotion"] = \
+                                    _rdp4.hold_note(profit_pct, _why4, _tgt4)
+                                seen_contracts.add(contract)
+                                continue
+                            if _why4:
+                                _rd4_reason = _why4
+                except Exception:
+                    _rd4_reason = None  # advisory — never break the list
+
             ticket_suffix = ""
             if current_mid and qty:
                 ticket_suffix = (
@@ -3657,6 +3771,8 @@ def render_action_list(
             items.append(
                 f"   - **Gain:** Following the matrix improves expectancy versus discretionary holds. {gain_text}"
             )
+            if _rd4_reason:
+                items.append(f"   - **Redeploy path:** {_rd4_reason}")
             seen_contracts.add(contract)
             n += 1
 
