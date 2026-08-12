@@ -859,3 +859,23 @@ redeploy_aware_tp:
   enabled: true
   hold_target_pct: 0.75   # hold healthy winners toward this capture when no path exists
   hard_ceiling_pct: 0.85  # ≥ this capture always closes (matches the smart-TP ceiling)
+
+# 2026-08-12 — 🎓 Entry Scorecard (George: "can we incorporate these
+# learnings in the daily briefing? i want to make sure we have a running
+# score of our entries."). Persistent ledger
+# (state/entry_grade_ledger.json, atomic writes) of every option entry's
+# Setup Grade, assigned from ENTRY-DAY conditions and LOCKED at first
+# write — the score reflects the day you traded, never regraded. Daily
+# maintenance (run_briefing Step 7.6): seeds retro grades once for
+# pre-existing opens via the entry-audit logic, grades each newly detected
+# open (roll STO legs flagged roll: true), and fills measured outcomes on
+# detected closes (last snapshot mark — labeled estimate, rule #19).
+# Surfaces: the "## 🎓 Entry Scorecard" panel in the benchmark zone of the
+# FULL briefing (running averages, grade distribution, week trend, last 5
+# entries, discipline callouts with config-derived thresholds, and
+# capture-by-grade once ≥3 closed outcomes exist), one bold 🎓 line kept
+# in the digest's Health zone, entry grades on Since-Yesterday detected
+# opens, and briefing_json["entry_scorecard"] for the webapp card.
+# enabled: false → no ledger writes, no panels — byte-identical legacy.
+entry_scorecard:
+  enabled: true

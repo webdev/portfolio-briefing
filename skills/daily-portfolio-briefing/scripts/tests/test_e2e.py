@@ -117,6 +117,10 @@ def test_e2e_full_pipeline(tmp_path, temp_config):
     assert len(briefing_md) > 100
     assert "# Daily Briefing" in briefing_md
     assert briefing_json["regime"] in {"RISK_ON", "NORMAL", "CAUTION", "RISK_OFF"}
+    # George 2026-08-12 — the entry_scorecard JSON key always exists;
+    # {} (and no 🎓 panel) when the flag is off — byte-identical legacy.
+    assert briefing_json["entry_scorecard"] == {}
+    assert "## 🎓 Entry Scorecard" not in briefing_md
 
     # Step 9: Quality gate
     issues = run_quality_gate(briefing_md)

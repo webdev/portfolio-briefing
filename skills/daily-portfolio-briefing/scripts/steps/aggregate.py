@@ -502,6 +502,35 @@ def aggregate_briefing(
         print(f"[aggregate] ignored-rec ledger failed (non-fatal): {_ile}",
               file=_sys.stderr)
 
+    # George 2026-08-12 — 🎓 Entry Scorecard: the RUNNING score of option
+    # entries ("i want to make sure we have a running score of our
+    # entries"). The ledger maintenance ran in run_briefing Step 7.6
+    # (stashed on snapshot_data["entry_ledger_update"]); when aggregate is
+    # driven standalone (tests / re-render) the scorecard is recomputed
+    # READ-ONLY from the persisted ledger — aggregate never writes it.
+    # Config-gated (entry_scorecard.enabled); fail-open: any error → no
+    # panel, JSON key stays {}, briefing ships.
+    entry_scorecard_json: dict = {}
+    _entry_open_grades: dict | None = None
+    try:
+        from analysis import entry_ledger as _el
+        if _el.entry_scorecard_enabled(config):
+            _el_update = snapshot_data.get("entry_ledger_update")
+            if isinstance(_el_update, dict):
+                _el_score = _el_update.get("scorecard")
+                _entry_open_grades = _el_update.get("new_open_grades") or None
+            else:
+                _el_score = _el.compute_scorecard(
+                    _el.load_ledger(_el.default_ledger_path(snapshot_dir)),
+                    date_str, config)
+            if _el_score and _el_score.get("graded"):
+                lines.extend(_el.render_scorecard_panel(_el_score))
+                entry_scorecard_json = _el_score
+    except Exception as _ele:
+        import sys as _sys
+        print(f"[aggregate] entry scorecard failed (non-fatal): {_ele}",
+              file=_sys.stderr)
+
     # Task #41 — 👻 Ghost portfolio: options-stripped counterfactual NAV
     # ("is it the market or my moves?"). Full idempotent recompute from
     # snapshot history each cycle (also persists state/ghost_portfolio.json).
@@ -1155,7 +1184,8 @@ def aggregate_briefing(
                                        recon_status=recon_for_diff,
                                        executed_rolls=_executed_rolls,
                                        today_iso=date_str,
-                                       executed_opens=_executed_opens)
+                                       executed_opens=_executed_opens,
+                                       entry_grades=_entry_open_grades)
         if diff_panel:
             # Insert near the top, after the header but before market context
             # For simplicity, append at the end before manifest
@@ -1715,6 +1745,10 @@ def aggregate_briefing(
         # entry-timing setups ({"csp": [...], "cc": [...]}). {} when the
         # setup_grade flag is off or nothing qualified this cycle.
         "best_setups": best_setups_json,
+        # George 2026-08-12 — 🎓 Entry Scorecard (running entry-grade
+        # ledger: averages / distribution / trend / last-5 / callouts /
+        # capture-by-grade). {} when disabled or nothing graded yet.
+        "entry_scorecard": entry_scorecard_json,
     }
     # Step 7.5: per-action aging — tomorrow's run reads this back for
     # reconciliation (each: {key, kind, ident, summary, first_flagged,

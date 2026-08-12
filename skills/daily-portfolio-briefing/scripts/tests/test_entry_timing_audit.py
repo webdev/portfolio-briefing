@@ -179,16 +179,19 @@ def test_retro_grade_calls_csp_setup_with_entry_day_inputs(
         archive, monkeypatch):
     """The retro grade re-runs the PRODUCTION csp_setup scorer with the
     entry-DATE snapshot's own numbers (not today's)."""
-    captured = {}
+    calls = []
     real = entry_audit._sg.csp_setup
 
     def spy(**kw):
-        captured.update(kw)
+        calls.append(kw)
         return real(**kw)
 
     monkeypatch.setattr(entry_audit._sg, "csp_setup", spy)
     result = _run(archive)
     card = _card(result, KEY)
+    # The best-in-window scan re-grades every window day too; the
+    # ENTRY-day call is the one with the entry date's earnings distance.
+    captured = next(kw for kw in calls if kw["days_to_earnings"] == 49)
     assert captured["rsi"] == 42.0                 # entry-day technicals
     assert captured["iv_rank"] == 71.0             # RV fallback (no IV hist)
     assert captured["iv_rank_source"] == "rv"
@@ -350,3 +353,181 @@ def test_long_leg_gets_na_hedge_grade_but_shows_conditions(archive):
     md = entry_audit.render_markdown(result)
     assert "n/a — hedge/long leg, different objective" in md
     assert "bought" in card["verdict"] or "insufficient" in card["verdict"]
+
+
+# ── (h) Best entry in window ─────────────────────────────────────────────
+# George (2026-08-12): "in your entry timing audit, it would be good to
+# know what would be the best timing, so add a line about how I can
+# figure out the best entry."
+
+
+W_DATES = ["2026-02-02", "2026-02-03", "2026-02-04", "2026-02-05",
+           "2026-02-06", "2026-02-09", "2026-02-10"]
+W_ENTRY = "2026-02-09"   # bad-conditions day (RSI 58 off-band, green)
+W_BEST = "2026-02-04"    # prime day (RSI 41, RVr 75, red, support)
+
+
+def _window_archive(tmp_path, *, best_chain=(4.0, 4.4),
+                    chain_on_best=True):
+    """Archive where the entry day is NOT the best-graded day: 02-04
+    carries prime CSP conditions, the 02-09 entry day is off-band."""
+    root = tmp_path / "snaps"
+    for d in W_DATES:
+        snap = root / d
+        snap.mkdir(parents=True)
+        positions = [_pos(current_mid=5.0, total_gain=50.0)] \
+            if d >= W_ENTRY else []
+        (snap / "positions.json").write_text(json.dumps(positions))
+        if d == W_BEST:
+            rsi, iv, day = 41.0, 75.0, -0.02
+        elif d == W_ENTRY:
+            rsi, iv, day = 58.0, 45.0, 0.01
+        else:
+            rsi, iv, day = 62.0, 45.0, 0.005
+        (snap / "technicals.json").write_text(json.dumps({
+            "NVDA": {"rsi_14": rsi, "iv_rank": iv, "sma_200": 180.0,
+                     "drawdown_pct": 12.0, "spot": 210.0,
+                     "support_resistance": {
+                         "spot": 210.0,
+                         "supports": [{"price": 198.0, "touches": 3,
+                                       "strength": 4.0}],
+                         "resistances": []},
+                     "deep": {"long_term_verdict": "secular-uptrend"}}}))
+        (snap / "quotes.json").write_text(json.dumps(
+            {"NVDA": {"dayChangePct": day}}))
+        (snap / "earnings.json").write_text(json.dumps(
+            {"NVDA": "2026-04-01"}))
+        chains = snap / "chains"
+        chains.mkdir()
+        if d == W_BEST and chain_on_best:
+            bid, ask = best_chain
+            (chains / "NVDA_2026-03-20.json").write_text(json.dumps({
+                "underlying": "NVDA", "expiration": "2026-03-20",
+                "puts": [{"strike": 200.0, "bid": bid, "ask": ask}],
+                "calls": []}))
+    return root
+
+
+def test_best_day_selected_when_better_than_entry(tmp_path):
+    """(a) The scan finds the prime pre-entry day: 02-04 grades A-range
+    while the 02-09 entry grades C/D — the line shows BOTH grades."""
+    result = _run(_window_archive(tmp_path))
+    bw = _card(result, KEY)["best_window"]
+    assert bw["best_date"] == W_BEST
+    assert bw["entry_is_best"] is False
+    assert bw["best_grade"]["letter"] in ("A", "A-")
+    assert bw["best_grade"]["score"] > _card(result, KEY)["grade"]["score"]
+    md = entry_audit.render_markdown(result)
+    assert "📅 Best in window:" in md
+    assert "Feb 4 —" in md
+    assert "You entered Feb 9" in md
+
+
+def test_entry_is_best_day_acknowledged(archive):
+    """(a) When the entry day IS the best-graded day (all window days
+    grade identically here — ties go to the entry), the line says so:
+    '✅ your entry was the best-graded day in the window'."""
+    result = _run(archive)
+    bw = _card(result, KEY)["best_window"]
+    assert bw["entry_is_best"] is True
+    assert bw["best_date"] == ENTRY
+    md = entry_audit.render_markdown(result)
+    assert "✅ your entry was the best-graded day in the window" in md
+
+
+def test_window_clamped_at_archive_edges_noted(tmp_path):
+    """(b) entry ± 10d overruns both archive edges here — the flags are
+    set and the rendered line says the forward side is short (recent
+    entry) rather than silently scanning a full window."""
+    result = _run(_window_archive(tmp_path))
+    bw = _card(result, KEY)["best_window"]
+    assert bw["clamped_fwd"] is True    # 02-09 + 10d > 02-10 archive end
+    assert bw["clamped_back"] is True   # 02-09 − 10d < 02-02 archive start
+    assert bw["window_start"] == W_DATES[0]
+    assert bw["window_end"] == W_DATES[-1]
+    md = entry_audit.render_markdown(result)
+    assert "forward side short — archive ends Feb 10" in md
+    assert "clipped at archive start Feb 2" in md
+
+
+def test_best_day_mid_from_stored_chain(tmp_path):
+    """(c) The contract's mid on the best day comes from the STORED
+    chain (bid 4.0 / ask 4.4 → 4.20) and renders vs the user's fill."""
+    result = _run(_window_archive(tmp_path))
+    bw = _card(result, KEY)["best_window"]
+    assert bw["best_mid"] == pytest.approx(4.2)
+    md = entry_audit.render_markdown(result)
+    assert "Same contract mid on Feb 4: $4.20 vs your $5.49" in md
+
+
+def test_best_day_mid_na_fail_closed(tmp_path):
+    """(c) No stored chain and no position mark on the best day →
+    'mid n/a', never a fabricated premium (rule #19)."""
+    result = _run(_window_archive(tmp_path, chain_on_best=False))
+    bw = _card(result, KEY)["best_window"]
+    assert bw["best_mid"] is None
+    assert bw["premium_tension"] is False
+    md = entry_audit.render_markdown(result)
+    assert "Same contract mid on Feb 4: mid n/a" in md
+
+
+def test_premium_grade_tension_note_only_when_best_mid_lower(tmp_path):
+    """(d) Best-day mid 4.20 < your 5.49 fill → the honest note
+    '(your day paid more — grade measures risk-quality, not premium)'
+    appears; with a best-day mid ABOVE the fill it must NOT."""
+    result = _run(_window_archive(tmp_path))
+    assert _card(result, KEY)["best_window"]["premium_tension"] is True
+    md = entry_audit.render_markdown(result)
+    assert ("(your day paid more — grade measures risk-quality, "
+            "not premium)") in md
+    # best-day mid 6.20 > 5.49 fill → no tension note
+    result2 = _run(_window_archive(tmp_path / "hi", best_chain=(6.0, 6.4)))
+    assert _card(result2, KEY)["best_window"]["premium_tension"] is False
+    md2 = entry_audit.render_markdown(result2)
+    assert "your day paid more" not in md2
+    assert "Same contract mid on Feb 4: $6.20" in md2
+
+
+def test_no_best_window_for_long_legs_and_pre_archive(archive):
+    """The wheel grader's objective doesn't apply to long legs, and a
+    pre-archive open has no measurable window — neither gets the line."""
+    result = _run(archive)
+    assert _card(result, ("META", "PUT", 500.0,
+                          "2026-12-18")).get("best_window") is None
+    assert _card(result, ("AAPL", "PUT", 150.0,
+                          "2026-06-18")).get("best_window") is None
+
+
+# ── (i) Recipe footer — config-derived (rule #19) ────────────────────────
+
+
+def test_recipe_footer_derives_thresholds_from_config():
+    """(e) Every number in '## How to find the best entry' comes from
+    the live config: defaults → 35-45/35-55 band, 40 vol floor, RSI ≥ 70
+    CC prime, 14d earnings; overrides shift every one of them."""
+    txt = "\n".join(entry_audit.recipe_footer(None))
+    assert "## How to find the best entry" in txt
+    assert "35-45 prime band (entry band 35-55)" in txt
+    assert "above the 40 vol floor" in txt
+    assert "≥ 60 reads 'worth selling'" in txt
+    assert "RSI ≥ 70" in txt and "favored above 60" in txt
+    assert "earnings ≥ 14d out" in txt
+    assert "🏆 Best Setups Today" in txt
+    cfg = {"setup_grade": {"vol_floor_rank": 55.0,
+                           "earnings_clear_days": 21},
+           "rsi_discipline": {"put_entry_band": [30, 50]}}
+    txt2 = "\n".join(entry_audit.recipe_footer(cfg))
+    assert "30-40 prime band (entry band 30-50)" in txt2
+    assert "above the 55 vol floor" in txt2
+    assert "≥ 70 reads 'worth selling'" in txt2  # 55 + (100−55)/3
+    assert "earnings ≥ 21d out" in txt2
+
+
+def test_recipe_footer_rendered_in_report(archive):
+    """The report footer ships in render_markdown output, after the
+    caveats, with the tension sentence and the live-answer pointer."""
+    md = entry_audit.render_markdown(_run(archive))
+    assert "## How to find the best entry" in md
+    assert md.index("## How to find the best entry") > md.index("## Caveats")
+    assert "overlap of premium AND conditions" in md
+    assert "A/B means enter, C/D names the missing condition" in md

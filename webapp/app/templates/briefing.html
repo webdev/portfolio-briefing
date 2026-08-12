@@ -57,6 +57,58 @@
 </article>
 {% endif %}
 
+{# George 2026-08-12 — 🎓 Entry Scorecard: running score of option entries
+   (entry_ledger.compute_scorecard via the entry_scorecard JSON key).
+   Grades LOCK at entry — this card is a report, not a recommendation.
+   All strings are pre-humanized by the pipeline; markdown-free (hard
+   rule #30). Hidden when the briefing predates the feature or nothing
+   is graded yet. #}
+{% set _esc = briefing.entry_scorecard or {} %}
+{% if _esc.get("graded") and _esc.get("averages") %}
+<article class="card" id="entry-scorecard" style="margin: 1rem 0 1.5rem; padding: 1rem 1.25rem; border-left: 4px solid var(--color-accent, #4a9);">
+    <header style="margin-bottom: .5rem;"><strong>🎓 Entry Scorecard</strong>
+        <span class="muted" style="font-size: 12px;"> — grades locked to entry-day conditions</span>
+    </header>
+    {% set _av = _esc.get("averages") or {} %}
+    <p style="margin: 0 0 .5rem;">
+        {% for _name, _key in [("Last 10", "last_10"), ("Last 30d", "last_30d"), ("All-time", "all_time")] %}
+        {% set _b = _av.get(_key) %}
+        <span style="margin-right: 1rem;">{{ _name }}:
+            {% if _b %}<strong>{{ _b.get("letter") }}</strong> ({{ "%.0f"|format(_b.get("avg")) }}/100, n={{ _b.get("n") }}){% else %}n/a{% endif %}
+        </span>
+        {% endfor %}
+        {% set _tr = _esc.get("trend") %}
+        {% if _tr %}<span>week trend: {{ "%.0f"|format(_tr.get("this_week")) }} vs {{ "%.0f"|format(_tr.get("prior_week")) }} {{ _tr.get("arrow") }}</span>{% endif %}
+    </p>
+    {% if _esc.get("distribution") %}
+    <p class="muted" style="margin: 0 0 .5rem; font-size: 13px;">
+        Distribution:
+        {% for _l, _n in _esc.get("distribution").items() %}{{ _l }}: {{ _n }}{{ " · " if not loop.last }}{% endfor %}
+    </p>
+    {% endif %}
+    {% if _esc.get("last_5") %}
+    <ul style="margin: 0 0 .5rem; padding-left: 1.1rem; font-size: 13px;">
+        {% for _e in _esc.get("last_5") %}
+        <li>{{ _e.get("label") }} · {{ _e.get("entry_date") }} ·
+            <strong>{{ _e.get("letter") }}</strong>{% if _e.get("score") is not none %} ({{ "%.0f"|format(_e.get("score")) }}/100){% endif %}{% if _e.get("top_driver") %} — {{ _e.get("top_driver") }}{% endif %}{% if _e.get("roll") %} · roll{% endif %}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% for _c in _esc.get("callouts") or [] %}
+    <p style="margin: 0 0 .25rem; font-size: 13px;">⚠ {{ _c }}</p>
+    {% endfor %}
+    {% set _oc = _esc.get("outcome") or {} %}
+    {% if _oc.get("by_bucket") %}
+    <p class="muted" style="margin: 0; font-size: 13px;">
+        Capture by grade (closed, estimates):
+        {% for _b in ["A/B", "C", "D"] %}{% set _v = _oc["by_bucket"].get(_b) %}{% if _v %}{{ _b }}: {{ "%+.0f%%"|format(_v.get("avg_capture_pct")) }} (n={{ _v.get("n") }}) {% endif %}{% endfor %}
+    </p>
+    {% elif _oc.get("n", 0) > 0 %}
+    <p class="muted" style="margin: 0; font-size: 13px;">Outcome sample too small (n={{ _oc.get("n") }}) — capture table renders at {{ _oc.get("min_sample", 3) }}+ closed entries.</p>
+    {% endif %}
+</article>
+{% endif %}
+
 {# Task #13 — technical-indicator legend, collapsible. #}
 {{ tech_legend() }}
 

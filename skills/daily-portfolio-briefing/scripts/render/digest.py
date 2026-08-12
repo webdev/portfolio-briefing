@@ -477,6 +477,19 @@ def _build_digest_inner(full_md: str, config: dict | None,
             out_lines.append(_sector_sum)
             out_lines.append("")
 
+    # 3c. 🎓 Entry Scorecard one-line summary (George 2026-08-12: "i want
+    #     to make sure we have a running score of our entries"). Pure
+    #     subset: the panel's bold ``**🎓 …**`` summary line is kept
+    #     verbatim in the Health zone; the full scorecard stays in the
+    #     full briefing (the pointers block still lists the section).
+    _score_blk = _find(blocks, "entry scorecard")
+    if _score_blk is not None:
+        _score_sum = next((ln for ln in _score_blk["lines"]
+                           if ln.startswith("**🎓")), None)
+        if _score_sum:
+            out_lines.append(_score_sum)
+            out_lines.append("")
+
     # 4. Today's Action List — kept in full (minus standalone italic
     #    transparency footers). Watch-panel URGENT/CLOSE/ROLL items surface
     #    here by design, so the digest never loses an action.

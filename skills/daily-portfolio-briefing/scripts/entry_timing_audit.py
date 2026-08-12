@@ -68,7 +68,7 @@ def main(argv: list | None = None) -> int:
         print(f"ERROR: {result['error']}", file=sys.stderr)
         return 1
 
-    md = entry_audit.render_markdown(result)
+    md = entry_audit.render_markdown(result, config=config)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"entry_timing_audit_{result['as_of']}.md"

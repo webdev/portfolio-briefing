@@ -167,6 +167,11 @@ class Briefing(_Base):
     # counterfactual NAV series + gap figures). Empty dict when the briefing
     # predates the feature or the compute was unavailable that cycle.
     ghost_portfolio: dict[str, Any] = Field(default_factory=dict)
+    # George 2026-08-12 — 🎓 Entry Scorecard: entry_ledger.compute_scorecard()
+    # (running averages / grade distribution / trend / last_5 / callouts /
+    # outcome capture-by-grade). Empty dict when the briefing predates the
+    # feature, the flag is off, or nothing was graded that cycle.
+    entry_scorecard: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("date", mode="before")
     @classmethod

@@ -27,6 +27,11 @@ technicals, quotes and full chains. For each option currently open we:
    chains) — what fraction of the local best price the fill captured.
    Fewer than 3 window points → "insufficient chain history".
 5. Measure since-entry MFE / MAE / current capture from daily marks.
+6. Find the BEST ENTRY IN WINDOW (George, 2026-08-12: "it would be good
+   to know what would be the best timing") — re-grade every archived day
+   in entry_date ± 10 calendar days with the SAME scorers and report the
+   best-graded day, with the contract's stored mid on that day when the
+   archive has it.
 
 Everything here reads data already on disk — NO live fetches. Missing
 pieces render as 'n/a', never a fabricated number (rule #19).
@@ -40,8 +45,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 try:  # pipeline import context (scripts/ on sys.path)
+    from analysis import rsi_discipline as _rsi
     from analysis import setup_grade as _sg
 except ImportError:  # pragma: no cover — direct-script context
+    import rsi_discipline as _rsi  # type: ignore
     import setup_grade as _sg  # type: ignore
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -51,6 +58,8 @@ MIN_IV_HISTORY_OBS = 20
 # Local-peak window half-width (calendar days) and minimum data points.
 PEAK_WINDOW_DAYS = 7
 MIN_PEAK_POINTS = 3
+# Best-entry scan half-width (calendar days) around the entry date.
+BEST_WINDOW_DAYS = 10
 # Wilder RSI recompute fallback needs at least this many closes.
 _MIN_RSI_BARS = 30
 
@@ -456,6 +465,83 @@ def mfe_mae(dates: list, positions_by_date: dict, key,
     return out
 
 
+# ── Best entry in window ─────────────────────────────────────────────────
+
+
+def best_entry_in_window(pos: dict, root: Path, dates: list,
+                         positions_by_date: dict, key, entry_date: str,
+                         entry_prem: float | None,
+                         iv_history: dict | None,
+                         ohlc_cache_dir: Path | None = None,
+                         config: dict | None = None,
+                         cond_cache: dict | None = None) -> dict | None:
+    """The best-graded entry day in entry_date ± BEST_WINDOW_DAYS.
+
+    George (2026-08-12): "it would be good to know what would be the best
+    timing, so add a line about how I can figure out the best entry."
+
+    Re-grades every archived day in the window with the SAME production
+    scorer (``retro_grade``) on that day's own snapshot conditions —
+    measured, never guessed. Days whose snapshot can't support a score
+    are skipped. The window is clamped to the archive bounds
+    (``clamped_back`` / ``clamped_fwd`` say so — for a very recent entry
+    the forward side is naturally short). Ties go to the entry day
+    itself, then the earliest day. ``best_mid`` is the contract's stored
+    mark/chain mid on the best day, or None ('mid n/a' — rule #19,
+    fail-closed). Long legs → None (the wheel grader's objective does
+    not apply).
+    """
+    if not is_short(pos) or entry_date is None or not dates:
+        return None
+    try:
+        e = datetime.strptime(entry_date, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    lo = e - timedelta(days=BEST_WINDOW_DAYS)
+    hi = e + timedelta(days=BEST_WINDOW_DAYS)
+    first = datetime.strptime(dates[0], "%Y-%m-%d").date()
+    last = datetime.strptime(dates[-1], "%Y-%m-%d").date()
+    window = [d for d in dates
+              if lo <= datetime.strptime(d, "%Y-%m-%d").date() <= hi]
+    if not window:
+        return None
+    if cond_cache is None:
+        cond_cache = {}
+    graded_days: list = []
+    for d in window:
+        ck = (d, key[0])
+        if ck not in cond_cache:
+            cond_cache[ck] = entry_conditions(root, d, key[0], iv_history,
+                                              ohlc_cache_dir)
+        g = retro_grade(pos, cond_cache[ck], config)
+        if g.get("score") is None:  # nothing measurable that day — skip
+            continue
+        graded_days.append((d, g))
+    if not graded_days:
+        return None
+    # max() returns the FIRST maximal element → entry day wins ties,
+    # then the earliest day.
+    best_d, best_g = max(graded_days,
+                         key=lambda dg: (dg[1]["score"], dg[0] == entry_date))
+    best_mid = _position_mid_for(positions_by_date.get(best_d, []), key)
+    if best_mid is None:
+        best_mid = _chain_mid_for(root, best_d, key)
+    entry_is_best = best_d == entry_date
+    return {
+        "window_start": window[0], "window_end": window[-1],
+        "clamped_back": lo < first, "clamped_fwd": hi > last,
+        "days_scanned": len(window), "days_graded": len(graded_days),
+        "best_date": best_d, "best_grade": best_g,
+        "entry_is_best": entry_is_best,
+        "best_mid": best_mid,
+        # The honest tension: the best-graded day often carries LESS
+        # premium than the day actually filled (rule #19 — say it).
+        "premium_tension": (not entry_is_best and best_mid is not None
+                            and entry_prem is not None
+                            and best_mid < entry_prem),
+    }
+
+
 # ── Orchestrator ──────────────────────────────────────────────────────────
 
 
@@ -496,7 +582,8 @@ def _verdict_line(card: dict) -> str:
 def audit_position(pos: dict, root: Path, dates: list,
                    positions_by_date: dict, iv_history: dict | None,
                    ohlc_cache_dir: Path | None = None,
-                   config: dict | None = None) -> dict:
+                   config: dict | None = None,
+                   cond_cache: dict | None = None) -> dict:
     key = option_key(pos)
     entry_date, before = find_entry_date(key, dates, positions_by_date)
     short = is_short(pos)
@@ -538,6 +625,9 @@ def audit_position(pos: dict, root: Path, dates: list,
                                       entry_date, prem, short)
     card["excursion"] = mfe_mae(dates, positions_by_date, key,
                                 entry_date, prem)
+    card["best_window"] = best_entry_in_window(
+        pos, root, dates, positions_by_date, key, entry_date, prem,
+        iv_history, ohlc_cache_dir, config, cond_cache)
     card["verdict"] = _verdict_line(card)
     return card
 
@@ -587,9 +677,10 @@ def run_audit(snapshots_root: Path, as_of: str | None = None,
     dates = [d for d in dates if d <= target]
     positions_by_date = {d: load_positions(root, d) for d in dates}
     iv_history = _load_json(iv_history_path) if iv_history_path else None
+    cond_cache: dict = {}  # (date, underlying) → conditions, shared
     cards = [
         audit_position(p, root, dates, positions_by_date, iv_history,
-                       ohlc_cache_dir, config)
+                       ohlc_cache_dir, config, cond_cache)
         for p in positions_by_date[target]
         if option_key(p) is not None
     ]
@@ -645,7 +736,98 @@ def _day_color(cond: dict) -> str:
     return f"{color} day ({pct:+.1f}%)"
 
 
-def render_markdown(result: dict) -> str:
+def _short_date(date_str) -> str:
+    try:
+        dt = datetime.strptime(str(date_str), "%Y-%m-%d")
+        return f"{dt.strftime('%b')} {dt.day}"
+    except (TypeError, ValueError):
+        return str(date_str)
+
+
+def _grade_str(grade: dict | None) -> str:
+    """'B (65)' — letter + rounded score; letter alone when unscored."""
+    g = grade or {}
+    letter = g.get("letter") or "n/a"
+    score = g.get("score")
+    return f"{letter} ({score:.0f})" if score is not None else str(letter)
+
+
+def _best_window_line(card: dict, bw: dict, entry_date: str) -> str:
+    """The '📅 Best in window' line — every number measured (rule #19)."""
+    clamp_bits = []
+    if bw.get("clamped_fwd"):
+        clamp_bits.append("forward side short — archive ends "
+                          + _short_date(bw.get("window_end")))
+    if bw.get("clamped_back"):
+        clamp_bits.append("clipped at archive start "
+                          + _short_date(bw.get("window_start")))
+    clamp = f" ({'; '.join(clamp_bits)})" if clamp_bits else ""
+    if bw.get("entry_is_best"):
+        return ("- **📅 Best in window:** ✅ your entry was the best-graded "
+                f"day in the window ({_grade_str(bw.get('best_grade'))}; "
+                f"{bw.get('days_graded')} archived days graded "
+                f"{_short_date(bw.get('window_start'))}–"
+                f"{_short_date(bw.get('window_end'))}){clamp}")
+    g = bw.get("best_grade") or {}
+    drivers = " · ".join((g.get("drivers") or [])[:3])
+    best_d = _short_date(bw.get("best_date"))
+    prem = card.get("entry_premium")
+    mid = bw.get("best_mid")
+    if mid is not None:
+        mid_seg = (f" Same contract mid on {best_d}: ${mid:.2f} vs your "
+                   f"{_fmt(prem, '${:.2f}')}.")
+        if bw.get("premium_tension"):
+            mid_seg += (" (your day paid more — grade measures "
+                        "risk-quality, not premium)")
+    else:
+        mid_seg = (f" Same contract mid on {best_d}: mid n/a "
+                   "(no stored mark/chain that day).")
+    return (f"- **📅 Best in window:** {best_d} — "
+            f"{_grade_str(g)}" + (f": {drivers}" if drivers else "")
+            + f". You entered {_short_date(entry_date)} — "
+            f"{_grade_str(card.get('grade'))}.{mid_seg}{clamp}")
+
+
+def recipe_footer(config: dict | None = None) -> list[str]:
+    """'## How to find the best entry' — the A-setup recipe, every
+    threshold derived from the live config (rule #19 — no hardcoded
+    boilerplate; these are the SAME numbers the Setup Grade scores with).
+    """
+    cfg = _sg.load_setup_grade_config(config)
+    th = _rsi.load_thresholds(config)
+    lo, hi = _rsi.put_entry_band(th)
+    peak_hi = (lo + hi) / 2.0
+    vol_floor = float(cfg["vol_floor_rank"])
+    vol_target = vol_floor + (100.0 - vol_floor) / 3.0
+    favored = float((th.get("call") or {}).get("favored_above", 60.0))
+    cc_prime = favored + _sg._CC_PEAK_SPAN
+    clear = int(cfg["earnings_clear_days"])
+    return [
+        "## How to find the best entry",
+        "",
+        "All thresholds below are the live config values (briefing.yaml → "
+        "setup_grade / rsi_discipline) — the same numbers every ticket's "
+        "Setup Grade uses.",
+        "",
+        f"- **A-setup CSP (sell puts into weakness):** RSI in the "
+        f"{lo:.0f}-{peak_hi:.0f} prime band (entry band {lo:.0f}-{hi:.0f}) "
+        f"· IVr/RVr above the {vol_floor:.0f} vol floor "
+        f"(≥ {vol_target:.0f} reads 'worth selling') · a ≥2-touch support "
+        f"under the strike · a red day · earnings ≥ {clear}d out.",
+        f"- **A-setup CC (sell calls into strength):** RSI ≥ {cc_prime:.0f} "
+        f"(favored above {favored:.0f}) · a tested (≥2-touch) resistance "
+        f"near the strike · a green day · earnings ≥ {clear}d out.",
+        "- **The tension:** the fattest premium usually sits on the "
+        "worst-graded day — vol spikes exactly when conditions break "
+        "down. The edge is the overlap of premium AND conditions, not "
+        "either extreme.",
+        "- The live answer each morning is the 🏆 Best Setups Today panel "
+        "+ the Setup Grade on every ticket — A/B means enter, C/D names "
+        "the missing condition.",
+    ]
+
+
+def render_markdown(result: dict, config: dict | None = None) -> str:
     lines = [
         f"# Entry Timing Audit — open options as of {result['as_of']}",
         "",
@@ -709,6 +891,9 @@ def render_markdown(result: dict) -> str:
                 + (f" — {drv}" if drv else "")
                 + (f" — {g.get('message')}"
                    if g.get("letter") == "n/a" and g.get("message") else ""))
+        bw = c.get("best_window")
+        if bw:
+            lines.append(_best_window_line(c, bw, c.get("entry_date")))
         peak = c.get("peak") or {}
         if peak.get("insufficient"):
             n = peak.get("points", 0)
@@ -780,5 +965,13 @@ def render_markdown(result: dict) -> str:
         "moneyness regime (e.g. a pre-earnings-gap ITM state), so it is a "
         "premium-level read, not a risk-adjusted one. Captures >100% mean "
         "the fill beat every daily snapshot mid in the window.",
+        f"- 'Best in window' re-grades each archived day in entry ± "
+        f"{BEST_WINDOW_DAYS} calendar days with the same production "
+        "scorer; days without measurable data are skipped, the window "
+        "is clamped to the archive bounds, and the contract mid shown "
+        "is that day's stored mark/chain mid ('mid n/a' when neither "
+        "exists).",
     ])
+    lines.append("")
+    lines.extend(recipe_footer(config))
     return "\n".join(lines) + "\n"

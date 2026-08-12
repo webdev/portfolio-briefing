@@ -456,6 +456,38 @@ def main():
             print(f"  WARNING: recommendation aging unavailable: {_ae}", file=sys.stderr)
             aging_info = None
 
+        # Step 7.6: 🎓 Entry-grade ledger maintenance (George 2026-08-12:
+        # "i want to make sure we have a running score of our entries").
+        # Seeds retro grades once for pre-existing opens (entry-audit
+        # logic), grades each newly detected open with entry-day
+        # conditions (grades LOCK at first write), and fills outcomes on
+        # detected closes/rolls. Config-gated (entry_scorecard.enabled);
+        # fixture/dry-run snapshot dirs (<date>.test) route to the .test
+        # ledger automatically. Fail-open: any error → no update, the
+        # briefing ships without the scorecard.
+        try:
+            from analysis import entry_ledger as _el
+            if _el.entry_scorecard_enabled(config):
+                print("[Step 7.6] Entry-grade ledger maintenance...")
+                _el_update = _el.maintain(
+                    snapshot_dir=snapshot_dir,
+                    snapshot_data=snapshot_data,
+                    prev_positions=(aging_info or {}).get("prev_positions"),
+                    today_iso=today_date_str,
+                    config=config,
+                )
+                if _el_update:
+                    snapshot_data["entry_ledger_update"] = _el_update
+                    print(f"  seeded {_el_update['seeded']} · "
+                          f"new opens {_el_update['new_opens']} · "
+                          f"closed {_el_update['closed']} · "
+                          f"ledger {_el_update['total']} entr"
+                          f"{'y' if _el_update['total'] == 1 else 'ies'} "
+                          f"({_el_update['ledger_path']})")
+        except Exception as _ele:
+            print(f"  WARNING: entry-grade ledger unavailable: {_ele}",
+                  file=sys.stderr)
+
         # Step 7: Consistency check
         print("[Step 7] Day-over-day consistency check...")
         consistency_report, flagged_inconsistencies = check_consistency(

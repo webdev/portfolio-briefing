@@ -298,10 +298,17 @@ def detect_executed_opens(prev_positions, today_positions,
     return opens
 
 
-def render_executed_open_lines(opens: list[dict]) -> list[str]:
+def render_executed_open_lines(opens: list[dict],
+                               entry_grades: dict | None = None) -> list[str]:
     """Bullet lines for detected user-executed opens — measured obligation,
     % of NLV, and the same-day coverage counterfactual (rule #19: values
-    that weren't measured are simply omitted, never guessed)."""
+    that weren't measured are simply omitted, never guessed).
+
+    ``entry_grades`` (George 2026-08-12 — "a running score of our
+    entries", from ``analysis.entry_ledger.maintain``) maps position
+    symbol → {letter, score, top_driver}: each detected open gains its
+    just-assigned Setup Grade as a sub-bullet. No grade for a symbol →
+    no line (never fabricated)."""
     lines: list[str] = []
     for o in opens or []:
         und = o.get("underlying") or "?"
@@ -318,6 +325,18 @@ def render_executed_open_lines(opens: list[dict]) -> list[str]:
             if pct is not None:
                 head += f" (**{pct:.1f}% of NLV**)"
         lines.append(head)
+        g = (entry_grades or {}).get(o.get("symbol"))
+        if g and g.get("letter") not in (None, "n/a"):
+            seg = f"  - 🎓 Entry grade: **{g['letter']}**"
+            try:
+                if g.get("score") is not None:
+                    seg += f" ({float(g['score']):.0f}/100)"
+            except (TypeError, ValueError):
+                pass
+            if g.get("top_driver"):
+                seg += f" — {g['top_driver']}"
+            seg += " · locked to entry-day conditions"
+            lines.append(seg)
         cw, cwo = o.get("coverage_with"), o.get("coverage_without")
         if cw is not None and cwo is not None and oblig:
             lines.append(
@@ -386,7 +405,8 @@ def render_diff_panel(today_md: str, yesterday_md: Optional[str],
                       recon_status: Optional[dict] = None,
                       executed_rolls: Optional[list] = None,
                       today_iso: Optional[str] = None,
-                      executed_opens: Optional[list] = None) -> list[str]:
+                      executed_opens: Optional[list] = None,
+                      entry_grades: Optional[dict] = None) -> list[str]:
     """Render a "## Since Yesterday" panel comparing the two briefings.
 
     ``recon_status`` (optional) maps action keys (``KIND:IDENT``, from
@@ -402,6 +422,9 @@ def render_diff_panel(today_md: str, yesterday_md: Optional[str],
     surfaces fresh short opens the user executed at the broker — with the
     measured obligation, % of NLV, and same-day coverage counterfactual —
     so a $146K MELI put can never appear silently.
+
+    ``entry_grades`` (George 2026-08-12, from ``entry_ledger.maintain``)
+    adds each detected open's just-assigned Setup Grade sub-bullet.
     """
     if not yesterday_md:
         return []  # nothing to diff against on first run
@@ -421,7 +444,8 @@ def render_diff_panel(today_md: str, yesterday_md: Optional[str],
     if executed_opens:
         lines.append(f"### 🆕 Detected User-Executed Opens "
                      f"({len(executed_opens)})")
-        lines.extend(render_executed_open_lines(executed_opens))
+        lines.extend(render_executed_open_lines(executed_opens,
+                                                entry_grades=entry_grades))
         lines.append("")
     if executed_rolls:
         lines.append(f"### 🔄 Detected User-Executed Rolls "
