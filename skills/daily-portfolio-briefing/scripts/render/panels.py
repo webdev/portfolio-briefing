@@ -4672,6 +4672,12 @@ def render_action_list(
             # message on the ticket. Uses the vintage-RESOLVED RSI this
             # block already computed (rule #46), never the raw snapshot.
             # Config-gated; fail-open → no line, legacy byte-identical.
+            # B floor (George 2026-08-12: "recommendations are A or B, not
+            # D") — below-floor tickets demote to the wait/planning
+            # subsection with the measured note (rule #24, never hidden);
+            # ungradeable tickets stay actionable with a verify note
+            # (fail-OPEN, rule #19).
+            _csp_floor_note = None
             try:
                 from analysis import setup_grade as _sgm
                 if _sgm.setup_grade_enabled(config_local):
@@ -4682,6 +4688,12 @@ def render_action_list(
                         config=config_local)
                     if _csp_sg:
                         items.append(f"   - {_sgm.format_grade_note(_csp_sg)}")
+                        _fl_b, _fl_n = _sgm.below_actionable_floor(
+                            _csp_sg, config_local)
+                        if _fl_b:
+                            _csp_floor_note = _fl_n
+                    elif _sgm.actionable_floor_enabled(config_local):
+                        items.append(f"   - {_sgm.GRADE_NA_NOTE}")
             except Exception:
                 pass
             items.append(f"   - **Source:** Live E*TRADE chain")
@@ -4770,17 +4782,26 @@ def render_action_list(
                 f"   - **Account:** "
                 f"{_route_account('NEW CSP', ticker, None, accounts_cfg)}"
             )
-            if _csp_wait_reason:
+            if _csp_wait_reason or _csp_floor_note:
                 # Move the fully-built block into the wait subsection: swap the
                 # numbered header for a ⏸ one and keep every check line (full
                 # ticket, rule #24). The numbered action list never sees it.
+                # The B floor (George 2026-08-12) composes with the RSI wait
+                # AND the capacity tag (already inside the block) — every
+                # applicable reason renders once.
                 blk = items[_blk_start:]
                 del items[_blk_start:]
+                _demote_label = "wait" if _csp_wait_reason else "below setup floor"
                 blk[0] = blk[0].replace(
                     f"{n}. **CSP — PAID-TO-WAIT** {ticker}",
-                    f"- ⏸ **CSP — PAID-TO-WAIT (wait)** {ticker}",
+                    f"- ⏸ **CSP — PAID-TO-WAIT ({_demote_label})** {ticker}",
                 )
-                blk.insert(1, f"   - **{_csp_wait_reason}**")
+                _ins = 1
+                if _csp_wait_reason:
+                    blk.insert(_ins, f"   - **{_csp_wait_reason}**")
+                    _ins += 1
+                if _csp_floor_note:
+                    blk.insert(_ins, f"   - **{_csp_floor_note}**")
                 _wait_csp_blocks.extend(blk)
             else:
                 n += 1
@@ -4793,8 +4814,9 @@ def render_action_list(
     # PULLBACK CSPs, full ticket shown but never numbered/green-lit.
     if _wait_csp_blocks:
         items.append("")
-        items.append("**⏸ CSPs — wait for a pullback** (RSI 60-70 extended — "
-                     "full ticket shown, re-check on a red day / RSI 35-55)")
+        items.append("**⏸ CSPs — wait for a pullback / below setup floor** "
+                     "(full ticket shown, never green-lit — each carries its "
+                     "measured reason)")
         items.extend(_wait_csp_blocks)
 
     # Transparency footer: tell the user which CSP ideas were rejected and why.
@@ -5013,6 +5035,14 @@ def render_opportunities(new_ideas: list) -> list:
     rsi_wait_ideas = [i for i in actionable if i.get("rsi_wait")]
     actionable = [i for i in actionable if not i.get("rsi_wait")]
 
+    # B floor (George 2026-08-12: "recommendations are A or B, not D") —
+    # below-floor tickets render under "⏸ CSPs — below setup floor" with
+    # the measured demotion note, never as actionable. An idea that is BOTH
+    # rsi_wait and below-floor stays in the wait subsection and carries the
+    # floor note there too (both reasons shown once each).
+    floor_ideas = [i for i in actionable if i.get("setup_floor_demoted")]
+    actionable = [i for i in actionable if not i.get("setup_floor_demoted")]
+
     if actionable:
         lines.append(f"### Actionable: cash-secured puts ({len(actionable)})")
         lines.append("")
@@ -5071,6 +5101,10 @@ def render_opportunities(new_ideas: list) -> list:
             # Absent (flag off / ungraded) → byte-identical legacy card.
             if idea.get("setup_grade_line"):
                 lines.append(f"- {idea['setup_grade_line']}")
+            elif idea.get("setup_floor_na"):
+                # Fail-OPEN under the actionable floor (rule #19): the
+                # ungradeable ticket stays actionable with the note.
+                lines.append("- 🏁 grade n/a — verify setup manually")
             if idea.get("rsi_14") is not None:
                 lines.append(
                     f"- **RSI:** {idea.get('rsi_tag')} — {idea.get('rsi_note', '')}"
@@ -5103,6 +5137,43 @@ def render_opportunities(new_ideas: list) -> list:
                 f"{annualized:.1f}% annualized · collateral ${collateral:,.0f}"
             )
             lines.append(f"  - **{idea.get('rsi_wait_reason', '')}**")
+            if idea.get("setup_floor_note"):
+                # Composes with the RSI wait — both reasons, once each.
+                lines.append(f"  - **{idea['setup_floor_note']}**")
+            if idea.get("setup_grade_line"):
+                lines.append(f"  - {idea['setup_grade_line']}")
+        lines.append("")
+
+    if floor_ideas:
+        # B floor (George 2026-08-12: "we absolutely need to fix the right
+        # recommendations for both CSPs and CCs so that recommendations
+        # are A or B, not D"). Full ticket shown (rule #24) — never
+        # green-lit while the setup grades below the floor.
+        lines.append(f"### ⏸ CSPs — below setup floor ({len(floor_ideas)})")
+        lines.append("")
+        lines.append("_Setup Grade below the actionable B floor — full "
+                     "ticket shown for planning (never hidden), but the "
+                     "entry timing doesn't earn a green light today._")
+        lines.append("")
+        for idea in floor_ideas:
+            ticker = idea.get("ticker", "?")
+            spot = idea.get("spot", 0)
+            strike = idea.get("strike", 0)
+            mid = idea.get("mid", 0)
+            exp_pretty = idea.get("expiration_pretty", idea.get("expiration", "?"))
+            dte = idea.get("dte", 0)
+            annualized = idea.get("annualized_pct", 0)
+            collateral = idea.get("collateral", 0)
+            lines.append(
+                f"- ⏸ **{ticker}** (spot ${spot:.2f}) — SELL TO OPEN {exp_pretty} "
+                f"**${strike:g} PUT** @ ${mid:.2f} mid · {dte} DTE · "
+                f"{annualized:.1f}% annualized · collateral ${collateral:,.0f}"
+            )
+            lines.append(f"  - **{idea.get('setup_floor_note', '')}**")
+            if idea.get("capacity_blocked") and idea.get("capacity_reason"):
+                # Composes with the capacity gate — both reasons, once each.
+                lines.append(f"  - **⏸ Deferred (capacity gated)** — "
+                             f"{idea['capacity_reason']}")
             if idea.get("setup_grade_line"):
                 lines.append(f"  - {idea['setup_grade_line']}")
         lines.append("")
@@ -5121,7 +5192,12 @@ def render_opportunities(new_ideas: list) -> list:
                 rsi_suffix = ""
                 if idea.get("rsi_14") is not None and "RSI" not in idea.get("rationale", ""):
                     rsi_suffix = f"  · {idea.get('rsi_tag')}"
-                lines.append(f"- {label}: {idea.get('rationale', '')}{rsi_suffix}")
+                # B floor composes with capacity/RSI blocks (George
+                # 2026-08-12) — a watch-only ticket that ALSO grades below
+                # the floor shows both reasons, once each.
+                floor_suffix = (f"  · {idea['setup_floor_note']}"
+                                if idea.get("setup_floor_note") else "")
+                lines.append(f"- {label}: {idea.get('rationale', '')}{rsi_suffix}{floor_suffix}")
             lines.append("")
 
     return lines

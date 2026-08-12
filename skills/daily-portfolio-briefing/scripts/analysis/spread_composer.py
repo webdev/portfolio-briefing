@@ -243,6 +243,12 @@ def compose_spread(idea: dict, chains: dict, config: dict | None = None,
         "credit_pct_of_width": round(credit_pct_of_width, 4),
         "annualized_on_bp_pct": round(ann, 1) if ann is not None else None,
         "requoted_from_chain": requoted,
+        # Setup Grade passthrough (George 2026-08-12: "add a grade to every
+        # recommendation") — the spread's short leg IS the graded CSP entry,
+        # so the ticket inherits the idea's grade. Present only when graded.
+        **({"setup_grade": idea.get("setup_grade"),
+            "setup_grade_line": idea.get("setup_grade_line")}
+           if idea.get("setup_grade_line") else {}),
         "csp": {
             "premium": _f(idea.get("premium")),
             "collateral": _f(idea.get("collateral")),
@@ -272,7 +278,10 @@ def compose_spreads(new_ideas: list | None, chains: dict | None,
         if not isinstance(idea, dict) or not idea.get("instruction"):
             continue
         if idea.get("rsi_wait") or idea.get("capacity_blocked") \
-                or idea.get("rsi_blocked"):
+                or idea.get("rsi_blocked") or idea.get("setup_floor_demoted"):
+            # setup_floor_demoted (George 2026-08-12): a CSP below the
+            # actionable B floor is not a qualified entry — the spread
+            # composer never green-lights a variant of it.
             continue
         tk = str(idea.get("ticker") or "").upper()
         if not tk:
@@ -335,6 +344,12 @@ def render_spreads_section(composed: dict, config: dict | None = None) -> list[s
                 f"mid / BUY TO OPEN 1× {s['ticker']} {exp} "
                 f"${s['long_strike']:g} PUT @ ${s['long_mid']:.2f} mid · "
                 f"net credit ${s['net_credit_ps']:.2f}/sh")
+            # Setup Grade (George 2026-08-12) — a live spread ticket is a
+            # NEW open; it renders the short leg's inherited grade (or the
+            # fail-open verify note — rule #19, nothing fabricated).
+            lines.append(
+                f"  - {s['setup_grade_line']}" if s.get("setup_grade_line")
+                else "  - 🏁 grade n/a — verify setup manually")
         if s.get("requoted_from_chain"):
             lines.append(
                 f"  - ⚠ both legs requoted from the {exp} snapshot chain "

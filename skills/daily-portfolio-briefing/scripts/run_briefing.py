@@ -865,6 +865,9 @@ def main():
                 sr_by_sym=_sr_wte,
                 gate_state=gate_state,
                 mv_rows=_mv_rows_wte,
+                # One-voice vol (George 2026-08-12): cards display the
+                # same effective vol the setup grade uses.
+                chain_iv_map=snapshot_data.get("chain_iv") or {},
                 **({"verdict_state_path": _wte_verdict_path} if _wte_verdict_path else {}),
             )
             # Task #43 — honest IV labels (same pass as the candidate report).

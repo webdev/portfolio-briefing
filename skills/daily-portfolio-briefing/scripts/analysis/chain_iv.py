@@ -599,11 +599,69 @@ def effective_iv_rank(ticker: str | None, chain_iv_map: dict | None,
     return None, "none"
 
 
+# One-voice vol display (George 2026-08-12, rec_grade_audit): a true chain
+# IVr and the realized-vol proxy ≥ this many points apart is a DIVERGENCE
+# the card must state explicitly — never two vol numbers unexplained (the
+# MU 'RVrank 84' card while true chain IVr was 15).
+VOL_DIVERGENCE_PTS = 30.0
+
+
+def _divergence_phrase(true_rank, rv_rank) -> str | None:
+    """'proxy diverges — premium thinner/richer than the proxy suggests'
+    when |true − proxy| ≥ VOL_DIVERGENCE_PTS; None otherwise / unmeasured."""
+    try:
+        t, r = float(true_rank), float(rv_rank)
+    except (TypeError, ValueError):
+        return None
+    if abs(t - r) < VOL_DIVERGENCE_PTS:
+        return None
+    direction = "thinner" if r > t else "richer"
+    return f"proxy diverges — premium {direction} than the proxy suggests"
+
+
+def format_vol_display(eff_rank, source, rv_rank=None) -> str:
+    """THE one-voice vol string for recommendation/candidate cards.
+
+    Displays the SAME effective vol the Setup Grade uses
+    (``effective_iv_rank`` preference order): true chain IVr preferred,
+    labeled 'IVr'; the realized-vol proxy only when chain IV history is
+    unavailable, labeled 'RVr (realized-vol proxy)'. When both exist and
+    diverge by ≥ VOL_DIVERGENCE_PTS, the divergence is stated explicitly:
+    'IVr 15 (true chain) · RVr 84 proxy diverges — premium thinner than
+    the proxy suggests'. Never two vol numbers on one card unexplained.
+    """
+    if eff_rank is None:
+        return "IV n/a"
+    try:
+        eff = float(eff_rank)
+    except (TypeError, ValueError):
+        return "IV n/a"
+    if source == "chain":
+        phrase = _divergence_phrase(eff, rv_rank)
+        if phrase:
+            return (f"IVr {eff:.0f} (true chain) · "
+                    f"RVr {float(rv_rank):.0f} {phrase}")
+        return f"IVr {eff:.0f}"
+    return f"RVr {eff:.0f} (realized-vol proxy)"
+
+
+def vol_display_for(ticker: str | None, chain_iv_map: dict | None,
+                    rv_rank=None) -> str:
+    """``format_vol_display`` resolved from a snapshot's chain_iv map —
+    the convenience every display site routes through so the card shows
+    the SAME effective vol the setup grade scored (one voice)."""
+    eff, src = effective_iv_rank(ticker, chain_iv_map, rv_rank)
+    return format_vol_display(eff, src, rv_rank=rv_rank)
+
+
 def iv_label(metrics: dict | None, rv_rank: float | None,
              min_history_days: int = DEFAULT_MIN_HISTORY_DAYS) -> str:
     """Honest one-token IV read for a ticker.
 
     - true rank available:      ``IV 34% · IVrank 62``
+    - true rank, proxy ≥30 pts apart: the divergence is stated explicitly
+      (``· RVrank 84 proxy diverges — premium thinner than the proxy
+      suggests``) — never two vol numbers unexplained (one-voice rule).
     - true IV, short history:   ``IV 34% (IVrank n/a — building history, 12d)``
     - chains missing:           ``RVrank 55 (realized-vol proxy)``
     - nothing:                  ``IV n/a``
@@ -618,9 +676,13 @@ def iv_label(metrics: dict | None, rv_rank: float | None,
         atm_s = f"IV {float(metrics['atm_iv_30d']) * 100:.0f}%"
         if metrics.get("iv_rank") is not None:
             base = f"{atm_s} · IVrank {float(metrics['iv_rank']):.0f}"
-        else:
-            n = int(metrics.get("history_days") or 0)
-            base = f"{atm_s} (IVrank n/a — building history, {n}d)"
+            if rv_s:
+                phrase = _divergence_phrase(metrics["iv_rank"], rv_rank)
+                return (f"{base} · {rv_s} {phrase}" if phrase
+                        else f"{base} · {rv_s}")
+            return base
+        n = int(metrics.get("history_days") or 0)
+        base = f"{atm_s} (IVrank n/a — building history, {n}d)"
         return f"{base} · {rv_s}" if rv_s else base
     if rv_s:
         return f"{rv_s} (realized-vol proxy)"

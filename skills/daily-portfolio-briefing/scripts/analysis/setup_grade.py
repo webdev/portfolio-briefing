@@ -81,7 +81,20 @@ DEFAULTS = {
     # ≥ this many unmeasured components → cap the letter at B.
     "max_missing_for_full_grade": 1,
     "spotlight": {"enabled": True, "top_n": 3},
+    # B floor for green-lit NEW-OPEN tickets (George 2026-08-12: "Yes, we
+    # absolutely need to fix the right recommendations for both CSPs and
+    # CCs so that recommendations are A or B, not D, because I'm very much
+    # relying on it."). Off in code → byte-identical legacy; briefing.yaml
+    # turns it on. Applies ONLY to new opens — position management (rolls,
+    # closes, collars, hedges, TP/defensive) is NEVER floor-gated.
+    "actionable_floor": {"enabled": False, "min_score": 65.0},
 }
+
+# Fail-OPEN note for ungradeable tickets under the actionable floor (rule
+# #19 fail direction — missing data must never silently block a trade).
+GRADE_NA_NOTE = "🏁 grade n/a — verify setup manually"
+
+_PRIME_NEEDS_RE = re.compile(r"prime needs (.+?)\.?\s*$")
 
 # CC RSI peak sits this many points above call.favored_above (60 → 70).
 _CC_PEAK_SPAN = 10.0
@@ -100,7 +113,8 @@ def load_setup_grade_config(config: dict | None) -> dict:
     if not isinstance(raw, dict):
         return cfg
     for key, val in raw.items():
-        if key in ("letters", "spotlight") and isinstance(val, dict):
+        if key in ("letters", "spotlight", "actionable_floor") \
+                and isinstance(val, dict):
             cfg[key].update(val)
         elif key == "weights" and isinstance(val, dict):
             for side, w in val.items():
@@ -132,6 +146,74 @@ def letter_for(score: float, config: dict | None = None) -> str:
     if score >= float(letters["c"]):
         return "C"
     return "D"
+
+
+# ── Actionable floor (George 2026-08-12) ─────────────────────────────────
+
+
+def actionable_floor_enabled(config: dict | None) -> bool:
+    """True when both the grader AND the B floor are switched on."""
+    cfg = load_setup_grade_config(config)
+    if not cfg.get("enabled"):
+        return False
+    fl = cfg.get("actionable_floor") or {}
+    return bool(fl.get("enabled"))
+
+
+def below_actionable_floor(grade_dict: dict | None,
+                           config: dict | None) -> tuple[bool, str]:
+    """(is_below, demotion_note) — the B floor for green-lit NEW-OPEN tickets.
+
+    George (2026-08-12): "Yes, we absolutely need to fix the right
+    recommendations for both CSPs and CCs so that recommendations are A or
+    B, not D, because I'm very much relying on it."
+
+    Single source of truth for the floor decision AND the demotion note —
+    every surface that green-lights a new-open option ticket calls this.
+    Note format: '⏸ Below setup floor — C (54): <weakest components with
+    measured values + config-derived targets>' (reuses the C/D wait-message
+    machinery — never a hardcoded threshold in the string).
+
+    Fail-OPEN (rule #19 direction, consistent with redeploy_path): floor
+    disabled, ungraded (None), letter 'n/a', or missing score → (False, "")
+    — a missing grade must never silently block; callers render
+    ``GRADE_NA_NOTE`` beside the still-actionable ticket instead. The RSI
+    hard block ('—') is its own gate and stands on its own — not the
+    floor's demotion.
+    """
+    if not actionable_floor_enabled(config):
+        return False, ""
+    if not isinstance(grade_dict, dict):
+        return False, ""
+    letter = grade_dict.get("letter")
+    score = grade_dict.get("score")
+    if letter in (None, "n/a") or score is None:
+        return False, ""              # fail-open — ungradeable stays actionable
+    if letter == "—" or grade_dict.get("hard_blocked"):
+        return False, ""              # the RSI hard block already gates it
+    fl = load_setup_grade_config(config).get("actionable_floor") or {}
+    try:
+        min_score = float(fl.get("min_score", 65.0))
+    except (TypeError, ValueError):
+        min_score = 65.0
+    try:
+        score_f = float(score)
+    except (TypeError, ValueError):
+        return False, ""              # unmeasurable score → fail-open
+    if score_f >= min_score:
+        return False, ""
+    # Weakest-component detail from the existing message machinery
+    # ("wait; prime needs RSI 35-45 (now 50) or IVr ≥ 60 (now 15)").
+    msg = str(grade_dict.get("message") or "")
+    m = _PRIME_NEEDS_RE.search(msg)
+    if m:
+        detail = m.group(1).rstrip(".")
+    else:
+        detail = " · ".join(
+            str(d) for d in (grade_dict.get("drivers") or [])[:3]
+        ) or "setup below the actionable floor"
+    note = f"⏸ Below setup floor — {letter} ({score_f:.0f}): {detail}"
+    return True, note
 
 
 # ── Component scorers (pure; every value measured upstream) ──────────────
@@ -706,6 +788,12 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
             return
         if grade.get("score") is None:
             return
+        # Actionable floor (George 2026-08-12): a spotlit ticket must never
+        # carry the floor demotion elsewhere — one voice. Below-floor
+        # setups never occupy a 🏆 slot.
+        _below_fl, _ = below_actionable_floor(grade, config)
+        if _below_fl:
+            return
         if ann_pct is None or float(ann_pct) < floor_pct:
             return  # delivered-yield floor (rule #44) — not income
         key = f"{side}:{(ticker or '').upper()}"
@@ -876,3 +964,164 @@ def render_best_setups(best: dict | None, config: dict | None = None) -> list[st
     _emit("**Sell puts into weakness (CSP):**", csp)
     _emit("**Sell covered calls into strength (CC):**", cc)
     return lines
+
+
+# ── Grade coverage audit (George 2026-08-12) ──────────────────────────────
+#
+# "Let's also add a grade to every recommendation that you're giving so
+# that I know it's a good recommendation."
+#
+# Mirror of rsi_discipline.audit_missing_rsi: scan the RENDERED briefing
+# for new-open option tickets whose card carries no Setup Grade token, so
+# a future surface that composes tickets without grading them fails the
+# verifier instead of shipping ungraded (the strangle-put-add bug, caught
+# on the 2026-08-12 render).
+
+# Composed NEW-OPEN option-ticket signatures. Kept tight to real ticket
+# grammar so prose / context lines never false-positive:
+#   "SELL 1× APP $280P exp Fri Sep 18 '26"   candidate / LT_CSP / CC cards
+#   "SELL TO OPEN 1× SOFI ..."               live spread short legs
+#   "Add 1× $500P exp Fri Nov 20 '26"        strangle put add
+#   "BUY 1× NVDA $200C ..."                  LEAP / BTO debit tickets
+# Management roll legs render as "STO N×" / "Sell-to-Open" / fenced combo
+# tickets — none match these patterns by construction.
+_TICKET_LINE_PATTERNS = [
+    re.compile(r"\bSELL\s+\d+×"),
+    re.compile(r"\bSELL TO OPEN\b"),
+    re.compile(r"\bAdd\s+\d+×\s+\$\d"),
+    re.compile(r"\bBUY\s+\d+×\s+[A-Z]"),
+]
+
+# Any of these within the ticket's card/block satisfies the audit:
+# format_grade_note ("**Setup Grade: B** ..."), the 🏁 entry message /
+# GRADE_NA_NOTE, or the B-floor demotion note.
+_GRADE_TOKENS = ("Setup Grade:", "🏁", "Below setup floor")
+
+# Blocks whose option legs are PROTECTION or position management, not
+# entry timing: collar / protective-put buys, hedge adds, two-leg roll
+# combos. These carry verdicts (or floors), never entry grades.
+_MGMT_BLOCK_RE = re.compile(
+    r"protective put|collar|hedge|BUY TO CLOSE|Buy-to-Close|ROLL ANALYSIS",
+    re.I)
+
+# Numbered action-list MANAGEMENT items (CLOSE / rolls / TP / trims /
+# holds / hedges). Exempt from the grade requirement BY DESIGN — they
+# carry decision tokens (⚖️ Verdict / capture % / advisor rec), not entry
+# grades — but a management item with NO decision token at all is flagged
+# in the second list.
+_MGMT_ITEM_RE = re.compile(
+    r"^\s*\d+\.\s+(?:🚨\s*)?\*\*[^*]*"
+    r"\b(CLOSE|ROLL|TAKE PROFIT|TRIM|HOLD|HEDGE|REVIEW)\b")
+
+# Decision tokens a management action item must carry somewhere in its
+# block: the challenger verdict, a capture % read, a Why line, or an
+# explicit advisor recommendation.
+_MGMT_VERDICT_TOKENS = ("⚖️", "Verdict", "captur", "Why:", "advisor")
+
+
+_NUMBERED_ITEM_RE = re.compile(r"^\s*\d+\.\s")
+
+
+def _item_block(lines: list[str], i: int, max_lines: int = 24) -> tuple[int, int]:
+    """A numbered action-list item's block: from the item line forward to
+    the line before the next numbered item / heading / blank line, capped
+    at ``max_lines`` — so a neighboring item's verdict token never bleeds
+    into a bare item's window."""
+    hi = i
+    n = len(lines)
+    while hi < n - 1 and hi - i < max_lines:
+        nxt = lines[hi + 1]
+        s = nxt.strip()
+        if not s or s.startswith("#") or _NUMBERED_ITEM_RE.match(nxt):
+            break
+        hi += 1
+    return i, hi
+
+
+def _card_block(lines: list[str], i: int, context_lines: int) -> tuple[int, int]:
+    """The contiguous card around line ``i``: expand up/down until a blank
+    line or a markdown heading, capped at ``context_lines`` each way."""
+    lo = i
+    while (lo > 0 and i - lo < context_lines
+           and lines[lo - 1].strip()
+           and not lines[lo - 1].lstrip().startswith("#")):
+        lo -= 1
+    hi = i
+    n = len(lines)
+    while (hi < n - 1 and hi - i < context_lines
+           and lines[hi + 1].strip()
+           and not lines[hi + 1].lstrip().startswith("#")):
+        hi += 1
+    return lo, hi
+
+
+def audit_missing_grade(md: str, context_lines: int = 8) -> dict:
+    """Scan rendered briefing markdown for grade-coverage gaps.
+
+    George (2026-08-12): "Let's also add a grade to every recommendation
+    that you're giving so that I know it's a good recommendation."
+
+    Returns ``{"new_open": [...], "management": [...]}``:
+
+    - ``new_open`` — NEW-OPEN option ticket lines (SELL N× / SELL TO OPEN
+      / strangle Add N× / BUY N× debit tickets) whose card/block carries
+      no Setup Grade token (``Setup Grade:``, ``🏁``, or the ``⏸ Below
+      setup floor`` demotion note). The window is the ticket's contiguous
+      card, capped at ±``context_lines`` (mirroring audit_missing_rsi's
+      mechanics).
+    - ``management`` — numbered action-list MANAGEMENT items (CLOSE /
+      EXECUTE ROLL / TAKE PROFIT / TRIM / HOLD / HEDGE / REVIEW) whose
+      block carries NO decision token (⚖️ Verdict / capture % / Why: /
+      advisor rec). Management lines are exempt from Setup Grades BY
+      DESIGN — a roll/close/TP is a decision about an EXISTING position
+      and carries a verdict, not an entry-timing grade — but a bare
+      management line with neither is a rendering bug.
+
+    Exempt from the new-open scan (not entry recommendations):
+      - fenced code blocks (two-leg roll combo tickets — management);
+      - italic transparency footers (lines starting with ``_``);
+      - table rows (ROLL ANALYSIS candidate menus);
+      - the Capital Plan / Money Plan rollups (items detailed, with
+        grades, elsewhere in the briefing);
+      - protection / management blocks (collar & protective-put legs,
+        hedge adds, Buy-to-Close combos) — verdict-carrying, not graded.
+    """
+    lines = md.splitlines()
+    new_open: list[str] = []
+    management: list[str] = []
+    in_fence = False
+    in_excluded_section = False
+    in_action_list = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if stripped.startswith("## "):
+            in_excluded_section = ("Capital Plan" in stripped
+                                   or "Money Plan" in stripped)
+            in_action_list = "Action List" in stripped
+        if in_excluded_section:
+            continue
+        if stripped.startswith("_") or stripped.startswith("|"):
+            continue
+
+        # Management-verdict check — numbered action-list items only.
+        if in_action_list and _MGMT_ITEM_RE.match(line):
+            lo, hi = _item_block(lines, i)
+            block = " ".join(lines[lo:hi + 1])
+            if not any(t in block for t in _MGMT_VERDICT_TOKENS):
+                management.append(stripped)
+            continue
+
+        if not any(p.search(line) for p in _TICKET_LINE_PATTERNS):
+            continue
+        lo, hi = _card_block(lines, i, context_lines)
+        block = " ".join(lines[lo:hi + 1])
+        if _MGMT_BLOCK_RE.search(block):
+            continue        # protection / roll leg — verdicts, not grades
+        if not any(t in block for t in _GRADE_TOKENS):
+            new_open.append(stripped)
+    return {"new_open": new_open, "management": management}

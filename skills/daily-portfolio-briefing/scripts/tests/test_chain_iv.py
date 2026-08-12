@@ -285,8 +285,14 @@ def test_iv_label_rvrank_fallback_when_chains_absent():
 
 
 def test_iv_label_true_rank():
+    """One-voice update (George 2026-08-12): a proxy ≥30 pts from the true
+    rank now carries the explicit divergence note — never two vol numbers
+    unexplained. Non-divergent proxies keep the legacy joined form."""
     m = {"atm_iv_30d": 0.34, "iv_rank": 62.0, "history_days": 40}
-    assert chain_iv.iv_label(m, 100.0) == "IV 34% · IVrank 62 · RVrank 100"
+    assert chain_iv.iv_label(m, 100.0) == (
+        "IV 34% · IVrank 62 · RVrank 100 proxy diverges — premium thinner "
+        "than the proxy suggests")
+    assert chain_iv.iv_label(m, 70.0) == "IV 34% · IVrank 62 · RVrank 70"
     assert chain_iv.iv_label(m, None) == "IV 34% · IVrank 62"
 
 
@@ -298,7 +304,9 @@ def test_annotate_rewrites_legacy_token_with_true_iv():
     md = "**AMZN** $240P — RSI 45 · IV rank 100 · drawdown 10%"
     civ = {"AMZN": {"atm_iv_30d": 0.31, "iv_rank": 34.0, "history_days": 40}}
     out, stats = chain_iv.annotate_briefing(md, civ, {"AMZN": 100.0})
-    assert "IV 31% · IVrank 34 · RVrank 100" in out
+    # One-voice (George 2026-08-12): the ≥30-pt divergence is explicit.
+    assert ("IV 31% · IVrank 34 · RVrank 100 proxy diverges — premium "
+            "thinner than the proxy suggests") in out
     assert "IV rank 100" not in out
     assert stats["true"] == 1
 
@@ -416,13 +424,14 @@ def test_gate_battery_rv_fallback_keeps_legacy_honesty_path():
 
 
 def test_gate_battery_true_rank_85_gets_labeled_token():
-    """A genuinely rich TRUE rank ≥85 earns the setup flag WITH the source
-    label ('IVrank(true) 90'), plus the +1 conviction bonus — and no
-    gap-inflation rewrite (true IV is measured, not gap-inflated)."""
+    """A genuinely rich TRUE rank ≥85 earns the setup flag WITH the
+    one-voice source label ('IVr 90' — George 2026-08-12: the flag shows
+    the SAME effective vol the setup grade scores), plus the +1 conviction
+    bonus — and no gap-inflation rewrite (true IV is measured)."""
     pb = _pb_with_chain_iv({"atm_iv_30d": 0.55, "iv_rank": 90.0,
                             "history_days": 40})
     (o,) = pb.opens
-    assert "IVrank(true) 90" in o.setup_flags
+    assert "IVr 90" in o.setup_flags
     assert "⚠ IV rank gap-inflated" not in o.setup_flags
     assert o.conviction_score == pytest.approx(25.5)  # bonus kept
 
@@ -445,7 +454,8 @@ def test_vol_surface_renders_top_readings():
     assert out.index("NVDA") < out.index("AMZN")   # flagged names first
     assert "🌊 skew blowout" in out
     assert "term inversion" in out
-    assert "IV 31% · IVrank 34 · RVrank 100" in out
+    assert ("IV 31% · IVrank 34 · RVrank 100 proxy diverges — premium "
+            "thinner than the proxy suggests") in out
     assert "Flags, not forecasts" in out
 
 

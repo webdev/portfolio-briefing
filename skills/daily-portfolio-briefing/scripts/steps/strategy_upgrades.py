@@ -537,6 +537,31 @@ def compute_strategy_upgrades(
         rsi_val = rsi_discipline.rsi_for(symbol, technicals)
         rv = rsi_discipline.hook("put", rsi_val, rsi_th)
 
+        # Setup Grade + B floor (George 2026-08-12: "recommendations are A
+        # or B, not D") — the ADDED put leg is a NEW open, so it is graded
+        # (CSP side) and floor-gated like every other new-open put ticket.
+        # Config-gated; fail-open (grade n/a → verify-manually note).
+        _str_sg = None
+        _str_sg_line = None
+        _str_floor_note = None
+        try:
+            from analysis import setup_grade as _sgm
+            if _sgm.setup_grade_enabled(params):
+                _str_sg = _sgm.grade_for_new_open(
+                    symbol, "csp", snapshot_data=snapshot_data,
+                    strike=float(strike), rsi=rsi_val,
+                    thresholds=rsi_th, config=params)
+                if _str_sg:
+                    _str_sg_line = _sgm.format_grade_note(_str_sg)
+                    _fl_b, _fl_n = _sgm.below_actionable_floor(
+                        _str_sg, params)
+                    if _fl_b:
+                        _str_floor_note = _fl_n
+                elif _sgm.actionable_floor_enabled(params):
+                    _str_sg_line = _sgm.GRADE_NA_NOTE  # fail-OPEN
+        except Exception:
+            _str_sg, _str_sg_line, _str_floor_note = None, None, None
+
         upgrade = {
             "type": "covered_strangle",
             "underlying": symbol,
@@ -570,6 +595,18 @@ def compute_strategy_upgrades(
                 "puts": round(total_premium, 2),
                 "total": round(call_total + total_premium, 2),
             },
+            # Setup Grade fields — present only when graded (flag on).
+            **({"setup_grade": _str_sg["letter"],
+                "setup_grade_score": _str_sg["score"],
+                "setup_grade_message": _str_sg["message"],
+                "setup_grade_drivers": _str_sg["drivers"],
+                "setup_grade_line": _str_sg_line} if _str_sg else
+               ({"setup_grade_line": _str_sg_line}
+                if _str_sg_line else {})),
+            # B floor (George 2026-08-12) — present only when below.
+            **({"setup_floor_wait": True,
+                "setup_floor_note": _str_floor_note}
+               if _str_floor_note else {}),
             "rationale": f"Convert {symbol} covered call to strangle; add {call_qty}x ${strike:.0f}P @ ${mid:.2f} premium",
         }
         upgrades.append(upgrade)
@@ -1034,6 +1071,7 @@ def compute_strategy_upgrades(
         # wait names need the message most). Config-gated; fail-open.
         _sg_grade = None
         _sg_line = None
+        _sg_floor_note = None
         try:
             from analysis import setup_grade as _sgm
             if _sgm.setup_grade_enabled(params):
@@ -1043,8 +1081,19 @@ def compute_strategy_upgrades(
                     rsi=rsi_val, thresholds=rsi_th, config=params)
                 if _sg_grade:
                     _sg_line = _sgm.format_grade_note(_sg_grade)
+                    # B floor (George 2026-08-12: "recommendations are A
+                    # or B, not D") — below-floor writes move to the
+                    # wait/deferred subsection with the measured note.
+                    _fl_b, _fl_n = _sgm.below_actionable_floor(
+                        _sg_grade, params)
+                    if _fl_b:
+                        _sg_floor_note = _fl_n
+                elif _sgm.actionable_floor_enabled(params):
+                    # Fail-OPEN (rule #19): ungradeable write stays
+                    # actionable with the verify-manually note.
+                    _sg_line = _sgm.GRADE_NA_NOTE
         except Exception:
-            _sg_grade, _sg_line = None, None
+            _sg_grade, _sg_line, _sg_floor_note = None, None, None
 
         upgrade = {
             "type": "write_covered_call",
@@ -1088,7 +1137,13 @@ def compute_strategy_upgrades(
                 "setup_grade_score": _sg_grade["score"],
                 "setup_grade_message": _sg_grade["message"],
                 "setup_grade_drivers": _sg_grade["drivers"],
-                "setup_grade_line": _sg_line} if _sg_grade else {}),
+                "setup_grade_line": _sg_line} if _sg_grade else
+               # Fail-OPEN n/a note under the actionable floor (rule #19).
+               ({"setup_grade_line": _sg_line} if _sg_line else {})),
+            # B floor (George 2026-08-12) — present only when below floor.
+            **({"setup_floor_wait": True,
+                "setup_floor_note": _sg_floor_note}
+               if _sg_floor_note else {}),
             "est_premium_per_share": round(premium_per_share, 2),
             "est_premium_total": round(premium_total, 0),
             "est_annualized_pct": round(annualized, 1),
@@ -1288,6 +1343,7 @@ def compute_strategy_upgrades(
             # block match the index envelope, not single-name bands.
             _idx_sg = None
             _idx_sg_line = None
+            _idx_floor_note = None
             try:
                 from analysis import setup_grade as _sgm
                 if _sgm.setup_grade_enabled(params):
@@ -1297,8 +1353,16 @@ def compute_strategy_upgrades(
                         rsi=rsi_val, thresholds=idx_th, config=params)
                     if _idx_sg:
                         _idx_sg_line = _sgm.format_grade_note(_idx_sg)
+                        # B floor (George 2026-08-12) — below-floor index
+                        # writes demote to the wait presentation.
+                        _fl_b, _fl_n = _sgm.below_actionable_floor(
+                            _idx_sg, params)
+                        if _fl_b:
+                            _idx_floor_note = _fl_n
+                    elif _sgm.actionable_floor_enabled(params):
+                        _idx_sg_line = _sgm.GRADE_NA_NOTE  # fail-OPEN
             except Exception:
-                _idx_sg, _idx_sg_line = None, None
+                _idx_sg, _idx_sg_line, _idx_floor_note = None, None, None
 
             envelope_violations = []
             if actual_dte < idx_min_dte or actual_dte > idx_max_dte:
@@ -1309,6 +1373,10 @@ def compute_strategy_upgrades(
 
             actionable = (
                 idx_state in ("favored", "unknown") and not envelope_violations
+                # B floor (George 2026-08-12): below-floor index writes are
+                # never green-lit — demoted to the wait presentation with
+                # the measured note (rule #24).
+                and not _idx_floor_note
             )
 
             rec.update({
@@ -1334,7 +1402,13 @@ def compute_strategy_upgrades(
                     "setup_grade_score": _idx_sg["score"],
                     "setup_grade_message": _idx_sg["message"],
                     "setup_grade_drivers": _idx_sg["drivers"],
-                    "setup_grade_line": _idx_sg_line} if _idx_sg else {}),
+                    "setup_grade_line": _idx_sg_line} if _idx_sg else
+                   ({"setup_grade_line": _idx_sg_line}
+                    if _idx_sg_line else {})),
+                # B floor (George 2026-08-12) — present only when below.
+                **({"setup_floor_wait": True,
+                    "setup_floor_note": _idx_floor_note}
+                   if _idx_floor_note else {}),
                 "est_premium_per_share": round(premium_per_share, 2),
                 "est_premium_total": round(premium_total, 0),
                 "est_annualized_pct": round(annualized, 1),

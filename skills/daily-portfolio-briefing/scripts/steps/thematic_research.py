@@ -277,17 +277,40 @@ def _setup_label(r: dict) -> str:
     return "Range-bound"
 
 
-def _market_setup_read(r: dict) -> str:
+def _effective_iv_of(r: dict, chain_iv_map: dict | None):
+    """(effective_rank, source) — one-voice vol (George 2026-08-12): the
+    pulse must read the SAME effective vol the setup grade scores. True
+    chain IVr preferred; labeled RV proxy fallback."""
+    iv = r.get("iv_rank")
+    if chain_iv_map:
+        try:
+            from analysis.chain_iv import effective_iv_rank as _eff
+            return _eff((r.get("ticker") or "").upper(), chain_iv_map, iv)
+        except ImportError:
+            pass
+    return iv, ("rv" if iv is not None else "none")
+
+
+def _market_setup_read(r: dict, chain_iv_map: dict | None = None) -> str:
     """Synthesize 'Label: trend, RSI, position-vs-highs[, IV]' for one ticker."""
     bits = [p for p in (_trend_phrase(r), _rsi_phrase(r.get("rsi_14")), _highs_phrase(r)) if p]
-    iv = r.get("iv_rank")
-    if iv is not None and iv >= 60:
-        bits.append(f"IV rank {iv:.0f} (rich premium)")
+    # One-voice vol (George 2026-08-12): 'rich premium' may only be claimed
+    # on the EFFECTIVE vol (true chain IVr preferred) — never on a
+    # flattering realized-vol proxy the chain contradicts (the MU 'RVrank
+    # 84 / true IVr 15' dressing). Divergence ≥30 pts is stated explicitly.
+    eff, src = _effective_iv_of(r, chain_iv_map)
+    if eff is not None and eff >= 60:
+        try:
+            from analysis.chain_iv import format_vol_display as _fvd
+            bits.append(f"{_fvd(eff, src, rv_rank=r.get('iv_rank'))} "
+                        f"(rich premium)")
+        except ImportError:
+            bits.append(f"IV rank {eff:.0f} (rich premium)")
     body = ", ".join(bits)
     return f"{_setup_label(r)}: {body}" if body else _setup_label(r)
 
 
-def _action_read(r: dict) -> str:
+def _action_read(r: dict, chain_iv_map: dict | None = None) -> str:
     """Translate a ticker's state into an entry/exit/manage verdict — NO state
     is left merely descriptive (see CLAUDE.md 'Everything actionable'). Read
     asymmetrically per the RSI discipline: overbought blocks new buys/CSPs but
@@ -295,7 +318,9 @@ def _action_read(r: dict) -> str:
     a falling knife warns. Generic across holding status (entry if you don't
     own it, manage/exit if you do)."""
     rsi = r.get("rsi_14")
-    iv = r.get("iv_rank")
+    # One-voice vol (George 2026-08-12): 'rich IV' claims read the
+    # EFFECTIVE vol (true chain IVr preferred), never the bare proxy.
+    iv, _iv_src = _effective_iv_of(r, chain_iv_map)
     dd = r.get("drawdown_pct")
     rich = " (rich IV)" if (iv is not None and iv >= 60) else ""
 
@@ -379,7 +404,8 @@ def _theme_avg_5d(results: list[dict]) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
-def _render_market_pulse(results_by_theme: dict, themes_meta: dict) -> list[str]:
+def _render_market_pulse(results_by_theme: dict, themes_meta: dict,
+                         chain_iv_map: dict | None = None) -> list[str]:
     """Cross-theme narrative + hottest/cooling movers + per-theme pulse.
 
     This is the 'learn what's going on in the market' read the user asked for:
@@ -440,9 +466,10 @@ def _render_market_pulse(results_by_theme: dict, themes_meta: dict) -> list[str]
         for r in hottest:
             lines.append(
                 f"- 🔥 `{r['ticker']}` · ${r['spot']:.2f} · "
-                f"**{r['fivedayret_pct']:+.1f}% 5d** — {_market_setup_read(r)}"
+                f"**{r['fivedayret_pct']:+.1f}% 5d** — "
+                f"{_market_setup_read(r, chain_iv_map)}"
             )
-            lines.append(f"  - 🎬 **Action:** {_action_read(r)}")
+            lines.append(f"  - 🎬 **Action:** {_action_read(r, chain_iv_map)}")
         lines.append("")
 
     # Cooling / pulling back (most negative movers)
@@ -453,9 +480,10 @@ def _render_market_pulse(results_by_theme: dict, themes_meta: dict) -> list[str]
         for r in cooling:
             lines.append(
                 f"- 🧊 `{r['ticker']}` · ${r['spot']:.2f} · "
-                f"**{r['fivedayret_pct']:+.1f}% 5d** — {_market_setup_read(r)}"
+                f"**{r['fivedayret_pct']:+.1f}% 5d** — "
+                f"{_market_setup_read(r, chain_iv_map)}"
             )
-            lines.append(f"  - 🎬 **Action:** {_action_read(r)}")
+            lines.append(f"  - 🎬 **Action:** {_action_read(r, chain_iv_map)}")
         lines.append("")
 
     # Theme-by-theme one-line pulse, grouped
@@ -509,7 +537,8 @@ def _render_market_pulse(results_by_theme: dict, themes_meta: dict) -> list[str]
 
 def render_scout_section(payload: dict | None, max_per_theme: int = 4,
                          config: dict | None = None,
-                         include_shortlist: bool = True) -> list[str]:
+                         include_shortlist: bool = True,
+                         chain_iv_map: dict | None = None) -> list[str]:
     """Render the thematic-research section for the daily briefing.
 
     Two parts:
@@ -574,7 +603,8 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4,
     results_by_theme = payload.get("results_by_theme", {})
 
     # Part 1: Market Pulse — the "what's happening across the market" read.
-    lines.extend(_render_market_pulse(results_by_theme, themes_meta))
+    lines.extend(_render_market_pulse(results_by_theme, themes_meta,
+                                     chain_iv_map=chain_iv_map))
 
     # Part 2: Actionable shortlist (RSI-hook gated). Skipped when the daily
     # briefing carries a richer Candidate Trades section instead (the standalone
@@ -640,8 +670,20 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4,
             metrics = []
             if r.get("rsi_14") is not None:
                 metrics.append(f"RSI {r['rsi_14']:.0f}")
-            if r.get("iv_rank") is not None:
-                metrics.append(f"IV rank {r['iv_rank']:.0f}")
+            # One-voice vol (George 2026-08-12): shortlist shows the SAME
+            # effective vol the setup grade scores (IVr preferred; labeled
+            # RVr proxy fallback; ≥30-pt divergence stated explicitly).
+            if r.get("iv_rank") is not None or (chain_iv_map or {}).get(
+                    (r.get("ticker") or "").upper()):
+                try:
+                    from analysis.chain_iv import vol_display_for as _vdf
+                    _vol_s = _vdf((r.get("ticker") or "").upper(),
+                                  chain_iv_map, r.get("iv_rank"))
+                    if _vol_s != "IV n/a":
+                        metrics.append(_vol_s)
+                except ImportError:
+                    if r.get("iv_rank") is not None:
+                        metrics.append(f"IV rank {r['iv_rank']:.0f}")
             if r.get("drawdown_pct") is not None:
                 metrics.append(f"drawdown {r['drawdown_pct']:.0f}%")
             if r.get("third_party_rec"):

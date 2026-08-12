@@ -772,8 +772,13 @@ def _phase2_gate_battery(
             and claimed_fat_but_thin is not None and iv_rank is not None
             and claimed_fat_but_thin(
                 iv_rank, cand.annualized_yield_pct, config)):
-        iv_token = f"IV rank {iv_rank:.0f}"
-        cand.setup_flags = [f for f in cand.setup_flags if f != iv_token]
+        # Drop the rich-vol token in EITHER form — legacy 'IV rank N' or
+        # the one-voice 'RVr N (realized-vol proxy)' (George 2026-08-12) —
+        # a gap-inflated rank may not keep a rich-premium claim.
+        _iv_tokens = {f"IV rank {iv_rank:.0f}",
+                      f"RVr {iv_rank:.0f} (realized-vol proxy)"}
+        cand.setup_flags = [f for f in cand.setup_flags
+                            if f not in _iv_tokens]
         cand.setup_flags.append("⚠ IV rank gap-inflated")
         if iv_rank >= 85.0:
             # Revoke the +1 IV-rank conviction bonus — a gap-inflated rank
@@ -1231,7 +1236,10 @@ def _compute(
         if iv_rank is None and isinstance(iv_ranks, dict):
             iv_rank = _f(iv_ranks.get(c.ticker), None)
         # Task #43 preference order: TRUE chain-implied rank when available,
-        # labeled realized-vol proxy otherwise.
+        # labeled realized-vol proxy otherwise. The pre-override proxy is
+        # kept so the one-voice formatter can state a divergence explicitly
+        # (George 2026-08-12 — the MU 'RVrank 84 / true IVr 15' dressing).
+        rv_rank_orig = iv_rank
         iv_is_true = False
         try:
             from analysis.chain_iv import effective_iv_rank as _eff_iv
@@ -1258,12 +1266,19 @@ def _compute(
         if rsi is not None and rsi < 35:
             setup_flags.append(f"RSI {rsi:.0f} deep oversold")
         if iv_rank is not None and iv_rank >= 85:
-            # Label the source honestly: "IVrank(true) N" is chain-implied
-            # (measured this cycle); the bare legacy token stays for the
-            # realized-vol fallback (the aggregate annotation pass relabels
-            # it "RVrank N" in the rendered briefing).
-            setup_flags.append(f"IVrank(true) {iv_rank:.0f}" if iv_is_true
-                               else f"IV rank {iv_rank:.0f}")
+            # One-voice vol display (George 2026-08-12): the flag shows the
+            # SAME effective vol the setup grade scores — true chain 'IVr'
+            # preferred, labeled 'RVr (realized-vol proxy)' fallback, with
+            # the ≥30-pt divergence stated explicitly. Legacy token only
+            # when the formatter is unavailable.
+            try:
+                from analysis.chain_iv import format_vol_display as _fvd
+                setup_flags.append(_fvd(
+                    iv_rank, "chain" if iv_is_true else "rv",
+                    rv_rank=rv_rank_orig))
+            except ImportError:
+                setup_flags.append(f"IVrank(true) {iv_rank:.0f}" if iv_is_true
+                                   else f"IV rank {iv_rank:.0f}")
         if drawdown is not None and drawdown >= 30:
             setup_flags.append(f"drawdown {drawdown:.0f}%")
 
@@ -1583,6 +1598,7 @@ def _compute(
         # source-labeled IV rank ('IVr' true chain vs 'RVr' proxy). The
         # grade never overrides the battery — excluded candidates never
         # reach here. Config-gated; fail-open.
+        _floor_skip = False
         try:
             from analysis import setup_grade as _sgm
             if _sgm.setup_grade_enabled(_cfg_top):
@@ -1606,8 +1622,25 @@ def _compute(
                     cand.setup_grade = _sg_g["letter"]
                     cand.setup_grade_score = _sg_g["score"]
                     cand.setup_grade_message = _sg_g["message"]
+                    # B floor — the gate battery gains the floor (George
+                    # 2026-08-12: "recommendations are A or B, not D").
+                    # Below-floor candidates never compose an open; the
+                    # exclusion renders in the footer with the measured
+                    # note (rule #24, never silent).
+                    _fl_b, _fl_n = _sgm.below_actionable_floor(
+                        _sg_g, _cfg_top)
+                    if _fl_b:
+                        battery_skips.append(
+                            f"⏸ {c.ticker} ${c.strike:g}P — {_fl_n}")
+                        _floor_skip = True
+                elif _sgm.actionable_floor_enabled(_cfg_top):
+                    # Fail-OPEN (rule #19): ungradeable candidate stays,
+                    # carrying the verify-manually note on its ticket.
+                    cand.warnings.append(_sgm.GRADE_NA_NOTE)
         except Exception:
             pass
+        if _floor_skip:
+            continue
         scored.append(cand)
 
     scored.sort(key=lambda x: (-x.conviction_score, -x.annualized_yield_pct))

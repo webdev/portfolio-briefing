@@ -92,6 +92,8 @@ DEFERRED_OPPORTUNITY_KINDS = {
     "SKIPPED_RSI",
     "SKIPPED_LT_VERDICT",
     "SKIPPED_MV_FV",
+    # George 2026-08-12 — B floor: below-floor recs stay visible (rule #24).
+    "SKIPPED_SETUP_FLOOR",
 }
 
 
@@ -202,6 +204,9 @@ def _classify_lto_status(item: dict[str, Any]) -> tuple[str, str, str]:
         return ("skipped", "⏭ skipped — ADD discipline", "muted")
     if kind == "SKIPPED_LT_CSP":
         return ("skipped", "⏭ skipped — LT CSP discipline", "muted")
+    if kind == "SKIPPED_SETUP_FLOOR":
+        # George 2026-08-12 — B floor: visible with the measured reason.
+        return ("skipped", "⏸ skipped — below setup floor", "muted")
     # Catch-all for anything else we let through
     return ("skipped", f"⏭ {kind.lower()}", "muted")
 

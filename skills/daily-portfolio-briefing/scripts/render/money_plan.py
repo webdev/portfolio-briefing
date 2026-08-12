@@ -415,6 +415,16 @@ def build_money_plan(
 
     gated = _gated_entries(new_ideas, long_term_opportunities)
     unlock = _monthly_unlock(gated)
+    # B floor (George 2026-08-12: "recommendations are A or B, not D") —
+    # count of new-open recs demoted below the setup floor this cycle so
+    # the Blocked-money line explains why the deploy line is smaller.
+    below_floor_n = sum(
+        1 for i in (new_ideas or [])
+        if isinstance(i, dict) and i.get("setup_floor_demoted"))
+    below_floor_n += sum(
+        1 for op in (long_term_opportunities or [])
+        if isinstance(op, dict)
+        and str(op.get("kind") or "").upper() == "SKIPPED_SETUP_FLOOR")
     hedge_nag = (aging_info or {}).get("hedge_nag") if aging_info else None
     hedge_days = None
     if isinstance(hedge_nag, dict):
@@ -439,7 +449,8 @@ def build_money_plan(
     except (TypeError, ValueError):
         _rd_target = 0.75
 
-    if not (banks or deploys or gated or hedge_nag or mtd or held_for_more):
+    if not (banks or deploys or gated or hedge_nag or mtd or held_for_more
+            or below_floor_n):
         return [], {}
 
     # ── Render (≤6 lines) ────────────────────────────────────────────────
@@ -548,6 +559,9 @@ def build_money_plan(
             f"{len(held_for_more)} winner"
             f"{'' if len(held_for_more) == 1 else 's'} held for "
             f"{_rd_target * 100:.0f}%+ (no redeploy path: {_hl})")
+    if below_floor_n:
+        blocked_bits.append(
+            f"{below_floor_n} rec(s) below setup floor")
     if hedge_nag and hedge_days:
         blocked_bits.append(
             f"hedge undecided {int(hedge_days)}d — standing question")
@@ -579,6 +593,8 @@ def build_money_plan(
         "theta_per_day": (round(theta_day, 2)
                           if theta_day is not None else None),
         "gated_entry_count": len(gated),
+        # B floor (George 2026-08-12) — recs demoted below the setup floor.
+        "below_setup_floor_count": below_floor_n,
         # Redeploy-aware TP: winners held for the raised capture floor
         # because no redeployment path exists (not banked closes).
         "held_for_more": [

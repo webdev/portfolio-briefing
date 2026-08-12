@@ -837,6 +837,17 @@ setup_grade:
   spotlight:
     enabled: true
     top_n: 3                   # per side; fewer qualify → show what exists, never pad
+  # 2026-08-12 — B floor for green-lit NEW-OPEN tickets (George: "Yes, we
+  # absolutely need to fix the right recommendations for both CSPs and CCs
+  # so that recommendations are A or B, not D, because I'm very much
+  # relying on it."). Below min_score → the ticket demotes to the wait /
+  # planning / SKIPPED-style presentation with the measured reason (rule
+  # #24 — full ticket stays visible, never green-lit). Position management
+  # (rolls/closes/collars/hedges/TP) is NEVER floor-gated. Fail-OPEN:
+  # grade n/a → ticket stays actionable with a 'verify manually' note.
+  actionable_floor:
+    enabled: true
+    min_score: 65              # the B letter floor — A/B pass, C/D demote
 
 # 2026-08-12 — Redeployability-aware take-profit (George 2026-08-10: "I'm
 # happy to exit options and close it if we have a path to redeployment. If

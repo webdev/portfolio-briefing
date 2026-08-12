@@ -219,6 +219,10 @@ def classify(r: dict, sr=None, mv_row: dict | None = None) -> tuple[str, str, st
     dd = r.get("drawdown_pct") or 0
     f5 = r.get("fivedayret_pct") or 0
     iv = r.get("iv_rank") or 0
+    # One-voice vol display (George 2026-08-12): when the caller resolved
+    # an effective-vol display string (true chain IVr preferred), the
+    # prose uses IT; absent → legacy token (byte-identical).
+    vol_s = r.get("_vol_display") or f"IV rank {iv:.0f}"
     spot = r.get("spot")
     sma = r.get("sma_200")
     sma_pct = _pct_below_sma(spot, sma)
@@ -252,7 +256,7 @@ def classify(r: dict, sr=None, mv_row: dict | None = None) -> tuple[str, str, st
             else "a 8-12% pullback from spot"
         )
         return ("wait", "🔴 WAIT — overbought",
-                f"Extended after a {f5:+.1f}% 5d run, RSI {rsi:.0f}, {tp}, IV rank {iv:.0f}.",
+                f"Extended after a {f5:+.1f}% 5d run, RSI {rsi:.0f}, {tp}, {vol_s}.",
                 f"WAIT for RSI < 55 AND {pullback_phrase}.{hb_sfx}{side_note}")
 
     if rsi is not None and 60 <= rsi < 70:
@@ -386,7 +390,7 @@ def classify(r: dict, sr=None, mv_row: dict | None = None) -> tuple[str, str, st
             else:
                 label = "🟢 ENTRY NOW — CSP"
             return ("enter", label,
-                    f"{rsi_read}, IV rank {iv:.0f}, drawdown {dd:.0f}%, {tp}. "
+                    f"{rsi_read}, {vol_s}, drawdown {dd:.0f}%, {tp}. "
                     f"Favorable spot to get paid to maybe buy lower.{tier_note}{confluence_note}{conv_chip}",
                     f"SELL 1× ${strike:g}P exp **{exp_p}** ({csp.get('dte')} DTE) · "
                     f"mid ${csp.get('mid', 0):.2f} (bid ${csp.get('bid', 0):.2f} / "
@@ -470,7 +474,8 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
                                  sr_by_sym: dict | None = None,
                                  gate_state=None,
                                  verdict_state_path=None,
-                                 mv_rows: dict | None = None) -> str:
+                                 mv_rows: dict | None = None,
+                                 chain_iv_map: dict | None = None) -> str:
     """Build the markdown report. Empty-string when no scout payload.
 
     ``sr_by_sym`` maps uppercase ticker → ``SupportResistance`` or its
@@ -523,9 +528,25 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         DEFERRED so the user can see the live ticket and plan rotation), and
         downgrading ENTRY NOW when the candidates report disagrees
         (consistency contract §7)."""
+        # One-voice vol (George 2026-08-12): classification thresholds and
+        # the Read prose consume the SAME effective vol the setup grade
+        # scores — true chain IVr when available (the MU 'RVrank 84 / true
+        # IVr 15' dressing), labeled display threaded via _vol_display.
+        _tk_c = (r.get("ticker") or "").upper()
+        if chain_iv_map:
+            try:
+                from analysis.chain_iv import (effective_iv_rank as _eff_c,
+                                               vol_display_for as _vdf_c)
+                _v_c, _s_c = _eff_c(_tk_c, chain_iv_map, r.get("iv_rank"))
+                if _s_c == "chain":
+                    r = {**r, "iv_rank": _v_c,
+                         "_vol_display": _vdf_c(_tk_c, chain_iv_map,
+                                                r.get("iv_rank"))}
+            except ImportError:
+                pass
         status, label, read, trigger = classify(
             r, sr=sr,
-            mv_row=_mv_rows_eff.get((r.get("ticker") or "").upper()))
+            mv_row=_mv_rows_eff.get(_tk_c))
         if gates_closed and status == "enter":
             # Keep the entry classification + full live ticket. Append a
             # ⏸ DEFERRED tag to the label and a one-line capacity note to
@@ -677,8 +698,19 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         if rsi is not None:
             metrics.append(f"RSI {rsi:.0f}")
         metrics.append(tp)
-        if iv is not None:
-            metrics.append(f"IV rank {iv:.0f}")
+        # One-voice vol display (George 2026-08-12): the card shows the
+        # SAME effective vol the setup grade scores — true chain 'IVr'
+        # preferred, 'RVr (realized-vol proxy)' fallback, ≥30-pt
+        # divergence stated explicitly.
+        if iv is not None or (chain_iv_map or {}).get(tk.upper()):
+            try:
+                from analysis.chain_iv import vol_display_for as _vdf
+                _vol_s = _vdf(tk.upper(), chain_iv_map, iv)
+                if _vol_s != "IV n/a":
+                    metrics.append(_vol_s)
+            except ImportError:
+                if iv is not None:
+                    metrics.append(f"IV rank {iv:.0f}")
         if dd:
             metrics.append(f"drawdown {dd:.0f}%")
         if f5 is not None:
@@ -699,9 +731,17 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
                 _q = r.get("csp_entry") or {}
                 _sr_in = (sr_card if sr_card is not None
                           else r.get("support_resistance"))
+                # One-voice: grade on the SAME effective vol the metrics
+                # line displays (true chain IVr preferred).
+                _iv_val, _iv_src = iv, ("rv" if iv is not None else None)
+                if chain_iv_map:
+                    from analysis.chain_iv import effective_iv_rank as _eff
+                    _v2, _s2 = _eff(tk.upper(), chain_iv_map, iv)
+                    if _s2 == "chain":
+                        _iv_val, _iv_src = _v2, "chain"
                 _g = _sgm.csp_setup(
-                    rsi=rsi, iv_rank=iv,
-                    iv_rank_source=("rv" if iv is not None else None),
+                    rsi=rsi, iv_rank=_iv_val,
+                    iv_rank_source=_iv_src,
                     support_resistance=_sr_in,
                     strike=_q.get("strike"), spot=spot, sma_200=sma,
                     days_to_earnings=r.get("days_to_earnings"),

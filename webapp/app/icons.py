@@ -111,6 +111,7 @@ _ACTION_ICONS = {
     "SKIPPED_RSI":          "⏭️",
     "SKIPPED_LT_VERDICT":   "⏭️",
     "SKIPPED_MV_FV":        "⏭️",
+    "SKIPPED_SETUP_FLOOR":  "⏸",  # George 2026-08-12 — below B setup floor
     "_FUNDING_HINT":        "💵",
     "reference_demoted":    "📎",  # rule #43 — reference-only LTO card
     "REFERENCE_DEMOTED":    "📎",
@@ -140,6 +141,7 @@ _ACTION_LABELS = {
     "SKIPPED_RSI":            "Skipped — RSI gate",
     "SKIPPED_LT_VERDICT":     "Skipped — LT-trend gate",
     "SKIPPED_MV_FV":          "Skipped — above MV fair value",
+    "SKIPPED_SETUP_FLOOR":    "Skipped — below setup floor",
     "reference_demoted":      "Reference — not actionable today",
     "REFERENCE_DEMOTED":      "Reference — not actionable today",
     "LONG_DATED_CSP":         "Long-Dated CSP",

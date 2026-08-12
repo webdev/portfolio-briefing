@@ -119,12 +119,49 @@ def _fv_note(tk: str, spot, fv: dict | None, etf_set) -> str | None:
     return f"{note} (model estimate — large divergence from spot)"
 
 
+def _candidate_setup_grade(r: dict, rsi_th: dict,
+                           config: dict | None,
+                           chain_iv_map: dict | None) -> dict | None:
+    """The ONE CSP-side setup grade for a candidate card — shared by the
+    card renderer (note line) and the briefing's B-floor bucketing (George
+    2026-08-12: "recommendations are A or B, not D") so the floor decision
+    and the printed grade can never disagree. True chain IVr preferred;
+    the scout's labeled RV proxy otherwise. None → ungradeable (fail-open)."""
+    try:
+        from analysis import setup_grade as _sgm
+        if not _sgm.setup_grade_enabled(config):
+            return None
+        _q = r.get("csp_entry") or {}
+        _iv_val, _iv_src = r.get("iv_rank"), (
+            "rv" if r.get("iv_rank") is not None else None)
+        if chain_iv_map:
+            from analysis.chain_iv import effective_iv_rank as _eff_iv
+            _v, _s = _eff_iv((r.get("ticker") or "").upper(),
+                             chain_iv_map, _iv_val)
+            if _s == "chain":
+                _iv_val, _iv_src = _v, "chain"
+        _g = _sgm.csp_setup(
+            rsi=r.get("rsi_14"), iv_rank=_iv_val, iv_rank_source=_iv_src,
+            support_resistance=r.get("support_resistance"),
+            strike=_q.get("strike"), spot=r.get("spot"),
+            sma_200=r.get("sma_200"),
+            days_to_earnings=r.get("days_to_earnings"),
+            drawdown_pct=r.get("drawdown_pct"),
+            thresholds=rsi_th, config=config)
+        if _g and _g.get("letter") != "n/a":
+            return _g
+        return None
+    except Exception:
+        return None
+
+
 def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                  gate_state=None, compact: bool = False,
                  mv_row: dict | None = None,
                  config: dict | None = None,
                  sector_pcts: dict | None = None,
-                 chain_iv_map: dict | None = None) -> list[str]:
+                 chain_iv_map: dict | None = None,
+                 floor_note: str | None = None) -> list[str]:
     """One candidate card. ``compact`` (2026-08-06 length diet) keeps the
     header, RSI metrics, entry ticket, and earnings line but drops the FV
     note + Verdict elaboration (both live in the companion
@@ -235,7 +272,13 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
         except Exception:
             sector_note_line = None
 
-    out = [f"**{_STATUS_LABEL[status]} · `{tk}` · {spot_s}**{badge}"]
+    # B floor (George 2026-08-12: "recommendations are A or B, not D"):
+    # a sub-B candidate card drops the 🎯 header for the planning
+    # presentation — full card kept (rule #24), never green-lit.
+    _hdr_label = ("⏸ BELOW SETUP FLOOR"
+                  if (floor_note and status == "candidate")
+                  else _STATUS_LABEL[status])
+    out = [f"**{_hdr_label} · `{tk}` · {spot_s}**{badge}"]
 
     metrics = []
     if is_override:
@@ -245,8 +288,19 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     tp = _tr._trend_phrase(r)
     if tp:
         metrics.append(tp)
-    if r.get("iv_rank") is not None:
-        metrics.append(f"IV rank {r['iv_rank']:.0f}")
+    # One-voice vol display (George 2026-08-12): the card shows the SAME
+    # effective vol the setup grade scores — true chain 'IVr' preferred,
+    # 'RVr (realized-vol proxy)' fallback, divergence ≥30 pts stated
+    # explicitly. Never a bare flattering proxy beside a true-chain grade.
+    if r.get("iv_rank") is not None or (chain_iv_map or {}).get(tk):
+        try:
+            from analysis.chain_iv import vol_display_for as _vdf
+            _vol_s = _vdf(tk, chain_iv_map, r.get("iv_rank"))
+            if _vol_s != "IV n/a":
+                metrics.append(_vol_s)
+        except ImportError:
+            if r.get("iv_rank") is not None:
+                metrics.append(f"IV rank {r['iv_rank']:.0f}")
     hp = _tr._highs_phrase(r)
     if hp:
         metrics.append(hp)
@@ -258,31 +312,22 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     # Setup Grade (George 2026-08-10: "a very clear message as to when I
     # should get in on every transaction") — CSP-side entry-timing grade
     # on EVERY card (candidate/held/watch/avoid — the WAIT names need the
-    # message most). True chain IV rank when the caller threads the map;
-    # else the scout's labeled RV proxy. Config-gated; fail-open → no line.
+    # message most). Shared with the briefing's B-floor bucketing via
+    # _candidate_setup_grade (one voice). Config-gated; fail-open → the
+    # ticket stays actionable with a verify-manually note (rule #19).
     try:
         from analysis import setup_grade as _sgm
         if _sgm.setup_grade_enabled(config):
-            _q = r.get("csp_entry") or {}
-            _iv_val, _iv_src = r.get("iv_rank"), (
-                "rv" if r.get("iv_rank") is not None else None)
-            if chain_iv_map:
-                from analysis.chain_iv import effective_iv_rank as _eff_iv
-                _v, _s = _eff_iv(tk, chain_iv_map, _iv_val)
-                if _s == "chain":
-                    _iv_val, _iv_src = _v, "chain"
-            _g = _sgm.csp_setup(
-                rsi=rsi_val, iv_rank=_iv_val, iv_rank_source=_iv_src,
-                support_resistance=r.get("support_resistance"),
-                strike=_q.get("strike"), spot=spot,
-                sma_200=r.get("sma_200"),
-                days_to_earnings=r.get("days_to_earnings"),
-                drawdown_pct=r.get("drawdown_pct"),
-                thresholds=rsi_th, config=config)
-            if _g and _g.get("letter") != "n/a":
+            _g = _candidate_setup_grade(r, rsi_th, config, chain_iv_map)
+            if _g:
                 out.append(f"  - {_sgm.format_grade_note(_g)}")
+            elif (status == "candidate"
+                    and _sgm.actionable_floor_enabled(config)):
+                out.append(f"  - {_sgm.GRADE_NA_NOTE}")
     except Exception:
         pass
+    if floor_note and status == "candidate":
+        out.append(f"  - **{floor_note}**")
 
     # Concrete entry (or held-by-RSI note) FIRST, right under the RSI metrics
     # line — keeps the actionable ticket adjacent to its RSI read (also so the
@@ -325,7 +370,18 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
             drift = r.get("_spot_drift_pct") or 0.0
             drift_s = (f" · ⚠ spot moved {drift:+.1f}% since chain fetch — verify quote"
                        if abs(drift) > _SPOT_DRIFT_REPRICE_PCT else "")
-            tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (CSP):** "
+            # B floor composes with the capacity tag (George 2026-08-12) —
+            # a ticket can be both capacity-gated and below-floor; each
+            # reason renders once.
+            if capacity_blocked and floor_note:
+                tag = ("⏸ **Deferred (capacity gated)** · "
+                       "⏸ **Below setup floor** · ")
+            elif capacity_blocked:
+                tag = "⏸ **Deferred (capacity gated)** · "
+            elif floor_note:
+                tag = "⏸ **Below setup floor** · "
+            else:
+                tag = "**Entry (CSP):** "
             # Monthly/weekly kind — computed at selection time from the REAL
             # chain date (rule #19); absent when the policy is disabled.
             _kind_seg = f", {q['exp_kind']}" if q.get("exp_kind") else ""
@@ -343,7 +399,15 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                 mv_note_line = None  # the demote line IS the FV read
             else:
                 rsi_read = ovr if is_override else "RSI favourable"
-                tag = "⏸ **Deferred (capacity gated)** · " if capacity_blocked else "**Entry (equity):** "
+                if capacity_blocked and floor_note:
+                    tag = ("⏸ **Deferred (capacity gated)** · "
+                           "⏸ **Below setup floor** · ")
+                elif capacity_blocked:
+                    tag = "⏸ **Deferred (capacity gated)** · "
+                elif floor_note:
+                    tag = "⏸ **Below setup floor** · "
+                else:
+                    tag = "**Entry (equity):** "
                 out.append(f"  - {tag}BUY `{tk}` on this pullback — {rsi_read}; size per your plan.")
         else:
             out.append("  - _Entry: setup qualifies, but no live chain ticket available — verify before placing._")
@@ -875,7 +939,25 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     held: list[tuple[str, dict, object]] = []
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
     thin_premium: list[tuple[str, dict, dict]] = []  # rule #44 yield floor (bug 3)
+    below_floor: list[tuple[str, dict, str]] = []    # B floor (George 2026-08-12)
     seen: set[str] = set()
+
+    # B floor (George 2026-08-12: "Yes, we absolutely need to fix the right
+    # recommendations for both CSPs and CCs so that recommendations are A
+    # or B, not D, because I'm very much relying on it.") — the SAME grade
+    # the card prints (one voice via _candidate_setup_grade) decides the
+    # bucket. Fail-open: ungradeable → stays a candidate (verify note on
+    # the card).
+    _chain_iv_cb = (snapshot_data or {}).get("chain_iv")
+
+    def _floor_note_for(res: dict) -> str | None:
+        try:
+            from analysis import setup_grade as _sgm_fl
+            _g = _candidate_setup_grade(res, rsi_th, config, _chain_iv_cb)
+            _b, _n = _sgm_fl.below_actionable_floor(_g, config)
+            return _n if _b else None
+        except Exception:
+            return None
     for theme_key, results in rbt.items():
         tname = themes_meta.get(theme_key, {}).get("name", theme_key)
         for r in results:
@@ -918,7 +1000,11 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 elif overlap and overlap["dupe"]:
                     already_open.append((tname, r, overlap))
                 else:
-                    cands.append((tname, r))
+                    _fl_n = _floor_note_for(r)
+                    if _fl_n:
+                        below_floor.append((tname, r, _fl_n))
+                    else:
+                        cands.append((tname, r))
             elif status == "held_rsi":
                 seen.add(tk)
                 held.append((tname, r, rv))
@@ -1059,6 +1145,32 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
         lines.append("_No RSI-favorable candidates right now — the universe is broadly extended. "
                      "The On-Deck names below would activate on a pullback into the favorable RSI zone._")
         lines.append("")
+
+    if below_floor:
+        # B floor (George 2026-08-12: "recommendations are A or B, not
+        # D") — sub-B candidates render the FULL card in the planning
+        # presentation with the measured demotion note (rule #24 — never
+        # hidden, never green-lit). A/B candidates keep 🎯 above.
+        lines.append(f"{_h_sub} ⏸ Below setup floor — planning only "
+                     f"({len(below_floor)})")
+        lines.append("_Setup Grade below the actionable B floor. Full "
+                     "entry card kept for planning — the entry timing "
+                     "doesn't earn a green light today; re-check when the "
+                     "named components improve._")
+        lines.append("")
+        for tname, r, _fl_n in sorted(
+                below_floor, key=lambda x: (x[0], x[1].get("ticker", ""))):
+            card = _format_card(r, fv_by_ticker, etf_set, rsi_th,
+                                gate_state=gate_state, compact=compact,
+                                mv_row=_mv_rows_cb.get(
+                                    (r.get("ticker") or "").upper()),
+                                config=config,
+                                sector_pcts=_sector_pcts_cb,
+                                chain_iv_map=_chain_iv_cb,
+                                floor_note=_fl_n)
+            card[0] = f"{card[0]}  · _{tname}_"
+            lines.extend(card)
+            lines.append("")
 
     if thin_premium:
         # Rule #44 (2026-08-10 bug 3) — visible with measured numbers

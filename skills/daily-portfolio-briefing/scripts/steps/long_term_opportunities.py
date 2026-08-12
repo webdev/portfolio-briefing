@@ -862,13 +862,22 @@ def generate_long_term_opportunities_step(
     # keeps rehydrating op dicts unchanged — never a new top-level key on
     # the op. Strike parsed from the concrete_trade ticket (the same
     # pattern the premium enricher uses). Config-gated; fail-open.
+    _lto_floor_notes: dict[str, str] = {}   # TICKER → floor demotion note
     try:
         from analysis import setup_grade as _sgm
         if _sgm.setup_grade_enabled(config):
             import re as _sg_re
             for op in op_dicts:
-                if ((op.get("kind") or "").upper() != "LONG_DATED_CSP"
-                        or op.get("skip_reason")):
+                _op_kind = (op.get("kind") or "").upper()
+                if _op_kind == "LEAP_CALL" and not op.get("skip_reason") \
+                        and _sgm.actionable_floor_enabled(config):
+                    # Long legs aren't gradeable by the premium-selling
+                    # grader — fail-OPEN with the verify note (rule #19).
+                    _leap_triggers = op.setdefault("trigger_reasons", [])
+                    if not any("grade n/a" in str(x) for x in _leap_triggers):
+                        _leap_triggers.append(_sgm.GRADE_NA_NOTE)
+                    continue
+                if _op_kind != "LONG_DATED_CSP" or op.get("skip_reason"):
                     continue
                 _sg_m = _sg_re.search(r"\$(\d+(?:\.\d+)?)P\b",
                                       op.get("concrete_trade", "") or "")
@@ -881,6 +890,19 @@ def generate_long_term_opportunities_step(
                     _sg_triggers = op.setdefault("trigger_reasons", [])
                     if not any("Setup Grade" in str(x) for x in _sg_triggers):
                         _sg_triggers.append(_sgm.format_grade_note(_sg_g))
+                    # B floor (George 2026-08-12: "recommendations are A
+                    # or B, not D") — remember the below-floor names; the
+                    # demotion to a SKIPPED-style visible row is applied
+                    # AFTER the capacity-tag pass so both reasons compose.
+                    _fl_b, _fl_n = _sgm.below_actionable_floor(_sg_g, config)
+                    if _fl_b:
+                        _lto_floor_notes[(op.get("ticker") or "").upper()] = _fl_n
+                elif _sgm.actionable_floor_enabled(config):
+                    # Fail-OPEN: ungradeable LT_CSP stays actionable with
+                    # the verify-manually note (rule #19 fail direction).
+                    _na_triggers = op.setdefault("trigger_reasons", [])
+                    if not any("grade n/a" in str(x) for x in _na_triggers):
+                        _na_triggers.append(_sgm.GRADE_NA_NOTE)
     except ImportError:
         pass
 
@@ -934,6 +956,33 @@ def generate_long_term_opportunities_step(
     # the unnumbered "📎 Shown for reference" subsection (rule #24 — full
     # ticket preserved, never hidden).
     _mark_reference_demotions(op_dicts, snapshot_data, config)
+
+    # B floor (George 2026-08-12: "Yes, we absolutely need to fix the right
+    # recommendations for both CSPs and CCs so that recommendations are A
+    # or B, not D, because I'm very much relying on it.") — a LONG_DATED_CSP
+    # graded below the actionable floor demotes to a SKIPPED-style VISIBLE
+    # row (kind SKIPPED_SETUP_FLOOR, rule #24 — full ticket carried in the
+    # reason). Runs AFTER the capacity/reference passes so the demotion
+    # note composes with those reasons (each shown once).
+    if _lto_floor_notes:
+        for op in op_dicts:
+            if (op.get("kind") or "").upper() != "LONG_DATED_CSP" \
+                    or op.get("skip_reason"):
+                continue
+            _fl_note = _lto_floor_notes.get((op.get("ticker") or "").upper())
+            if not _fl_note:
+                continue
+            _bits = [_fl_note]
+            if op.get("rsi_wait_reason"):
+                _bits.append(str(op["rsi_wait_reason"]))
+            if op.get("capacity_deferred"):
+                _bits.append("⏸ also capacity gated")
+            _ct = op.get("concrete_trade") or ""
+            if _ct:
+                _bits.append(f"full ticket kept: {_ct}")
+            op["skip_reason"] = " · ".join(_bits)
+            op["kind_when_skipped"] = "LONG_DATED_CSP"
+            op["kind"] = "SKIPPED_SETUP_FLOOR"
 
     # Compute a funding-hint footer so the Skipped section can tell the user
     # how much cash they could free by closing their high-capture short puts

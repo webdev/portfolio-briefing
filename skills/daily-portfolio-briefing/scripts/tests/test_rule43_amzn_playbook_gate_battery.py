@@ -215,7 +215,9 @@ def test_iv_rank_bonus_revoked_when_gap_inflated():
                  premium=2.00, iv_rank=100.0, rsi_14=45.0)]
     (o2,) = _pb(fat, _an(fat)).opens
     assert o2.conviction_score == pytest.approx(25.5)
-    assert "IV rank 100" in o2.setup_flags
+    # One-voice vol (George 2026-08-12): the rich-vol flag now carries the
+    # honest proxy label instead of the bare legacy token.
+    assert "RVr 100 (realized-vol proxy)" in o2.setup_flags
     assert "⚠ IV rank gap-inflated" not in o2.setup_flags
 
 

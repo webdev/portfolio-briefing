@@ -74,10 +74,13 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     # write whose proposed contract violates the tier's strict envelope
     # (RSI floor / min OTM% / max delta / max DTE) is demoted to the wait
     # list with the specific unmet conditions — shown, never hidden.
+    # setup_floor_wait (George 2026-08-12: "recommendations are A or B,
+    # not D"): a write graded below the actionable B floor is demoted to
+    # the wait list with the measured demotion note — shown, never hidden.
     def _is_wait(c: dict) -> bool:
         return bool(
             c.get("rsi_wait") or c.get("lt_secular_wait")
-            or c.get("tier_envelope_wait")
+            or c.get("tier_envelope_wait") or c.get("setup_floor_wait")
         )
 
     cc_ready = [c for c in new_ccs if not _is_wait(c)]
@@ -150,6 +153,10 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         # analysis/setup_grade.py). Absent → byte-identical legacy card.
         if cc.get("setup_grade_line"):
             lines.append(f"  - {cc['setup_grade_line']}")
+        # B floor demotion note (George 2026-08-12) — the measured reason
+        # the write sits in the wait list; composes with tier/RSI notes.
+        if cc.get("setup_floor_note"):
+            lines.append(f"  - **{cc['setup_floor_note']}**")
         if cc.get("rsi_14") is not None:
             lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
         if cc.get("lt_secular_note"):
@@ -204,7 +211,11 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         )
         lines.append("")
         for cc in cc_wait:
-            if cc.get("tier_envelope_wait") and not cc.get("rsi_wait"):
+            if (cc.get("setup_floor_wait") and not cc.get("rsi_wait")
+                    and not cc.get("tier_envelope_wait")
+                    and not cc.get("lt_secular_wait")):
+                _render_cc(cc, "⏸ BELOW SETUP FLOOR")
+            elif cc.get("tier_envelope_wait") and not cc.get("rsi_wait"):
                 _render_cc(cc, "⏸ TIER ENVELOPE NOT MET")
             else:
                 _render_cc(cc, "⏸ WAIT FOR STRENGTH")
@@ -274,6 +285,9 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
 
             if u.get("actionable"):
                 badge = "✅ READY TO WRITE (index)"
+            elif u.get("setup_floor_wait"):
+                # B floor (George 2026-08-12) — never green-lit below B.
+                badge = "⏸ BELOW SETUP FLOOR"
             else:
                 badge = f"⏸ WAIT FOR STRENGTH (index band ≥{favored:.0f})"
             lines.append(f"{header} {badge}{_promo_badge(u)}")
@@ -313,6 +327,8 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             # Setup Grade (George 2026-08-10) — index-CC entry-timing line.
             if u.get("setup_grade_line"):
                 lines.append(f"  - {u['setup_grade_line']}")
+            if u.get("setup_floor_note"):
+                lines.append(f"  - **{u['setup_floor_note']}**")
             if u.get("rsi_14") is not None:
                 lines.append(f"  - **RSI:** {u.get('rsi_tag')} — {u.get('rsi_note', '')}")
             else:
@@ -406,10 +422,23 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             dte = _real_dte(proposed, exp_date)
             dte_str = f"{dte}d" if dte else "DTE n/a"
 
-            status = "⛔ BLOCKED" if conc_blocked else "✅ OK"
+            # B floor (George 2026-08-12: "recommendations are A or B, not
+            # D") — a strangle put add graded below the actionable floor is
+            # never a green-lit "✅ OK"; the full ticket stays visible with
+            # the measured demotion note (rule #24).
+            if conc_blocked:
+                status = "⛔ BLOCKED"
+            elif s.get("setup_floor_wait"):
+                status = "⏸ BELOW SETUP FLOOR"
+            else:
+                status = "✅ OK"
 
             lines.append(f"**{symbol} — {current_calls} → add {qty}x ${strike:.0f}P** {status}{_promo_badge(s)}")
 
+            if s.get("setup_grade_line"):
+                lines.append(f"  - {s['setup_grade_line']}")
+            if s.get("setup_floor_note"):
+                lines.append(f"  - **{s['setup_floor_note']}**")
             if s.get("rsi_14") is not None:
                 lines.append(f"  - **RSI:** {s.get('rsi_tag')} — {s.get('rsi_note', '')}")
 

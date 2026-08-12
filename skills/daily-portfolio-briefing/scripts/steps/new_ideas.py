@@ -533,6 +533,19 @@ def generate_new_ideas(
                         idea["setup_grade_message"] = _sg_g["message"]
                         idea["setup_grade_drivers"] = _sg_g["drivers"]
                         idea["setup_grade_line"] = _sgm.format_grade_note(_sg_g)
+                        # B floor (George 2026-08-12: "recommendations
+                        # [must be] A or B, not D") — below-floor tickets
+                        # demote to the planning subsection with the
+                        # measured reason (rule #24, never hidden).
+                        _fl_below, _fl_note = _sgm.below_actionable_floor(
+                            _sg_g, config)
+                        if _fl_below:
+                            idea["setup_floor_demoted"] = True
+                            idea["setup_floor_note"] = _fl_note
+                    elif _sgm.actionable_floor_enabled(config):
+                        # Fail-OPEN: ungradeable → stays actionable with a
+                        # verify-manually note (rule #19 fail direction).
+                        idea["setup_floor_na"] = True
             except Exception:
                 pass
             if rsi_gate_on and rv.removed:

@@ -821,7 +821,11 @@ def aggregate_briefing(
         # Market Pulse + theme-by-theme read only — the actionable picks are
         # carried by the richer Candidate Trades section that follows.
         lines.extend(render_scout_section(scout_payload, max_per_theme=4, config=config,
-                                          include_shortlist=False))
+                                          include_shortlist=False,
+                                          # One-voice vol (George 2026-08-12):
+                                          # pulse reads the same effective vol
+                                          # the setup grade scores.
+                                          chain_iv_map=snapshot_data.get("chain_iv")))
         # Candidate Trades — actionable candidates (+ on-deck) embedded inline.
         try:
             import os as _os_cb
@@ -1087,6 +1091,46 @@ def aggregate_briefing(
     except Exception as _e:
         import sys as _sys
         print(f"[aggregate] RSI coverage check failed: {_e}", file=_sys.stderr)
+
+    # Setup Grade coverage hook (George 2026-08-12: "Let's also add a grade
+    # to every recommendation that you're giving so that I know it's a good
+    # recommendation.") — every NEW-OPEN option ticket must carry a Setup
+    # Grade token within its card; management lines must carry a decision
+    # token (⚖️ Verdict / capture % / advisor rec). Mirrors the RSI hook.
+    try:
+        from analysis import setup_grade as _sg_cov
+        if _sg_cov.setup_grade_enabled(config):
+            _gr = _sg_cov.audit_missing_grade("\n".join(lines))
+            _gr_open = _gr.get("new_open") or []
+            _gr_mgmt = _gr.get("management") or []
+            if _gr_open or _gr_mgmt:
+                lines.append("## 🏁 Setup Grade Coverage")
+                lines.append("")
+                if _gr_open:
+                    lines.append(
+                        f"_{len(_gr_open)} new-open ticket(s) are missing a Setup "
+                        f"Grade (every new-open recommendation must be graded):_"
+                    )
+                    for _o in _gr_open[:10]:
+                        lines.append(f"- `{_o[:120]}`")
+                    lines.append("")
+                if _gr_mgmt:
+                    lines.append(
+                        f"_{len(_gr_mgmt)} management line(s) carry no decision "
+                        f"token (⚖️ Verdict / capture % / advisor rec):_"
+                    )
+                    for _o in _gr_mgmt[:10]:
+                        lines.append(f"- `{_o[:120]}`")
+                    lines.append("")
+            else:
+                lines.append(
+                    "_✅ Setup Grade coverage: every new-open ticket is graded; "
+                    "management lines carry verdicts._")
+                lines.append("")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] Setup Grade coverage check failed: {_e}",
+              file=_sys.stderr)
 
     # Tenor-cap sweep (rule #14 backstop, 2026-08-04): no actionable ticket
     # anywhere may carry an STO leg past the applicable tenor cap vs the
