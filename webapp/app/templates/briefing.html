@@ -11,6 +11,10 @@
 {# RSI zone filter (George 2026-08-10) — CSP range vs CC range at a glance.
    Chip definitions come from the rsi_filter_chips() global (rsi_zones.py). #}
 {% from "_macros/rsi_filter.html" import rsi_filter_bar %}
+{# Setup Grade filter (George 2026-08-10) — "a very clear message as to
+   when I should get in on every transaction." Chips from
+   setup_grade_filter_chips() (setup_grade_ui.py, pipeline-config-bridged). #}
+{% from "_macros/setup_grade_filter.html" import setup_grade_filter_bar %}
 {% block title %}Briefing {{ briefing.date.isoformat() }}{% endblock %}
 
 {# Sort chip strip — client-side reorder of a .uc-grid. Default = server
@@ -205,10 +209,16 @@
                 collar proposals on names with an open option position render
                 inline on that position's card above.
             </p>
+            {# Setup Grade filter (George 2026-08-10) — CC-side timing on
+               the covered-call write proposals. Wrapped so the filter
+               scope (bar.parentElement in app.js) is JUST this grid. #}
+            <div class="uc-grade-scope">
+            {{ setup_grade_filter_bar('briefing-strategy', '.uc-card') }}
             <div class="uc-grid" id="uc-grid-strategy">
                 {% for s in strategy_standalone %}
                 {{ unified_card(s, tech_by_ticker.get(resolve_ticker(s, 'strategy')), 'strategy') }}
                 {% endfor %}
+            </div>
             </div>
             {% endif %}
         </section>
@@ -240,6 +250,9 @@
             {# RSI zone filter (George 2026-08-10) — spans all three idea
                group grids (scoped to this section by app.js). #}
             {{ rsi_filter_bar('briefing-ideas', '.uc-card') }}
+            {# Setup Grade filter row (George 2026-08-10) — composes with
+               the RSI bar above (class-based hiding, AND semantics). #}
+            {{ setup_grade_filter_bar('briefing-ideas', '.uc-card') }}
 
             {# ── Rule #43 UX: three sections at descending visual weight.
                Grouping comes from ideas.idea_group (the pipeline's own

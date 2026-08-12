@@ -2932,6 +2932,17 @@ html[data-theme="solarized-light"] .tech-card {
    distinguishes the derived zone read from the measured-signal chips. */
 .tc-zone-chip { border: 1px dashed currentColor; font-weight: 600; }
 
+/* ─── Setup Grade filter bar + badge (George 2026-08-10) ───
+   "We need a very clear message as to when I should get in on every
+   transaction." Same .uc-sort chip pattern as the RSI bar. Hiding is
+   CLASS-based (sg-hidden) so the grade filter composes (AND) with the
+   RSI zone filter's style.display on the same cards. Badge reuses the
+   theme-token .rep-badge-* recipes (WCAG-safe across themes). */
+.grade-filter-bar { margin: .4rem 0 .6rem; }
+.grade-filter-chip .grade-count { opacity: .75; font-variant-numeric: tabular-nums; }
+.sg-hidden { display: none !important; }
+.uc-grade-badge { border: 1px dashed currentColor; font-weight: 600; white-space: nowrap; }
+
 /* ════════════════════════════════════════════════════════════════════
    Tech legend (task #13) — collapsible "how to read the signals" panel
    ────────────────────────────────────────────────────────────────────

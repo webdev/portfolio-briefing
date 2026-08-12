@@ -1028,6 +1028,24 @@ def compute_strategy_upgrades(
         # 3 touches)". Always carries the *measured* delta — never a fabrication.
         sr_anchor_payload = chain_quote.get("sr_anchor") if chain_quote else None
 
+        # Setup Grade (George 2026-08-10: "a very clear message as to when
+        # I should get in on every transaction") — CC-side entry-timing
+        # grade on every proposed write (READY and wait-list alike; the
+        # wait names need the message most). Config-gated; fail-open.
+        _sg_grade = None
+        _sg_line = None
+        try:
+            from analysis import setup_grade as _sgm
+            if _sgm.setup_grade_enabled(params):
+                _sg_grade = _sgm.grade_for_new_open(
+                    symbol, "cc", snapshot_data=snapshot_data,
+                    strike=float(target_strike), spot=price,
+                    rsi=rsi_val, thresholds=rsi_th, config=params)
+                if _sg_grade:
+                    _sg_line = _sgm.format_grade_note(_sg_grade)
+        except Exception:
+            _sg_grade, _sg_line = None, None
+
         upgrade = {
             "type": "write_covered_call",
             "underlying": symbol,
@@ -1065,6 +1083,12 @@ def compute_strategy_upgrades(
             "otm_pct": (round(otm_pct_actual, 1) if otm_pct_actual is not None else None),
             "strike_selected_by": strike_selected_by,
             "sr_anchor": sr_anchor_payload,
+            # Setup Grade fields — present only when graded (flag on).
+            **({"setup_grade": _sg_grade["letter"],
+                "setup_grade_score": _sg_grade["score"],
+                "setup_grade_message": _sg_grade["message"],
+                "setup_grade_drivers": _sg_grade["drivers"],
+                "setup_grade_line": _sg_line} if _sg_grade else {}),
             "est_premium_per_share": round(premium_per_share, 2),
             "est_premium_total": round(premium_total, 0),
             "est_annualized_pct": round(annualized, 1),
@@ -1259,6 +1283,23 @@ def compute_strategy_upgrades(
             premium_total = premium_per_share * 100 * contracts_writable
             annualized = (premium_per_share / price) * (365 / actual_dte) * 100
 
+            # Setup Grade (George 2026-08-10) — CC side, graded against the
+            # index override band (idx_th) so the RSI component and hard
+            # block match the index envelope, not single-name bands.
+            _idx_sg = None
+            _idx_sg_line = None
+            try:
+                from analysis import setup_grade as _sgm
+                if _sgm.setup_grade_enabled(params):
+                    _idx_sg = _sgm.grade_for_new_open(
+                        symbol, "cc", snapshot_data=snapshot_data,
+                        strike=target_strike, spot=price,
+                        rsi=rsi_val, thresholds=idx_th, config=params)
+                    if _idx_sg:
+                        _idx_sg_line = _sgm.format_grade_note(_idx_sg)
+            except Exception:
+                _idx_sg, _idx_sg_line = None, None
+
             envelope_violations = []
             if actual_dte < idx_min_dte or actual_dte > idx_max_dte:
                 envelope_violations.append(
@@ -1288,6 +1329,12 @@ def compute_strategy_upgrades(
                 ),
                 "strike_selected_by": chain_quote.get("selected_by", "etrade"),
                 "sr_anchor": chain_quote.get("sr_anchor"),
+                # Setup Grade fields — present only when graded (flag on).
+                **({"setup_grade": _idx_sg["letter"],
+                    "setup_grade_score": _idx_sg["score"],
+                    "setup_grade_message": _idx_sg["message"],
+                    "setup_grade_drivers": _idx_sg["drivers"],
+                    "setup_grade_line": _idx_sg_line} if _idx_sg else {}),
                 "est_premium_per_share": round(premium_per_share, 2),
                 "est_premium_total": round(premium_total, 0),
                 "est_annualized_pct": round(annualized, 1),

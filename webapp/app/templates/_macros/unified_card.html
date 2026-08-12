@@ -36,6 +36,10 @@
          {# RSI zone filter (George 2026-08-10) — zones come from the tech
             view-model (measured RSI); no RSI → 'unknown' (All-only). #}
          data-rsi-zones="{{ rsi_card_zones(tech) }}"
+         {# Setup Grade filter (George 2026-08-10) — side-aware entry-timing
+            grade tokens from the briefing JSON (app/setup_grade_ui.py);
+            ungraded → 'none' (visible under "All" only). #}
+         data-setup-grades="{{ setup_grade_tokens(base) }}"
          {% if tab_kind == 'equity' and base.pl_pct is not none %}data-pl="{{ base.pl_pct }}"{% endif %}
          {% if tab_kind == 'equity' and base.weight is not none %}data-weight="{{ base.weight }}"{% endif %}
          {% if tab_kind == 'option' and _opl is not none %}data-pl="{{ _opl }}"{% endif %}
@@ -144,6 +148,9 @@
     <div class="uc-extras uc-tone-{{ extras_tone(base.type) }}">
         <div class="uc-extras-head">
             <span class="uc-badge rec-{{ base.type }}" title="{{ base.type or '' }}"><span class="action-icon">{{ base.type | action_icon }}</span> <strong>{{ (base.type | humanize_action) if base.type else "—" }}</strong></span>
+            {# Setup Grade badge (George 2026-08-10) — CC-side timing. #}
+            {% set _sg_badge = setup_grade_badge(base) %}
+            {% if _sg_badge %}<span class="rep-badge rep-badge-{{ _sg_badge.rep_tone }} uc-grade-badge" title="{{ _sg_badge.title }}">{{ _sg_badge.label }}</span>{% endif %}
             <span class="uc-extras-right">
                 <span class="chip tier-{{ base.tier }}">{{ base.tier or "—" }}</span>
                 {% if _tk %}{{ parkev_chip(_tk) | safe }}{% endif %}
@@ -162,6 +169,10 @@
         <div class="uc-extras-head">
             <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind or '' }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ (base.kind | humanize_action) if base.kind else "—" }}</strong></span>
             <span class="status-chip {{ base.status_class }}">{{ base.status_label }}</span>
+            {# Setup Grade badge (George 2026-08-10) — tooltip lists the
+               measured drivers + the entry message; no grade → no badge. #}
+            {% set _sg_badge = setup_grade_badge(base) %}
+            {% if _sg_badge %}<span class="rep-badge rep-badge-{{ _sg_badge.rep_tone }} uc-grade-badge" title="{{ _sg_badge.title }}">{{ _sg_badge.label }}</span>{% endif %}
             <span class="uc-extras-right">
                 {% if _tk %}{{ parkev_chip(_tk) | safe }} {{ tier_badge(_tk) | safe }}{% endif %}
             </span>

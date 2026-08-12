@@ -355,6 +355,11 @@ class ConvictionScoredCandidate:
     # Task #30/#31 — measured gate context (None/"unknown" when unmeasured).
     equity_held_pct: float | None = None
     support_quality: str = "unknown"
+    # Setup Grade (George 2026-08-10) — side-aware entry-timing letter +
+    # message (analysis/setup_grade.py). None when the flag is off.
+    setup_grade: str | None = None
+    setup_grade_score: float | None = None
+    setup_grade_message: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -381,6 +386,9 @@ class ConvictionScoredCandidate:
             "equity_held_pct": (round(self.equity_held_pct, 4)
                                 if self.equity_held_pct is not None else None),
             "support_quality": self.support_quality,
+            "setup_grade": self.setup_grade,
+            "setup_grade_score": self.setup_grade_score,
+            "setup_grade_message": self.setup_grade_message,
         }
 
 
@@ -1570,6 +1578,36 @@ def _compute(
             # Pre-close portfolio gates would have blocked this open — it's
             # actionable ONLY because Phase 1 fires first. Say so.
             cand.setup_flags.append(_UNLOCK_TAG)
+        # Setup Grade (George 2026-08-10) — graded AFTER the gate battery
+        # so the letter reflects the battery's live-verified RSI and the
+        # source-labeled IV rank ('IVr' true chain vs 'RVr' proxy). The
+        # grade never overrides the battery — excluded candidates never
+        # reach here. Config-gated; fail-open.
+        try:
+            from analysis import setup_grade as _sgm
+            if _sgm.setup_grade_enabled(_cfg_top):
+                _sg_q = (quotes_map.get(c.ticker)
+                         or quotes_map.get(str(c.ticker).upper()) or {})
+                _sg_g = _sgm.csp_setup(
+                    rsi=cand.rsi, iv_rank=iv_rank,
+                    iv_rank_source=("chain" if iv_is_true
+                                    else ("rv" if iv_rank is not None
+                                          else None)),
+                    support_resistance=tech.get("support_resistance"),
+                    strike=c.strike, spot=spots.get(c.ticker),
+                    sma_200=tech.get("sma_200"),
+                    lt_verdict=lt_verdict,
+                    day_change_pct=(_sg_q.get("dayChangePct")
+                                    if isinstance(_sg_q, dict) else None),
+                    days_to_earnings=edays,
+                    drawdown_pct=drawdown,
+                    config=_cfg_top)
+                if _sg_g and _sg_g.get("letter") != "n/a":
+                    cand.setup_grade = _sg_g["letter"]
+                    cand.setup_grade_score = _sg_g["score"]
+                    cand.setup_grade_message = _sg_g["message"]
+        except Exception:
+            pass
         scored.append(cand)
 
     scored.sort(key=lambda x: (-x.conviction_score, -x.annualized_yield_pct))

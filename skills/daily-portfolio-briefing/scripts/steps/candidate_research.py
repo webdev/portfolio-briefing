@@ -123,7 +123,8 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                  gate_state=None, compact: bool = False,
                  mv_row: dict | None = None,
                  config: dict | None = None,
-                 sector_pcts: dict | None = None) -> list[str]:
+                 sector_pcts: dict | None = None,
+                 chain_iv_map: dict | None = None) -> list[str]:
     """One candidate card. ``compact`` (2026-08-06 length diet) keeps the
     header, RSI metrics, entry ticket, and earnings line but drops the FV
     note + Verdict elaboration (both live in the companion
@@ -253,6 +254,35 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
         metrics.append(f"5d {r['fivedayret_pct']:+.1f}%")
     if metrics:
         out.append("  - " + " · ".join(metrics))
+
+    # Setup Grade (George 2026-08-10: "a very clear message as to when I
+    # should get in on every transaction") — CSP-side entry-timing grade
+    # on EVERY card (candidate/held/watch/avoid — the WAIT names need the
+    # message most). True chain IV rank when the caller threads the map;
+    # else the scout's labeled RV proxy. Config-gated; fail-open → no line.
+    try:
+        from analysis import setup_grade as _sgm
+        if _sgm.setup_grade_enabled(config):
+            _q = r.get("csp_entry") or {}
+            _iv_val, _iv_src = r.get("iv_rank"), (
+                "rv" if r.get("iv_rank") is not None else None)
+            if chain_iv_map:
+                from analysis.chain_iv import effective_iv_rank as _eff_iv
+                _v, _s = _eff_iv(tk, chain_iv_map, _iv_val)
+                if _s == "chain":
+                    _iv_val, _iv_src = _v, "chain"
+            _g = _sgm.csp_setup(
+                rsi=rsi_val, iv_rank=_iv_val, iv_rank_source=_iv_src,
+                support_resistance=r.get("support_resistance"),
+                strike=_q.get("strike"), spot=spot,
+                sma_200=r.get("sma_200"),
+                days_to_earnings=r.get("days_to_earnings"),
+                drawdown_pct=r.get("drawdown_pct"),
+                thresholds=rsi_th, config=config)
+            if _g and _g.get("letter") != "n/a":
+                out.append(f"  - {_sgm.format_grade_note(_g)}")
+    except Exception:
+        pass
 
     # Concrete entry (or held-by-RSI note) FIRST, right under the RSI metrics
     # line — keeps the actionable ticket adjacent to its RSI read (also so the
@@ -526,7 +556,8 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
                 if headline is not None and tk not in headline:
                     continue  # over the 3-headline cap — one-lined below
             lines.extend(_format_card(r, fv_by_ticker, etf_set, rsi_th,
-                                      gate_state=gate_state))
+                                      gate_state=gate_state,
+                                      config=config))
             lines.append("")
 
     if gate_state is not None and overflow:
@@ -958,7 +989,9 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                                 mv_row=_mv_rows_cb.get(
                                     (r.get("ticker") or "").upper()),
                                 config=config,
-                                sector_pcts=_sector_pcts_cb)
+                                sector_pcts=_sector_pcts_cb,
+                                chain_iv_map=(snapshot_data or {}).get(
+                                    "chain_iv"))
             card[0] = f"{card[0]}  · _{tname}_"
             # Same-name (different-strike) stacking note — kept, but flagged.
             tk = (r.get("ticker") or "").upper()

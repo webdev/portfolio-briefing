@@ -502,7 +502,15 @@ def aggregate_briefing(
         print(f"[aggregate] open orders audit failed: {_ooe}", file=_sys.stderr)
 
     lines.extend(action_list_lines)
-    
+
+    # 🏆 Best Setups Today (George 2026-08-10: "a very clear message as to
+    # when I should get in on every transaction") — the spotlight renders
+    # RIGHT HERE, after the Action List, but its CC side needs the strategy
+    # upgrades computed further down. Remember the insertion index; the
+    # section is spliced in after compute_strategy_upgrades runs.
+    _best_setups_at = len(lines)
+    best_setups_json: dict = {}
+
     # MODIFIED: Use render_watch_with_commentary instead of plain render_watch
     lines.extend(render_watch_with_commentary(
         equity_reviews, options_reviews, snapshot_data,
@@ -901,6 +909,46 @@ def aggregate_briefing(
     # NEW: Add Strategy Upgrades panel
     upgrades = compute_strategy_upgrades(snapshot_data, equity_reviews, options_reviews, config, analytics=analytics)
     lines.extend(render_strategy_upgrades(upgrades))
+
+    # 🏆 Best Setups Today — top-3 CSP + top-3 CC across the graded
+    # universe (income opportunities + LT_CSPs + CC-writable holdings +
+    # scout candidates), spliced in at the remembered index right after
+    # the Action List. Only names past their side's RSI hard block and
+    # the delivered-yield floor; capacity-gated names carry the ⏸ tag
+    # (rules #24/#41 — the aggregate retag pass re-syncs it). Never
+    # padded. Config-gated; fail-open: any error → no section.
+    try:
+        from analysis import setup_grade as _sg_best
+        if (_sg_best.setup_grade_enabled(config)
+                and _sg_best.spotlight_enabled(config)):
+            _bs_scout: list = []
+            for _bs_rows in ((scout_payload or {}).get(
+                    "results_by_theme") or {}).values():
+                _bs_scout.extend(
+                    [r for r in (_bs_rows or []) if isinstance(r, dict)])
+            try:
+                from analysis import capacity_gate as _bs_cap
+                _bs_tag = _bs_cap.capacity_deferred_tag(analytics, config)
+            except ImportError:
+                _bs_tag = None
+            best_setups_json = _sg_best.collect_best_setups(
+                new_ideas=new_ideas,
+                long_term_opportunities=long_term_opportunities,
+                strategy_upgrades=upgrades,
+                scout_results=_bs_scout,
+                snapshot_data=snapshot_data,
+                capacity_tag=_bs_tag,
+                gates_closed=(gate_state is not None
+                              and not getattr(gate_state, "open", True)),
+                config=config)
+            _bs_lines = _sg_best.render_best_setups(best_setups_json,
+                                                    config=config)
+            if _bs_lines:
+                lines[_best_setups_at:_best_setups_at] = _bs_lines
+    except Exception as _bs_e:
+        import sys as _sys
+        print(f"[aggregate] best setups failed (non-fatal): {_bs_e}",
+              file=_sys.stderr)
 
     # NEW: Add Analyst Brief before diffs
     lines.extend(render_analyst_brief(equity_reviews, options_reviews, snapshot_data, analytics, regime_data))
@@ -1627,6 +1675,10 @@ def aggregate_briefing(
         # Task #42 — put-credit-spread reference pilot (paper-watch cards,
         # ledger stats, gated-entry BP rollup). {} when disabled/failed.
         "put_credit_spreads": spreads_json,
+        # Setup Grade spotlight (George 2026-08-10) — top-3 CSP + top-3 CC
+        # entry-timing setups ({"csp": [...], "cc": [...]}). {} when the
+        # setup_grade flag is off or nothing qualified this cycle.
+        "best_setups": best_setups_json,
     }
     # Step 7.5: per-action aging — tomorrow's run reads this back for
     # reconciliation (each: {key, kind, ident, summary, first_flagged,

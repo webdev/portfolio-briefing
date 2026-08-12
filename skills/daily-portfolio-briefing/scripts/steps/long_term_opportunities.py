@@ -855,6 +855,35 @@ def generate_long_term_opportunities_step(
             label = "✅ RSI favourable · " + label
         triggers.insert(0, label)
 
+    # Setup Grade (George 2026-08-10: "a very clear message as to when I
+    # should get in on every transaction") — CSP-side entry-timing grade on
+    # every surviving LONG_DATED_CSP. The note rides INSIDE trigger_reasons
+    # (a LongTermOpportunity dataclass field) so the advisor's own renderer
+    # keeps rehydrating op dicts unchanged — never a new top-level key on
+    # the op. Strike parsed from the concrete_trade ticket (the same
+    # pattern the premium enricher uses). Config-gated; fail-open.
+    try:
+        from analysis import setup_grade as _sgm
+        if _sgm.setup_grade_enabled(config):
+            import re as _sg_re
+            for op in op_dicts:
+                if ((op.get("kind") or "").upper() != "LONG_DATED_CSP"
+                        or op.get("skip_reason")):
+                    continue
+                _sg_m = _sg_re.search(r"\$(\d+(?:\.\d+)?)P\b",
+                                      op.get("concrete_trade", "") or "")
+                _sg_g = _sgm.grade_for_new_open(
+                    (op.get("ticker") or "").upper(), "csp",
+                    snapshot_data=snapshot_data,
+                    strike=(float(_sg_m.group(1)) if _sg_m else None),
+                    thresholds=rsi_th, config=config)
+                if _sg_g:
+                    _sg_triggers = op.setdefault("trigger_reasons", [])
+                    if not any("Setup Grade" in str(x) for x in _sg_triggers):
+                        _sg_triggers.append(_sgm.format_grade_note(_sg_g))
+    except ImportError:
+        pass
+
     # Snap each LONG_DATED_CSP / LEAP_CALL to a real chain expiration so the
     # briefing renders a concrete date instead of "~75 DTE".
     chains = snapshot_data.get("chains", {}) or {}

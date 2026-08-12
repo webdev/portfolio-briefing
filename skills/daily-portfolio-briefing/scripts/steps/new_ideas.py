@@ -514,6 +514,27 @@ def generate_new_ideas(
             idea["rsi_note"] = rv.reason
             idea["rsi_decision"] = rv.decision
             idea["rsi_badge"] = rv.badge
+            # Setup Grade (George 2026-08-10: "a very clear message as to
+            # when I should get in on every transaction") — side-aware
+            # entry-timing grade + message on every CSP ticket. Computed
+            # BEFORE the RSI/capacity demotions so demoted tickets carry
+            # their grade too (rule #24). Config-gated; fail-open: any
+            # error → no fields, byte-identical legacy idea.
+            try:
+                from analysis import setup_grade as _sgm
+                if _sgm.setup_grade_enabled(config):
+                    _sg_g = _sgm.grade_for_new_open(
+                        ticker, "csp", snapshot_data=snapshot_data,
+                        strike=idea.get("strike"), spot=spot,
+                        rsi=rsi_val, thresholds=rsi_th, config=config)
+                    if _sg_g:
+                        idea["setup_grade"] = _sg_g["letter"]
+                        idea["setup_grade_score"] = _sg_g["score"]
+                        idea["setup_grade_message"] = _sg_g["message"]
+                        idea["setup_grade_drivers"] = _sg_g["drivers"]
+                        idea["setup_grade_line"] = _sgm.format_grade_note(_sg_g)
+            except Exception:
+                pass
             if rsi_gate_on and rv.removed:
                 # Overbought → demote to watch-only (no actionable put-sale).
                 idea["instruction"] = None

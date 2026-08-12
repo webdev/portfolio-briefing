@@ -1,0 +1,21 @@
+{# ─── setup_grade_filter_bar(key, cards_selector) — George 2026-08-10 ───
+   "We need a very clear message as to when I should get in on every
+   transaction." Setup-grade chips ('CSP setup A/B', 'CC setup A/B')
+   filter the cards matching cards_selector within the bar's parent,
+   keyed off the data-setup-grades attribute the backend stamps
+   (app/setup_grade_ui.py). Wired by app.js (grade filter engine, which
+   hides via the sg-hidden CLASS so it composes with the RSI zone bar).
+   Chip definitions come from the setup_grade_filter_chips() global —
+   letter floors live in the pipeline config, never in templates. #}
+{% macro setup_grade_filter_bar(key, cards_selector) %}
+<div class="uc-sort grade-filter-bar" data-grade-key="{{ key }}" data-grade-cards="{{ cards_selector }}" role="group" aria-label="Filter cards by setup grade">
+    <span class="uc-sort-label">Setup grade:</span>
+    {% for chip in setup_grade_filter_chips() %}
+    <button type="button"
+            class="uc-sort-chip grade-filter-chip{% if chip.grade == 'all' %} uc-sort-active{% endif %}"
+            data-grade="{{ chip.grade }}"
+            title="{{ chip.title }}"
+            aria-pressed="{{ 'true' if chip.grade == 'all' else 'false' }}">{{ chip.label }} (<span class="grade-count">0</span>)</button>
+    {% endfor %}
+</div>
+{% endmacro %}

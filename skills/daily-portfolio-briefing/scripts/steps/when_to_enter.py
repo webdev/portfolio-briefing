@@ -687,6 +687,29 @@ def render_when_to_enter_report(scout_payload: dict | None, *,
         if tp_rec and str(tp_rec).upper() not in ("NONE", "N/A"):
             metrics.append(f"rec {tp_rec}")
         lines.append("- " + " · ".join(metrics))
+        # Setup Grade (George 2026-08-10: "a very clear message as to when
+        # I should get in on every transaction") — CSP-side entry-timing
+        # grade on EVERY card (both ENTRY NOW and WAIT statuses). Every
+        # input is the scout's own measured value; the S/R clusters come
+        # from the same sr_by_sym the trigger text already uses.
+        # Config-gated; fail-open → no line, legacy byte-identical.
+        try:
+            from analysis import setup_grade as _sgm
+            if _sgm.setup_grade_enabled(config):
+                _q = r.get("csp_entry") or {}
+                _sr_in = (sr_card if sr_card is not None
+                          else r.get("support_resistance"))
+                _g = _sgm.csp_setup(
+                    rsi=rsi, iv_rank=iv,
+                    iv_rank_source=("rv" if iv is not None else None),
+                    support_resistance=_sr_in,
+                    strike=_q.get("strike"), spot=spot, sma_200=sma,
+                    days_to_earnings=r.get("days_to_earnings"),
+                    drawdown_pct=dd, config=config)
+                if _g and _g.get("letter") != "n/a":
+                    lines.append(f"- {_sgm.format_grade_note(_g)}")
+        except Exception:
+            pass
         lines.append(f"- **Read:** {read}")
         lines.append(f"- **Trigger:** {trigger}")
         if r.get("earnings_date") and r.get("days_to_earnings") is not None:

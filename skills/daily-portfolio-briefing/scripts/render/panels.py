@@ -4552,6 +4552,22 @@ def render_action_list(
                 # series — the run-up can't be verified, say so on the card.
                 items.append(f"   - {_csp_chase_caution}")
             items.append(f"   - {format_yield_line(csp_y)}")
+            # Setup Grade (George 2026-08-10) — entry-timing grade + clear
+            # message on the ticket. Uses the vintage-RESOLVED RSI this
+            # block already computed (rule #46), never the raw snapshot.
+            # Config-gated; fail-open → no line, legacy byte-identical.
+            try:
+                from analysis import setup_grade as _sgm
+                if _sgm.setup_grade_enabled(config_local):
+                    _csp_sg = _sgm.grade_for_new_open(
+                        ticker, "csp", snapshot_data=snapshot_data or {},
+                        strike=float(target_strike), spot=spot,
+                        rsi=_csp_rsi, thresholds=csp_rsi_th,
+                        config=config_local)
+                    if _csp_sg:
+                        items.append(f"   - {_sgm.format_grade_note(_csp_sg)}")
+            except Exception:
+                pass
             items.append(f"   - **Source:** Live E*TRADE chain")
             # Capacity-gate DEFERRED tag (hard rule #41) — the ticket still
             # renders in full, but never reads as a green light while stress
@@ -4934,6 +4950,11 @@ def render_opportunities(new_ideas: list) -> list:
                 f"- Liquidity: OI {oi}, spread {spread:.1f}%"
                 + (f", IV {iv:.0f}%" if iv else "")
             )
+            # Setup Grade (George 2026-08-10) — the composed entry-timing
+            # line rides on the idea dict (single source: setup_grade.py).
+            # Absent (flag off / ungraded) → byte-identical legacy card.
+            if idea.get("setup_grade_line"):
+                lines.append(f"- {idea['setup_grade_line']}")
             if idea.get("rsi_14") is not None:
                 lines.append(
                     f"- **RSI:** {idea.get('rsi_tag')} — {idea.get('rsi_note', '')}"
@@ -4966,6 +4987,8 @@ def render_opportunities(new_ideas: list) -> list:
                 f"{annualized:.1f}% annualized · collateral ${collateral:,.0f}"
             )
             lines.append(f"  - **{idea.get('rsi_wait_reason', '')}**")
+            if idea.get("setup_grade_line"):
+                lines.append(f"  - {idea['setup_grade_line']}")
         lines.append("")
 
     if watch_only:

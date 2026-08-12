@@ -482,6 +482,15 @@ def _build_digest_inner(full_md: str, config: dict | None,
     #    here by design, so the digest never loses an action.
     _emit(action_block, _strip_italic_footers)
 
+    # 4b. 🏆 Best Setups Today — the entry-timing spotlight (George
+    #     2026-08-10: "a very clear message as to when I should get in on
+    #     every transaction") stays in the digest, in the same slot it
+    #     holds in the full briefing (right after the Action List). It is
+    #     COMPOSED in aggregate and only SELECTED here (pure-subset
+    #     contract); already top-3-per-side, so no extra trimming.
+    #     Absent from the full briefing → no-op.
+    _emit(_find(blocks, "best setups"))
+
     # 5. Red Flags & Priorities
     _emit(_find(blocks, "red flags"))
 

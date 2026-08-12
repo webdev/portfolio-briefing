@@ -46,7 +46,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import contract, counterpoints, diff, home, icons, ideas, inline_md, ingest, jobs, md_render, position_state, program_edge, red_flags, report_parser, rsi_zones, setups, tech_card, unified_card
+from . import contract, counterpoints, diff, home, icons, ideas, inline_md, ingest, jobs, md_render, position_state, program_edge, red_flags, report_parser, rsi_zones, setup_grade_ui, setups, tech_card, unified_card
 from .chips import (
     clear_recs_cache,
     parkev_chip_renderer,
@@ -109,6 +109,10 @@ contract.register_jinja_filters(templates.env)
 # zone/badge helpers. Bands come from the pipeline's rsi_discipline via
 # the config bridge; templates only consume what these globals emit.
 rsi_zones.register_jinja_globals(templates.env)
+# Setup Grade filtering (George 2026-08-10) — grade filter chips + card
+# token/badge helpers. Letter floors come from the pipeline's setup_grade
+# via the config bridge; templates only consume what these globals emit.
+setup_grade_ui.register_jinja_globals(templates.env)
 
 
 # ─── App + shared connection ──────────────────────────────────────────────

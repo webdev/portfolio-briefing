@@ -48,6 +48,11 @@ def _conviction_cell(o: dict) -> str:
       renders its precise rule-#38 badge instead of the bare rating segment.
     """
     parts = []
+    # Setup Grade (George 2026-08-10) — entry-timing letter leads the cell
+    # so the WHEN read is scannable next to the WHAT (conviction) read.
+    # Absent (flag off / ungraded) → byte-identical legacy cell.
+    if o.get("setup_grade"):
+        parts.append(f"🏁 {o['setup_grade']}")
     stars = _stars(o.get("conviction_score") or 0)
     if stars:
         parts.append(stars)

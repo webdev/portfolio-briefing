@@ -805,3 +805,35 @@ sector_exposure:
 expiration_policy:
   prefer_monthly: true
   spread_override_pct: 0.5   # weekly wins only if its measured spread% < half the monthly's
+
+# 2026-08-12 — Setup Grade (George 2026-08-10: "We need a very clear message
+# as to when I should get in on every transaction."). Side-aware entry-TIMING
+# grade (A/A-/B/C/D) fusing RSI position + volatility payment (true chain IV
+# rank when available, labeled RV proxy otherwise) + S/R anchoring + trend +
+# day-color/earnings context into ONE letter per ticker per side, with a
+# plain-English entry message on every ticket and a "🏆 Best Setups Today"
+# spotlight right after the Action List (kept in the digest). WHAT to trade
+# stays with the Parkev/CP/MV conviction reads; this grades only WHEN. It
+# NEVER overrides a hard gate — where a gate blocks, the grade renders
+# beside the block reason and the block stands; the side's RSI hard block
+# zeroes the grade to '—'. Missing inputs are excluded + renormalized (rule
+# #19 — never fabricated); ≥2 missing cap the letter at B. Single source of
+# truth: analysis/setup_grade.py. enabled: false → byte-identical legacy
+# output on every surface.
+setup_grade:
+  enabled: true
+  letters: {a: 85, a_minus: 78, b: 65, c: 50}  # score floors; below c → D
+  weights:
+    csp: {rsi: 0.30, vol: 0.25, support: 0.20, trend: 0.15, context: 0.10}
+    cc:  {rsi: 0.30, vol: 0.25, resistance: 0.20, trend: 0.15, context: 0.10}
+  vol_floor_rank: 40           # IV/RV rank ≤ this scores 0; linear to 1.0 at 100
+  support_full_strength: 4     # S/R cluster strength earning a full component
+  strike_band_pct: 0.03        # support ≤ strike×1.03 / resistance ≥ strike×0.97
+  support_zone_depth_pct: 0.15 # clusters deeper than this below/above are out of zone
+  trend_span_pct: 5            # CSP trend maps −5%…+5% vs 200-SMA to 0…1
+  earnings_clear_days: 14      # earnings ≥ this far out scores clear
+  earnings_near_days: 7        # ≤ this close scores 0 (event risk)
+  max_missing_for_full_grade: 1  # ≥2 unmeasured components cap the letter at B
+  spotlight:
+    enabled: true
+    top_n: 3                   # per side; fewer qualify → show what exists, never pad

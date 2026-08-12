@@ -145,6 +145,11 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
             f"  - SELL {contracts}× {symbol} ${strike:g}C exp {exp_prefix}{target_exp} "
             f"({dte} DTE{kind_seg}, {otm_str}, {delta_str}{anchor_str})"
         )
+        # Setup Grade (George 2026-08-10) — the composed CC-side entry-
+        # timing line rides on the upgrade dict (single source:
+        # analysis/setup_grade.py). Absent → byte-identical legacy card.
+        if cc.get("setup_grade_line"):
+            lines.append(f"  - {cc['setup_grade_line']}")
         if cc.get("rsi_14") is not None:
             lines.append(f"  - **RSI:** {cc.get('rsi_tag')} — {cc.get('rsi_note', '')}")
         if cc.get("lt_secular_note"):
@@ -305,6 +310,9 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 f"  - SELL {contracts}× {sym} ${strike:g}C exp {exp_fmt} "
                 f"({dte} DTE{_idx_kind_seg}, {otm_str}, {delta_str}{anchor_str})"
             )
+            # Setup Grade (George 2026-08-10) — index-CC entry-timing line.
+            if u.get("setup_grade_line"):
+                lines.append(f"  - {u['setup_grade_line']}")
             if u.get("rsi_14") is not None:
                 lines.append(f"  - **RSI:** {u.get('rsi_tag')} — {u.get('rsi_note', '')}")
             else:
