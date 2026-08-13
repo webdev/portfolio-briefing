@@ -161,7 +161,8 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                  config: dict | None = None,
                  sector_pcts: dict | None = None,
                  chain_iv_map: dict | None = None,
-                 floor_note: str | None = None) -> list[str]:
+                 floor_note: str | None = None,
+                 size_note: str | None = None) -> list[str]:
     """One candidate card. ``compact`` (2026-08-06 length diet) keeps the
     header, RSI metrics, entry ticket, and earnings line but drops the FV
     note + Verdict elaboration (both live in the companion
@@ -275,9 +276,15 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
     # B floor (George 2026-08-12: "recommendations are A or B, not D"):
     # a sub-B candidate card drops the 🎯 header for the planning
     # presentation — full card kept (rule #24), never green-lit.
-    _hdr_label = ("⏸ BELOW SETUP FLOOR"
-                  if (floor_note and status == "candidate")
-                  else _STATUS_LABEL[status])
+    if floor_note and status == "candidate":
+        _hdr_label = "⏸ BELOW SETUP FLOOR"
+    elif size_note and status == "candidate":
+        # 2026-08-13 SNDK gap — projected per-name concentration over the
+        # tier cap demotes the card from green-lit to planning (rule #24:
+        # full ticket + measured warning, never hidden).
+        _hdr_label = "⏸ OVER SIZE CAP"
+    else:
+        _hdr_label = _STATUS_LABEL[status]
     out = [f"**{_hdr_label} · `{tk}` · {spot_s}**{badge}"]
 
     metrics = []
@@ -372,16 +379,16 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                        if abs(drift) > _SPOT_DRIFT_REPRICE_PCT else "")
             # B floor composes with the capacity tag (George 2026-08-12) —
             # a ticket can be both capacity-gated and below-floor; each
-            # reason renders once.
-            if capacity_blocked and floor_note:
-                tag = ("⏸ **Deferred (capacity gated)** · "
-                       "⏸ **Below setup floor** · ")
-            elif capacity_blocked:
-                tag = "⏸ **Deferred (capacity gated)** · "
-            elif floor_note:
-                tag = "⏸ **Below setup floor** · "
-            else:
-                tag = "**Entry (CSP):** "
+            # reason renders once. The size demotion (2026-08-13 SNDK gap)
+            # composes the same way: every applicable tag renders once.
+            _tags = []
+            if capacity_blocked:
+                _tags.append("⏸ **Deferred (capacity gated)** · ")
+            if floor_note:
+                _tags.append("⏸ **Below setup floor** · ")
+            if size_note:
+                _tags.append("⏸ **Over tier size cap** · ")
+            tag = "".join(_tags) or "**Entry (CSP):** "
             # Monthly/weekly kind — computed at selection time from the REAL
             # chain date (rule #19); absent when the policy is disabled.
             _kind_seg = f", {q['exp_kind']}" if q.get("exp_kind") else ""
@@ -390,6 +397,10 @@ def _format_card(r: dict, fv_by_ticker: dict, etf_set, rsi_th: dict,
                 f"({q.get('dte', '?')} DTE{_kind_seg}) · mid ${q.get('mid', 0):.2f} "
                 f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) · _Live E*TRADE chain_{ovr_s}{drift_s}"
             )
+            if size_note:
+                # 2026-08-13 SNDK gap — the measured size warning renders
+                # directly under the ticket it gates (rule #24).
+                out.append(f"  - **{size_note}**")
         elif (r.get("verdict") or "").upper().startswith("BUY"):
             if mv_add_demote:
                 # Feature 1 (2026-08-06): NEW equity BUY above MV fair value
@@ -940,7 +951,35 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
     thin_premium: list[tuple[str, dict, dict]] = []  # rule #44 yield floor (bug 3)
     below_floor: list[tuple[str, dict, str]] = []    # B floor (George 2026-08-12)
+    oversize: list[tuple[str, dict, str]] = []       # projected concentration
+    # over the tier cap (2026-08-13 SNDK gap) — planning only, never green-lit
     seen: set[str] = set()
+
+    # Projected per-name concentration (2026-08-13 SNDK gap): a 1× $1230P
+    # ticket is $123,000 collateral — 11.1% of NLV on one Tier C name (8%
+    # cap) — and the card carried NO size warning. Single source of truth:
+    # position_tiers.projected_name_concentration (equity MV + held put
+    # obligations + NEW strike×100). Fail-open: missing NLV / any error →
+    # no note, never a fabricated pct (rule #19).
+    _nlv_cb = 0.0
+    try:
+        _nlv_cb = float(((snapshot_data or {}).get("balance") or {})
+                        .get("accountValue") or 0)
+    except (TypeError, ValueError):
+        _nlv_cb = 0.0
+
+    def _size_note_for(res: dict) -> str | None:
+        q = (res.get("csp_entry") or {})
+        if not q.get("strike") or _nlv_cb <= 0:
+            return None
+        try:
+            from analysis import position_tiers as _pt_sz
+            _pr = _pt_sz.projected_name_concentration(
+                (res.get("ticker") or "").upper(), q["strike"], 1,
+                _nlv_cb, _positions_cb, config)
+            return _pt_sz.size_warning_line(_pr)
+        except Exception:
+            return None
 
     # B floor (George 2026-08-12: "Yes, we absolutely need to fix the right
     # recommendations for both CSPs and CCs so that recommendations are A
@@ -1000,11 +1039,17 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 elif overlap and overlap["dupe"]:
                     already_open.append((tname, r, overlap))
                 else:
-                    _fl_n = _floor_note_for(r)
-                    if _fl_n:
-                        below_floor.append((tname, r, _fl_n))
+                    _sz_n = _size_note_for(r)
+                    if _sz_n:
+                        # Over the tier concentration cap even at 1 contract
+                        # — demote to planning (2026-08-13 SNDK gap).
+                        oversize.append((tname, r, _sz_n))
                     else:
-                        cands.append((tname, r))
+                        _fl_n = _floor_note_for(r)
+                        if _fl_n:
+                            below_floor.append((tname, r, _fl_n))
+                        else:
+                            cands.append((tname, r))
             elif status == "held_rsi":
                 seen.add(tk)
                 held.append((tname, r, rv))
@@ -1115,6 +1160,11 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                     # short-put stacking; the RSI gate is on the metrics line;
                     # the earnings warning is on the Earnings line.
                     SILENT = {"ENTRY_GATES_CLOSED"}  # rendered in capacity banner
+                    # Projected per-name concentration is covered by the
+                    # generator-side size check (over-cap candidates moved to
+                    # the ⏸ Over size cap section with the measured warning)
+                    # — never report the same warning twice on one card.
+                    SILENT.add("NAME_CONCENTRATION_EXCEEDED")
                     if ov:
                         SILENT.add("ROLL_UP_RISK_INCREASE")
                     visible = [f for f in findings if f.rule_id not in SILENT]
@@ -1168,6 +1218,31 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                                 sector_pcts=_sector_pcts_cb,
                                 chain_iv_map=_chain_iv_cb,
                                 floor_note=_fl_n)
+            card[0] = f"{card[0]}  · _{tname}_"
+            lines.extend(card)
+            lines.append("")
+
+    if oversize:
+        # Projected per-name concentration over the tier cap (2026-08-13
+        # SNDK gap) — full entry card kept for planning (rule #24, never
+        # hidden), demoted from green-lit with the measured size warning.
+        lines.append(f"{_h_sub} ⏸ Size exceeds tier concentration cap — "
+                     f"planning only ({len(oversize)})")
+        lines.append("_Even one contract pushes obligation-inclusive "
+                     "exposure on the name over its tier cap. Full ticket "
+                     "shown with the measured numbers — never green-lit at "
+                     "this size._")
+        lines.append("")
+        for tname, r, _sz_n in sorted(
+                oversize, key=lambda x: (x[0], x[1].get("ticker", ""))):
+            card = _format_card(r, fv_by_ticker, etf_set, rsi_th,
+                                gate_state=gate_state, compact=compact,
+                                mv_row=_mv_rows_cb.get(
+                                    (r.get("ticker") or "").upper()),
+                                config=config,
+                                sector_pcts=_sector_pcts_cb,
+                                chain_iv_map=_chain_iv_cb,
+                                size_note=_sz_n)
             card[0] = f"{card[0]}  · _{tname}_"
             lines.extend(card)
             lines.append("")

@@ -28,6 +28,7 @@ carries the 🅿️ Parkev chip, so the tier badge sits next to the rating chip.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 # Shared rule-#27 exclusion list (same helper as parkev_chip /
 # intrinsic_value): labelled sub-lines and continuation lines never get a
@@ -526,6 +527,171 @@ def format_tier_badge(tier: str) -> str:
     """Return the compact visual badge for a tier (e.g. '🟢 Tier A')."""
     t = (tier or _DEFAULT_TIER).upper().strip()
     return _TIER_BADGES.get(t, _TIER_BADGES[_DEFAULT_TIER])
+
+
+# ─── Projected per-name concentration (2026-08-13 SNDK gap) ────────────────
+#
+# The obligation-inclusive per-name concentration flag (red_flags 4c, built
+# 2026-08-10 for the MELI case) covers HELD positions; nothing checked the
+# PROJECTED concentration of a fresh-name candidate ticket. Observed card
+# (candidates_2026-08-13.md): "⏸ **Deferred (capacity gated)** · SELL 1×
+# SNDK $1230P exp **Fri Sep 18 '26** (36 DTE, monthly) · mid $43.00" with NO
+# size warning — yet one contract is $123,000 collateral = 11.1% of NLV on a
+# Tier C name whose obligation-inclusive cap is 8%. This is the single
+# source of truth for the projected math; every NEW-open put surface calls
+# it (candidate cards, PULLBACK CSP, LT_CSP via the pre-trade validator,
+# playbook opens, strangle adds). CC writes are share-backed — a new CC
+# adds no put obligation, so they are exempt.
+
+class ProjectedConcentration(NamedTuple):
+    """Result of the projected per-name concentration math."""
+    ticker: str
+    tier: str
+    contracts: int
+    pct: float                  # projected % of NLV (existing + new)
+    cap_pct: float              # the effective cap (percent, e.g. 8.0)
+    over: bool                  # pct > cap_pct
+    existing_dollars: float     # equity MV + held short-put obligation
+    new_dollars: float          # strike × 100 × contracts
+    max_contracts_within_cap: int
+    cap_label: str              # e.g. "Tier C cap 8%" / "core soft cap 18%"
+
+
+def projected_name_concentration_components(
+    ticker: str,
+    strike: float,
+    contracts: int,
+    nlv: float,
+    equity_mv: float,
+    existing_put_obligation: float,
+    config: dict | None,
+    *,
+    min_cap_pct: float | None = None,
+    min_cap_label: str | None = None,
+) -> "ProjectedConcentration | None":
+    """Projected per-name concentration from pre-computed components.
+
+    (existing equity MV + existing short-put obligations + NEW
+    strike×100×contracts) / NLV, measured against the ticker's tier cap.
+    ``min_cap_pct`` lets a surface honor a HIGHER cap it already grants the
+    name (e.g. the PULLBACK CSP surface's core soft cap) — the effective cap
+    is max(tier cap, min_cap_pct), labelled ``min_cap_label`` when it wins.
+    Fail-open: missing/invalid NLV or strike → None (no warning is ever
+    fabricated from missing data — hard rule #19).
+    """
+    try:
+        nlv_f = float(nlv or 0)
+        strike_f = float(strike or 0)
+        contracts_i = int(contracts or 0)
+    except (TypeError, ValueError):
+        return None
+    t = (ticker or "").upper().strip()
+    if not t or nlv_f <= 0 or strike_f <= 0 or contracts_i <= 0:
+        return None
+    eq = max(float(equity_mv or 0), 0.0)
+    ob = max(float(existing_put_obligation or 0), 0.0)
+    existing = eq + ob
+    new_dollars = strike_f * 100.0 * contracts_i
+    tier = tier_for(t, config)
+    cap_pct = concentration_cap_for_tier(tier, config)
+    cap_label = f"Tier {tier} cap {cap_pct:g}%"
+    if min_cap_pct is not None:
+        try:
+            _min = float(min_cap_pct)
+        except (TypeError, ValueError):
+            _min = None
+        if _min is not None and _min > cap_pct:
+            cap_pct = _min
+            cap_label = min_cap_label or f"cap {cap_pct:g}%"
+    pct = (existing + new_dollars) / nlv_f * 100.0
+    headroom = max(cap_pct / 100.0 * nlv_f - existing, 0.0)
+    max_contracts = int(headroom // (strike_f * 100.0))
+    return ProjectedConcentration(
+        ticker=t, tier=tier, contracts=contracts_i, pct=pct,
+        cap_pct=cap_pct, over=pct > cap_pct,
+        existing_dollars=existing, new_dollars=new_dollars,
+        max_contracts_within_cap=max_contracts,
+        cap_label=cap_label,
+    )
+
+
+def projected_name_concentration(
+    ticker: str,
+    strike: float,
+    contracts: int,
+    nlv: float,
+    positions: list | None,
+    config: dict | None,
+    *,
+    min_cap_pct: float | None = None,
+    min_cap_label: str | None = None,
+) -> "ProjectedConcentration | None":
+    """Projected per-name concentration of a NEW short put against the book.
+
+    Parses ``positions`` (snapshot shape) for the ticker's existing equity
+    market value and held short-put obligations — the SAME math as the
+    red_flags 4c obligation-inclusive flag — then adds the new contract(s).
+    Fail-open: missing NLV/strike/ticker → None.
+    """
+    t = (ticker or "").upper().strip()
+    if not t:
+        return None
+    equity_mv = 0.0
+    put_oblig = 0.0
+    for p in (positions or []):
+        if not isinstance(p, dict):
+            continue
+        atype = (p.get("assetType") or "").upper()
+        try:
+            qty = float(p.get("qty", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if atype == "EQUITY" and qty > 0 \
+                and (p.get("symbol") or "").upper() == t:
+            try:
+                mv = float(p.get("marketValue") or 0) or (
+                    qty * float(p.get("price") or 0))
+            except (TypeError, ValueError):
+                mv = 0.0
+            equity_mv += mv
+        elif (atype == "OPTION" and qty < 0
+                and (p.get("type") or "").upper() == "PUT"
+                and (p.get("underlying") or "").upper() == t):
+            try:
+                ob = float(p.get("strike") or 0) * 100 * abs(qty)
+            except (TypeError, ValueError):
+                ob = 0.0
+            put_oblig += ob
+    return projected_name_concentration_components(
+        t, strike, contracts, nlv, equity_mv, put_oblig, config,
+        min_cap_pct=min_cap_pct, min_cap_label=min_cap_label)
+
+
+def size_warning_line(res: "ProjectedConcentration | None") -> str | None:
+    """The visible size warning for an over-cap projected concentration.
+
+    e.g. '⚠ Size: 1 contract = $123,000 collateral — 11.1% of NLV on one
+    name (Tier C cap 8%)'. Appends the existing-exposure component when the
+    name is already held, and 'max within cap: N contracts' when a smaller
+    size would fit. None when res is None or within cap — never a
+    fabricated number (hard rule #19).
+    """
+    if res is None or not res.over:
+        return None
+    c_txt = ("1 contract" if res.contracts == 1
+             else f"{res.contracts} contracts")
+    line = (
+        f"⚠ Size: {c_txt} = ${res.new_dollars:,.0f} collateral — "
+        f"{res.pct:.1f}% of NLV on one name ({res.cap_label})"
+    )
+    if res.existing_dollars > 0:
+        line += (f" · incl. ${res.existing_dollars:,.0f} existing "
+                 f"{res.ticker} exposure")
+    if 1 <= res.max_contracts_within_cap < res.contracts:
+        m_txt = ("1 contract" if res.max_contracts_within_cap == 1
+                 else f"{res.max_contracts_within_cap} contracts")
+        line += f" · max within cap: {m_txt}"
+    return line
 
 
 # ─── Markdown annotator — mirrors parkev_chip.annotate_parkev_chips ───────

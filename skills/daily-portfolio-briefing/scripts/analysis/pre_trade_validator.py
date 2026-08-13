@@ -84,6 +84,9 @@ class PreTradeContext:
     existing_long_puts: list = field(default_factory=list)
     existing_short_calls: list = field(default_factory=list)
     held_shares: int = 0
+    # Equity market value held on the same ticker (for the projected
+    # per-name concentration rule). None → fall back to held_shares × spot.
+    held_equity_mv: Optional[float] = None
 
     # Aggregate by-date put obligation — for cluster-impact check
     obligation_by_expiration: dict = field(default_factory=dict)  # date -> $$
@@ -704,6 +707,75 @@ def validate_proposed_trade(
                     rule_id="PUT_STRIKE_OVERLAP",
                 ))
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Rule 16: Projected per-name concentration (2026-08-13 SNDK gap)
+    # ─────────────────────────────────────────────────────────────────────
+    # A fresh-name candidate ticket carried NO size warning: "SELL 1× SNDK
+    # $1230P ... mid $43.00" is a $123,000 obligation — 11.1% of NLV on one
+    # Tier C name (8% cap) — invisible to red_flags 4c (held positions
+    # only) and to every other rule here. Projected exposure = existing
+    # equity MV + held short-put obligations + NEW strike×100×qty, vs the
+    # ticker's tier cap. New short puts only — a covered call is
+    # share-backed and adds no put obligation (exempt). Fail-open on
+    # missing NLV/tier data: no finding, never a fabricated pct.
+    if ctx.action == "SELL_OPEN" and ctx.option_type == "PUT":
+        try:
+            from analysis.position_tiers import (
+                projected_name_concentration_components as _pnc,
+                size_warning_line as _pnc_line,
+            )
+        except ImportError:
+            try:
+                from position_tiers import (  # standalone-run fallback
+                    projected_name_concentration_components as _pnc,
+                    size_warning_line as _pnc_line,
+                )
+            except ImportError:
+                _pnc = None  # type: ignore
+        if _pnc is not None:
+            try:
+                eq_mv = ctx.held_equity_mv
+                if eq_mv is None and ctx.held_shares and ctx.spot:
+                    eq_mv = float(ctx.held_shares) * float(ctx.spot)
+                oblig = 0.0
+                for sp in (ctx.existing_short_puts or []):
+                    try:
+                        oblig += (float(sp.get("strike") or 0) * 100.0
+                                  * abs(float(sp.get("qty") or 0)))
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                res = _pnc(
+                    ctx.ticker, ctx.strike, _opt_qty(ctx),
+                    float(ctx.nlv or 0), eq_mv or 0.0, oblig, config)
+            except Exception:
+                res = None  # fail-open — never block on broken inputs
+            if res is not None and res.over:
+                line = _pnc_line(res) or ""
+                scalable = 1 <= res.max_contracts_within_cap < res.contracts
+                findings.append(TradeValidation(
+                    severity=SEV_WARN if scalable else SEV_BLOCK,
+                    reason=line.lstrip("⚠ ").strip() or (
+                        f"projected {res.pct:.1f}% of NLV on {ctx.ticker} "
+                        f"(Tier {res.tier} cap {res.cap_pct:g}%)"
+                    ),
+                    detail=(
+                        f"Selling {res.contracts}× {ctx.ticker} "
+                        f"${ctx.strike:g}P adds ${res.new_dollars:,.0f} of "
+                        f"cash-secured obligation on top of "
+                        f"${res.existing_dollars:,.0f} already carried on "
+                        f"the name (equity MV + held short-put "
+                        f"obligations) — projected {res.pct:.1f}% of NLV, "
+                        f"over the {res.cap_pct:g}% Tier {res.tier} "
+                        f"obligation-inclusive cap. "
+                        + (f"Scaling to {res.max_contracts_within_cap} "
+                           f"contract(s) fits within the cap."
+                           if scalable else
+                           "Even one contract exceeds the cap — pick a "
+                           "smaller-strike name or skip.")
+                    ),
+                    rule_id="NAME_CONCENTRATION_EXCEEDED",
+                ))
+
     # Sort: BLOCK first, then WARN, then OK
     findings.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, 9))
     return findings
@@ -804,6 +876,7 @@ def build_context_from_snapshot(
     existing_long_puts = []
     existing_short_calls = []
     held_shares = 0
+    held_equity_mv_acc = 0.0
     obligation_by_exp: dict = {}
     for p in positions:
         if (p.get("symbol") or "").startswith(f"{tkr}_"):
@@ -812,6 +885,13 @@ def build_context_from_snapshot(
             sym = (p.get("symbol") or "").upper()
             if sym == tkr:
                 held_shares += int(float(p.get("qty") or 0))
+                # Equity MV for Rule 16 (projected per-name concentration)
+                try:
+                    _mv = float(p.get("marketValue") or 0) or (
+                        float(p.get("qty") or 0) * float(p.get("price") or 0))
+                except (TypeError, ValueError):
+                    _mv = 0.0
+                held_equity_mv_acc += max(_mv, 0.0)
         elif p.get("assetType") == "OPTION":
             qty = float(p.get("qty") or 0)
             opt = (p.get("type") or p.get("option_type") or "").upper()
@@ -886,6 +966,7 @@ def build_context_from_snapshot(
         existing_long_puts=existing_long_puts,
         existing_short_calls=existing_short_calls,
         held_shares=held_shares,
+        held_equity_mv=held_equity_mv_acc if held_equity_mv_acc > 0 else None,
         obligation_by_expiration=obligation_by_exp,
         rating_tier=tier,
     )

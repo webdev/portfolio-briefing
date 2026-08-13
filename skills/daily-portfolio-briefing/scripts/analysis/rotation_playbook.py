@@ -1557,6 +1557,14 @@ def _compute(
                     # (rule #24). Defer to it so an RSI-blocked candidate is
                     # never silently dropped without a ⛔ footer line.
                     ignorable.add("RSI_OVERBOUGHT_PUT")
+                    # Rule 16 (projected per-name concentration, 2026-08-13
+                    # SNDK gap): this surface's per-name sizing authority is
+                    # the equity_stacking module (graded 5-10% penalty,
+                    # ≥10% hard-skip with its reason in the warnings footer,
+                    # and a documented force_include kill switch) — defer to
+                    # it so the validator's flat tier cap can't silently
+                    # override the kill switch or double-gate the same name.
+                    ignorable.add("NAME_CONCENTRATION_EXCEEDED")
                     if any(f.severity == _ptv.SEV_BLOCK
                            and f.rule_id not in ignorable for f in fnd):
                         continue      # blocked even post-close — excluded

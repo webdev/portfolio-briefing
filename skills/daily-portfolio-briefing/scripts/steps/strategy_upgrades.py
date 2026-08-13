@@ -507,6 +507,25 @@ def compute_strategy_upgrades(
             current_weight_pct, put_collateral, nlv,
             _tier_cap_ratio(symbol, params, concentration_cap))
 
+        # Obligation-inclusive projected concentration (2026-08-13 SNDK
+        # gap): the legacy check above sees equity MV + the NEW put leg but
+        # not put obligations ALREADY held on the name. Single source of
+        # truth: position_tiers.projected_name_concentration. Over cap →
+        # blocked with the measured size warning (the existing blocked
+        # plumbing demotes the upgrade). Fail-open on any error.
+        if not conc_check["blocked"]:
+            try:
+                from analysis import position_tiers as _pt_sz
+                _pr = _pt_sz.projected_name_concentration(
+                    symbol, strike, int(call_qty), nlv, positions, params)
+                if _pr is not None and _pr.over:
+                    conc_check = {
+                        "blocked": True,
+                        "reason": _pt_sz.size_warning_line(_pr),
+                    }
+            except Exception:
+                pass
+
         # Compute premium
         mid = (put_strike_data.get("bid", 0) + put_strike_data.get("ask", 0)) / 2
         if mid <= 0:

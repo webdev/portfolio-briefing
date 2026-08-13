@@ -4950,7 +4950,30 @@ def render_action_list(
                 if _core_cap > _pc_cap:
                     _pc_cap = _core_cap
                     _pc_label = f"core soft cap {_pc_cap:.0f}%"
-            if post_assign_pct > _pc_cap:
+            # Projected per-name concentration (2026-08-13 SNDK gap) —
+            # obligation-inclusive: existing equity MV + held short-put
+            # obligations + NEW strike×100, vs the SAME effective cap this
+            # surface already grants the name (tier cap / core soft cap).
+            # Over cap → measured warning line on the card AND demotion to
+            # the wait/planning subsection (rule #24 — never hidden, never
+            # green-lit). Fail-open: missing NLV / any error → no note.
+            _csp_size_note = None
+            try:
+                from analysis import position_tiers as _pt_size
+                _csp_size_note = _pt_size.size_warning_line(
+                    _pt_size.projected_name_concentration(
+                        ticker, target_strike, 1, nlv,
+                        (snapshot_data or {}).get("positions") or [],
+                        config_local,
+                        min_cap_pct=_pc_cap, min_cap_label=_pc_label))
+            except Exception:
+                _csp_size_note = None
+            if _csp_size_note:
+                # Obligation-inclusive size warning supersedes the legacy
+                # equity-only post-assignment line (same-card duplicate
+                # would double-report the same breach).
+                items.append(f"   - **{_csp_size_note}**")
+            elif post_assign_pct > _pc_cap:
                 items.append(
                     f"   - **⚠️ Concentration check:** Assignment would push {ticker} to "
                     f"~{post_assign_pct:.1f}% NLV (over {_pc_label}). Consider sizing down or pre-arrange "
@@ -4968,16 +4991,20 @@ def render_action_list(
                 f"   - **Account:** "
                 f"{_route_account('NEW CSP', ticker, None, accounts_cfg)}"
             )
-            if _csp_wait_reason or _csp_floor_note:
+            if _csp_wait_reason or _csp_floor_note or _csp_size_note:
                 # Move the fully-built block into the wait subsection: swap the
                 # numbered header for a ⏸ one and keep every check line (full
                 # ticket, rule #24). The numbered action list never sees it.
                 # The B floor (George 2026-08-12) composes with the RSI wait
                 # AND the capacity tag (already inside the block) — every
-                # applicable reason renders once.
+                # applicable reason renders once. The size demotion
+                # (2026-08-13 SNDK gap) composes the same way: the measured
+                # ⚠ Size line is already inside the block.
                 blk = items[_blk_start:]
                 del items[_blk_start:]
-                _demote_label = "wait" if _csp_wait_reason else "below setup floor"
+                _demote_label = ("wait" if _csp_wait_reason
+                                 else "below setup floor" if _csp_floor_note
+                                 else "over size cap")
                 blk[0] = blk[0].replace(
                     f"{n}. **CSP — PAID-TO-WAIT** {ticker}",
                     f"- ⏸ **CSP — PAID-TO-WAIT ({_demote_label})** {ticker}",
