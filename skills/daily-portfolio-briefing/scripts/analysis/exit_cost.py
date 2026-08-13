@@ -535,6 +535,7 @@ def format_anatomy_lines(
     prior_entry=None,
     dte=None,
     iv_rank=None,
+    verdict_context: str | None = None,
 ) -> list[str]:
     """Render the anatomy + verdict as action-list sub-bullets.
 
@@ -544,7 +545,20 @@ def format_anatomy_lines(
     "Verdict changed vs yesterday" line renders under the verdict with the
     measured driver(s) — or the honest not-fully-attributable fallback.
     ``dte`` / ``iv_rank`` feed the driver comparison (the anatomy dataclass
-    doesn't carry them)."""
+    doesn't carry them).
+
+    ``verdict_context`` (2026-08-13, IREN $47P one-voice fix): when the
+    CARD's headline action deliberately differs from the raw verdict (e.g.
+    headline "HOLD — GTC AT 50%" while the verdict engine reads
+    ROLL_DONT_CLOSE because no in-tenor roll-down is priced, or "CLOSE
+    BEFORE EARNINGS" overriding ROLL_DONT_CLOSE on event risk), the caller
+    passes the reconciliation string. The verdict then renders as an
+    explicitly SUBORDINATE context read — "⚖️ Context (verdict engine …)" —
+    followed by the resolution, instead of a second full-strength
+    "**⚖️ Verdict:**" voice contradicting the headline. Observed bug: the
+    2026-08-13 IREN card carried "**HOLD — GTC AT 50%** … +44% captured"
+    AND "**⚖️ Verdict: ROLL, don't close**" with no reconciliation —
+    three voices on one card."""
     c = _cfg(config)
     clean_pct = float(c.get("extrinsic_clean_pct", 0.15))
     pumped_pct = float(c.get("extrinsic_pumped_pct", 0.30))
@@ -584,6 +598,15 @@ def format_anatomy_lines(
     if anatomy.verdict == "NEUTRAL":
         lines.append(
             f"{indent}- ⚖️ Exit read: {anatomy.verdict_reason}{basis_bit}"
+        )
+    elif verdict_context:
+        # One card, one voice: the headline action already resolved this
+        # verdict — render it as marked-subordinate context, never a second
+        # full-strength recommendation.
+        lines.append(
+            f"{indent}- ⚖️ Context (verdict engine, subordinate to the "
+            f"headline): {headline} — {anatomy.verdict_reason}{basis_bit} "
+            f"→ {verdict_context}"
         )
     else:
         lines.append(

@@ -854,6 +854,7 @@ def _exit_cost_lines(
     equity_reviews: list | None = None,
     date_str: str | None = None,
     include_near_money: bool = False,
+    verdict_context: str | None = None,
 ) -> list[str]:
     """Exit-cost anatomy sub-bullets for an ITM/underwater SHORT PUT action.
 
@@ -889,13 +890,24 @@ def _exit_cost_lines(
         cfg_all = (snapshot_data or {}).get("_config", {}) or {}
         _vc_und = (rev.get("underlying")
                    or str(rev.get("contract", "")).split("_")[0])
-        return _xc.format_anatomy_lines(
-            anatomy, config=cfg_all,
-            prior_entry=_prior_verdict_entry(
-                rev.get("contract", ""), snapshot_data),
-            dte=rev.get("days_to_expiry"),
-            iv_rank=((snapshot_data or {}).get("iv_ranks", {}) or {})
-            .get(_vc_und))
+        try:
+            return _xc.format_anatomy_lines(
+                anatomy, config=cfg_all,
+                prior_entry=_prior_verdict_entry(
+                    rev.get("contract", ""), snapshot_data),
+                dte=rev.get("days_to_expiry"),
+                iv_rank=((snapshot_data or {}).get("iv_ranks", {}) or {})
+                .get(_vc_und),
+                verdict_context=verdict_context)
+        except TypeError:
+            # Older exit_cost without verdict_context — legacy rendering.
+            return _xc.format_anatomy_lines(
+                anatomy, config=cfg_all,
+                prior_entry=_prior_verdict_entry(
+                    rev.get("contract", ""), snapshot_data),
+                dte=rev.get("days_to_expiry"),
+                iv_rank=((snapshot_data or {}).get("iv_ranks", {}) or {})
+                .get(_vc_und))
     except Exception:
         return []  # advisory layer — never break the briefing
 
@@ -1366,6 +1378,24 @@ def _pick_debit_roll_down_alternative(
     return scored[0][2]
 
 
+def _days_to_earnings_snapshot(underlying: str, snapshot_data: dict | None,
+                               date_str: str | None) -> int | None:
+    """Calendar days from ``date_str`` (or today) to the underlying's next
+    earnings date per the snapshot's earnings_calendar. None when the date
+    is missing/unparseable (fail-open — an unknown print never blocks)."""
+    try:
+        e = ((snapshot_data or {}).get("earnings_calendar", {}) or {}).get(
+            underlying)
+        if not e:
+            return None
+        e_d = datetime.strptime(str(e)[:10], "%Y-%m-%d").date()
+        t_d = (datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+               if date_str else datetime.now().date())
+        return (e_d - t_d).days
+    except (TypeError, ValueError):
+        return None
+
+
 def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
                                  capture_pct: float,
                                  snapshot_data: dict | None,
@@ -1398,6 +1428,19 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
     2.4-year one. Candidate selection now enforces roll.max_action_tenor_days
     (core-union-aware ×3, same discipline as block #3 and advise.py).
 
+    Earnings precondition (2026-08-13, IREN $47P): the GTC-at-capture
+    squeeze REQUIRES the print to be comfortably beyond the squeeze window
+    (days_to_next_earnings > exit_cost.gtc_min_days_to_earnings, default
+    30 — the position-review squeeze-logic precondition). Observed card:
+    "**HOLD — GTC AT 50%** IREN_PUT_47_20261218 — +44% captured; place a
+    GTC buy-to-close at the 50%-capture price $9.32" with IREN earnings
+    ~14d away — parking a hope-for-decay GTC through a binary print. When
+    earnings land inside that window AND before the contract's expiry, the
+    card's single voice is the earnings-aware close (**CLOSE BEFORE
+    EARNINGS** — the CLOSE-INTO-RECOVERY family: removing the binary beats
+    premium mechanics), with the extrinsic cost stated honestly and the
+    ROLL_DONT_CLOSE verdict rendered as explicitly-subordinate context.
+
     The anatomy block renders under whichever single recommendation wins.
     Kill switch: exit_cost.one_voice (default true)."""
     out: list[str] = []
@@ -1417,6 +1460,53 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
         _max_tenor_tp = 120
     if und in _core_union_safe(_cfg_tp):
         _max_tenor_tp *= 3
+    # ── Earnings precondition on EVERY GTC-at-capture / roll resolution ──
+    _xc_cfg_tp = (_cfg_tp.get("exit_cost") or {})
+    try:
+        _gtc_min_d2e = int(_xc_cfg_tp.get("gtc_min_days_to_earnings", 30))
+    except (TypeError, ValueError):
+        _gtc_min_d2e = 30
+    _d2e_tp = _days_to_earnings_snapshot(und, snapshot_data, date_str)
+    try:
+        _dte_tp = (int(rev.get("days_to_expiry"))
+                   if rev.get("days_to_expiry") is not None else None)
+    except (TypeError, ValueError):
+        _dte_tp = None
+    _earnings_blocks_gtc = (
+        _d2e_tp is not None and 0 <= _d2e_tp <= _gtc_min_d2e
+        and (_dte_tp is None or _d2e_tp <= _dte_tp))
+    if _earnings_blocks_gtc:
+        gtc_target = entry * 0.5 if entry > 0 else 0.0
+        out.append(
+            f"{n}. **CLOSE BEFORE EARNINGS** {contract} — "
+            f"+{capture_pct:.0f}% captured (${pl:+,.0f}); buy-to-close at "
+            f"mid ${mid:.2f} before {und} prints in {_d2e_tp}d"
+        )
+        out.append(
+            f"   - **Why:** the GTC-at-50% squeeze requires earnings > "
+            f"{_gtc_min_d2e}d away — {und} prints in {_d2e_tp}d, inside the "
+            f"contract. With +{capture_pct:.0f}% already captured, removing "
+            f"the binary beats squeezing the last "
+            f"{max(50.0 - capture_pct, 0.0):.0f}% of decay (event risk "
+            f"beats premium mechanics)."
+        )
+        if getattr(anatomy, "extrinsic_total", 0):
+            out.append(
+                f"   - **Honest cost:** closing pays "
+                f"${anatomy.extrinsic_total:,.0f} of extrinsic"
+                f"{' — IV ' + anatomy.iv_context if anatomy.iv_context else ''}"
+                f" — that is the price of not holding a short option "
+                f"through the print. (GTC reference: the 50%-capture price "
+                f"is ${gtc_target:.2f}; do not park it through earnings.)"
+            )
+        out.extend(_exit_cost_lines(
+            rev, snapshot_data, equity_reviews, date_str,
+            include_near_money=True,
+            verdict_context=(
+                f"overridden — {und} prints in {_d2e_tp}d inside the "
+                f"contract; the close removes the binary (CLOSE-INTO-"
+                f"RECOVERY precedence)")))
+        return out
     # HOLD_FOR_DECAY (near-money gate, 2026-08-05 defect 2): the verdict says
     # "no exit needed — theta decaying in your favor", so no roll-down is
     # hunted; resolve straight to HOLD — GTC AT 50% with a verdict-accurate
@@ -1437,6 +1527,7 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
         out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews,
                                     date_str, include_near_money=True))
         return out
+    _verdict_ctx_tp: str | None = None
     best = _pick_roll_down_candidate(rev, max_tenor_days=_max_tenor_tp)
     if best is not None:
         instr = best.get("instruction") or {}
@@ -1477,6 +1568,15 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
             f"tenor cap is priced — let decay pay you; the GTC fills when "
             f"the market comes to your price."
         )
+        # One card, one voice (2026-08-13 IREN fix, part b): the raw verdict
+        # is ROLL_DONT_CLOSE but no in-tenor roll is priced, so the headline
+        # is HOLD — GTC. Render the verdict as SUBORDINATE context with the
+        # reconciliation, never a second full-strength recommendation.
+        _verdict_ctx_tp = (
+            f"resolved to HOLD — GTC AT 50%: no credit-positive roll-down "
+            f"inside the {_max_tenor_tp}d tenor cap is priced this cycle, "
+            f"so the position holds with a GTC instead of paying the "
+            f"extrinsic to close (one card, one voice)")
         # Honest ALTERNATIVE (never the headline): a small-debit IN-TENOR
         # roll-down with a meaningful strike reduction (≥ $25).
         alt = _pick_debit_roll_down_alternative(rev, _max_tenor_tp)
@@ -1501,7 +1601,8 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
                     f"risk reduction is worth the cost."
                 )
     out.extend(_exit_cost_lines(rev, snapshot_data, equity_reviews, date_str,
-                                include_near_money=True))
+                                include_near_money=True,
+                                verdict_context=_verdict_ctx_tp))
     return out
 
 
@@ -1631,41 +1732,68 @@ def sync_action_item_count(markdown: str) -> str:
 
 
 # One-voice sweep (2026-08-04 fix 1) — a card must never pair a CLOSE
-# headline with a "ROLL, don't close" verdict. CLOSE INTO RECOVERY is exempt
-# by documented precedence (task #40 fix 4: event risk beats premium
-# mechanics, and its Why line says so explicitly).
+# headline with a "ROLL, don't close" verdict. CLOSE INTO RECOVERY and CLOSE
+# BEFORE EARNINGS are exempt by documented precedence (task #40 fix 4 and
+# the 2026-08-13 IREN fix: event risk beats premium mechanics, and those
+# cards render the verdict as explicitly-subordinate "⚖️ Context" with the
+# reconciliation stated).
 _ONE_VOICE_HEAD_RE = re.compile(r"^\s*\d+\.\s+(?:🚨\s*)?\*\*[^*]*CLOSE[^*]*\*\*")
+# 2026-08-13 IREN extension: a HOLD headline paired with a FULL-STRENGTH
+# "**⚖️ Verdict: ROLL, don't close**" (or a CLOSE verdict) is the same
+# multi-voice bug from the other side — the observed card rendered
+# "**HOLD — GTC AT 50%** IREN_PUT_47_20261218 — +44% captured" with
+# "**⚖️ Verdict: ROLL, don't close**" inline and no reconciliation. A
+# verdict rendered via the marked-context form ("⚖️ Context (verdict
+# engine, subordinate to the headline): …") is NOT a violation.
+_ONE_VOICE_HOLD_HEAD_RE = re.compile(
+    r"^\s*\d+\.\s+(?:🚨\s*)?\*\*[^*]*HOLD[^*]*\*\*")
+_FULL_STRENGTH_CONTRA_VERDICT_RE = re.compile(
+    r"\*\*⚖️ Verdict: (?:ROLL, don't close|CLOSE[^*]*)\*\*")
 
 
 def one_voice_violations(items) -> list[str]:
     """Sweep rendered action-list lines (or a full briefing markdown string)
     for cards that carry BOTH a CLOSE headline and a 'ROLL, don't close'
-    verdict. Returns the offending headlines ([] = one-voice rule holds)."""
+    verdict, or a HOLD headline and a full-strength contradicting
+    (ROLL/CLOSE) verdict. Returns the offending headlines ([] = one-voice
+    rule holds)."""
     if isinstance(items, str):
         items = items.splitlines()
     violations: list[str] = []
     head: str | None = None
+    head_kind: str | None = None
     block: list[str] = []
 
     def _check():
         if head is None:
             return
         text = "\n".join(block)
-        if "CLOSE INTO RECOVERY" in head:
-            return  # documented precedence — the card explains the override
-        if "ROLL, don't close" in text:
-            violations.append(head.strip())
+        if head_kind == "close":
+            if ("CLOSE INTO RECOVERY" in head
+                    or "CLOSE BEFORE EARNINGS" in head):
+                return  # documented precedence — the card explains the override
+            if "ROLL, don't close" in text:
+                violations.append(head.strip())
+        elif head_kind == "hold":
+            if _FULL_STRENGTH_CONTRA_VERDICT_RE.search(text):
+                violations.append(head.strip())
 
     for line in items or []:
         if re.match(r"^\s*\d+\.\s", line or ""):
             _check()
-            head = line if _ONE_VOICE_HEAD_RE.match(line) else None
+            if _ONE_VOICE_HEAD_RE.match(line):
+                head, head_kind = line, "close"
+            elif _ONE_VOICE_HOLD_HEAD_RE.match(line):
+                head, head_kind = line, "hold"
+            else:
+                head, head_kind = None, None
             block = [line]
         elif head is not None and (line or "").startswith("  "):
             block.append(line)
         else:
             _check()
             head = None
+            head_kind = None
             block = []
     _check()
     return violations
@@ -2360,6 +2488,38 @@ def render_action_list(
                 elif opt_type == "CALL" and strike:
                     collateral = strike * 100 * qty
                     collateral_label = f"unlocks 100×{int(qty)} shares (notional ${collateral:,.0f}) for fresh covered-call premium"
+                    # ── Honest Gain line (2026-08-13 SMH bug): "for fresh
+                    # covered-call premium" is boilerplate that promises an
+                    # immediate rewrite the briefing's OWN RSI discipline
+                    # gates — new CC writes below the strength floor (RSI
+                    # < call.caution_below, default 60) sit in the
+                    # wait-for-strength band (hard rule #11). When the
+                    # measured RSI is in the wait/blocked band, say so with
+                    # the config-derived threshold; RSI-unknown keeps the
+                    # legacy label (never fabricate a gate — rule #19).
+                    try:
+                        from analysis import rsi_discipline as _rsi_cc
+                        _cc_cfg_all = ((snapshot_data or {}).get("_config", {})
+                                       or {})
+                        _cc_th = _rsi_cc.load_thresholds(_cc_cfg_all)
+                        _cc_rsi = _rsi_cc.rsi_for(
+                            rev.get("underlying")
+                            or contract.split("_")[0],
+                            (snapshot_data or {}).get("technicals"))
+                        if _cc_rsi is not None:
+                            _cc_assess = _rsi_cc.assess(_cc_rsi, "call",
+                                                        _cc_th)
+                            if _cc_assess.zone in ("blocked", "caution"):
+                                _cc_floor = float(
+                                    (_cc_th.get("call") or {}).get(
+                                        "caution_below", 60))
+                                collateral_label += (
+                                    f" — rewrite gated today (RSI "
+                                    f"{_cc_rsi:.0f} {_cc_assess.label}; "
+                                    f"a fresh CC waits for strength, RSI "
+                                    f"≥ {_cc_floor:.0f})")
+                    except Exception:
+                        pass  # advisory — never break the close card
                 else:
                     collateral_label = "frees the underlying for redeployment"
                 remaining_premium = mid * 100 * qty
@@ -2796,22 +2956,48 @@ def render_action_list(
             position_value = (rev.get("position_value")
                               or underlying_spot * 100 * qty
                               or 1.0)
+            # ── Rule #19 (2026-08-13 NOK bug): the new leg's FULL premium
+            # must be annualized over the FULL new-leg DTE, never the
+            # extension window. Passing `new_dte=dte_added` (28d) annualized
+            # $1.98/share of 155d premium over 28 days and rendered
+            # "Yield: **234.1%** ann. on new collateral ($11,000)" — the
+            # honest figures are ~42% ann. (full premium / full 155d leg)
+            # and the net-credit-over-extension read (+6.2% ann.), which
+            # compute_roll_yield now separates via `extension_days`.
+            _new_leg_dte = 0
+            try:
+                _ry_today = (datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+                             if date_str else datetime.now().date())
+                _new_leg_dte = (datetime.strptime(
+                    str(new_exp_raw)[:10], "%Y-%m-%d").date() - _ry_today).days
+            except (TypeError, ValueError):
+                _new_leg_dte = 0
+            if _new_leg_dte <= 0:
+                try:
+                    _new_leg_dte = int(rev.get("days_to_expiry") or 0) + int(dte_added or 0)
+                except (TypeError, ValueError):
+                    _new_leg_dte = 0
+            _ry_kwargs = dict(
+                new_premium=new_mid, new_strike=new_strike,
+                new_dte=_new_leg_dte or dte_added or 30,
+                contracts=int(qty), spot=underlying_spot or 1,
+                net_credit_dollars=credit, position_value=position_value,
+                old_strike=cur_strike,
+            )
             try:
                 roll_yield = compute_roll_yield(
-                    new_premium=new_mid, new_strike=new_strike, new_dte=dte_added or 30,
-                    contracts=int(qty), spot=underlying_spot or 1,
-                    net_credit_dollars=credit, position_value=position_value,
-                    old_strike=cur_strike,
                     option_type=opt_type or "CALL",
+                    extension_days=int(dte_added) if dte_added else None,
+                    **_ry_kwargs,
                 )
             except TypeError:
-                # Older yield-calculator without option_type — fall back
-                roll_yield = compute_roll_yield(
-                    new_premium=new_mid, new_strike=new_strike, new_dte=dte_added or 30,
-                    contracts=int(qty), spot=underlying_spot or 1,
-                    net_credit_dollars=credit, position_value=position_value,
-                    old_strike=cur_strike,
-                )
+                # Older yield-calculator without extension_days/option_type —
+                # fall back progressively (full-DTE window either way).
+                try:
+                    roll_yield = compute_roll_yield(
+                        option_type=opt_type or "CALL", **_ry_kwargs)
+                except TypeError:
+                    roll_yield = compute_roll_yield(**_ry_kwargs)
 
             # Headline — option-type aware. For CALLs, higher strike = more
             # cap headroom (defensive). For PUTs, higher strike = closer to

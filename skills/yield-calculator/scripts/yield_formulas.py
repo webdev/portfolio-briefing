@@ -107,13 +107,19 @@ def compute_roll_yield(
     position_value: float,
     old_strike: Optional[float] = None,
     option_type: str = "CALL",
+    extension_days: Optional[int] = None,
 ) -> dict:
     """
     Yield for a calendar or diagonal roll.
 
     new_premium: per-share premium received on the new short
     new_strike: strike of the new short
-    new_dte: DTE of the new short
+    new_dte: DTE of the new short — the FULL days to the new expiration,
+        NEVER the extension window. The premium numerator must match the
+        window denominator (rule #19): annualizing the full new-leg premium
+        over only the extension days inflates the figure by (new_dte /
+        extension) — the observed 2026-08-13 NOK bug rendered "234.1% ann."
+        for an 18% static yield earned over ~155d (the honest read is ~42%).
     contracts: spread count
     spot: current underlying price
     net_credit_dollars: net cash flow from the roll (positive = credit, negative = debit)
@@ -125,6 +131,11 @@ def compute_roll_yield(
         strike sits BELOW spot (positive = OTM cushion, negative = ITM).
         Puts populate `strike_cushion_pct` and null out `cap_buffer_pct` so
         the formatter can't render the wrong phrase.
+    extension_days: days the roll ADDS (new expiration − current expiration).
+        When provided, the NET-CASH yield annualizes over this window — the
+        incremental credit buys exactly these incremental days, so that pair
+        matches. When omitted (legacy callers), net-cash annualizes over
+        new_dte as before.
     """
     qty = abs(int(contracts))
     new_collateral = new_strike * 100 * qty
@@ -132,9 +143,12 @@ def compute_roll_yield(
     new_leg_yield = _safe_div(new_total_premium, new_collateral) * 100
     new_leg_yield_ann = _annualize(new_leg_yield, new_dte)
 
-    # Net-cash yield: just the trade's incremental cash impact
+    # Net-cash yield: just the trade's incremental cash impact. The window
+    # is the EXTENSION when known (incremental credit ÷ incremental days);
+    # otherwise the full new DTE (legacy behavior, still window-consistent).
+    net_cash_window = int(extension_days) if extension_days else new_dte
     net_cash_yield = _safe_div(net_credit_dollars, position_value) * 100
-    net_cash_yield_ann = _annualize(net_cash_yield, new_dte)
+    net_cash_yield_ann = _annualize(net_cash_yield, net_cash_window)
 
     is_put = (option_type or "CALL").upper() == "PUT"
 
@@ -173,6 +187,10 @@ def compute_roll_yield(
             "cap_buffer_pct": None if is_put else cap_buffer_pct,
             "strike_cushion_pct": strike_cushion_pct if is_put else None,
             "cap_buffer_change_pct": cap_buffer_change_pct,
+            # Windows behind each annualization — the formatter labels them
+            # so a reader can verify numerator/denominator agree (rule #19).
+            "new_leg_window_days": new_dte,
+            "net_cash_window_days": net_cash_window,
         },
         "new_collateral": new_collateral,
         "new_premium_dollars": new_total_premium,
@@ -336,10 +354,23 @@ def format_yield_line(yield_result: dict, prefix: str = "Yield") -> str:
         )
     elif kind in ("calendar_roll", "diagonal_roll"):
         y = yield_result["all_yields"]
+        # Label each annualization with its measuring window so the two
+        # figures can never be conflated (rule #19 — the 2026-08-13 NOK
+        # "234.1% ann." bug annualized the full new-leg premium over only
+        # the 28d extension). Legacy dicts without window keys render the
+        # unlabeled legacy line unchanged.
+        nl_win = y.get("new_leg_window_days")
+        nc_win = y.get("net_cash_window_days")
+        nl_bit = f" over the full {int(nl_win)}d new leg" if nl_win else ""
+        nc_bit = ""
+        if nc_win:
+            nc_bit = (f" over the +{int(nc_win)}d extension"
+                      if nl_win and nc_win != nl_win
+                      else f" over {int(nc_win)}d")
         line = (
             f"{prefix}: **{y['new_leg_yield_ann_pct']:.1f}%** ann. on new collateral "
-            f"(${yield_result['new_collateral']:,.0f}); "
-            f"net-cash {y['net_cash_yield_ann_pct']:+.1f}% ann. on position."
+            f"(${yield_result['new_collateral']:,.0f}){nl_bit}; "
+            f"net-cash {y['net_cash_yield_ann_pct']:+.1f}% ann. on position{nc_bit}."
         )
         if y.get("cap_buffer_pct") is not None:
             line += f" Cap buffer: {y['cap_buffer_pct']:+.1f}% above spot."

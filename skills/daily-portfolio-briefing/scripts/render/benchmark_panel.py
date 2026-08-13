@@ -200,11 +200,42 @@ def _render_attribution(lines: list[str], attribution) -> None:
             break
     if daily is not None and daily is not main:
         db = _get(daily, "buckets", {}) or {}
+        # 2026-08-13 fix: name the measured window explicitly — "premium
+        # +$0" without dates read as "no premium since the briefing I read
+        # yesterday", when it actually measures prior-SNAPSHOT → latest
+        # (an intraday rerun can move that baseline).
+        d_start = _get(daily, "start_date")
+        d_end = _get(daily, "end_date")
+        d_start_s = d_start if isinstance(d_start, str) else (
+            d_start.isoformat() if d_start else None)
+        d_end_s = d_end if isinstance(d_end, str) else (
+            d_end.isoformat() if d_end else None)
+        win = (f" ({d_start_s} → {d_end_s})"
+               if d_start_s and d_end_s else "")
         lines.append(
-            f"**Since last snapshot:** NLV {_fmt_usd(_get(daily, 'nlv_change'))} · "
+            f"**Since last snapshot{win}:** NLV {_fmt_usd(_get(daily, 'nlv_change'))} · "
             f"equity MTM {_fmt_usd(db.get('unrealized_equity'))} · "
             f"option MTM {_fmt_usd(db.get('option_mtm'))} · "
             f"premium {_fmt_usd(db.get('option_premium_net'))}")
+        # Honest timing-artifact label (2026-08-13): a ~$0 premium window
+        # right after a window that banked material premium is usually
+        # opens captured by the prior snapshot (intraday rerun) — say where
+        # the premium was counted instead of showing a bare false-looking
+        # zero.
+        try:
+            pw = _get(daily, "prior_window", {}) or {}
+            pw_prem = pw.get("option_premium_net")
+            day_prem = db.get("option_premium_net")
+            if (day_prem is not None and abs(day_prem) < 1.0
+                    and pw_prem is not None and abs(pw_prem) >= 500.0):
+                lines.append(
+                    f"_premium +$0 measures the {d_start_s} → {d_end_s} "
+                    f"window only — opens captured by the {d_start_s} "
+                    f"snapshot (possibly an intraday rerun) were counted "
+                    f"in the prior window's {_fmt_usd(pw_prem)}, not "
+                    f"lost._")
+        except Exception:  # noqa: BLE001 — advisory note, never break
+            pass
         lines.append("")
 
     # Cost-benefit summary: wheel income vs collateral opportunity cost.

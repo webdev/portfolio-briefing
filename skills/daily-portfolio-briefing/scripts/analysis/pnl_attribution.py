@@ -89,6 +89,11 @@ class PeriodAttribution:
     unattributed: float = 0.0
     cash_drag: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
+    # Daily period only (2026-08-13 fix): the PREVIOUS snapshot-to-snapshot
+    # window's premium, so the renderer can say honestly WHERE new-open
+    # premium was counted when today's window shows $0 (opens captured by an
+    # intraday rerun of the prior snapshot land in the prior window).
+    prior_window: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -102,6 +107,7 @@ class PeriodAttribution:
             "unattributed": round(self.unattributed, 2),
             "cash_drag": self.cash_drag,
             "notes": list(self.notes),
+            "prior_window": dict(self.prior_window),
         }
 
 
@@ -391,6 +397,67 @@ def compute_attribution(current_snapshot: dict, prior_snapshot: dict,
         return pa
 
 
+def compute_chained_attribution(snapshots: list, name: str = "period",
+                                max_notes: int = 30) -> PeriodAttribution:
+    """Chain-sum consecutive snapshot-pair attributions across a period.
+
+    ONE SOURCE OF TRUTH (2026-08-13 fix). Multi-day period buckets were
+    computed endpoint-to-endpoint (inception snapshot vs latest snapshot),
+    while the "Since last snapshot" line measured the last snapshot PAIR.
+    Two different measurements meant the two surfaces could not reconcile:
+
+      - a contract opened AND closed inside the period is absent from both
+        endpoints, so its premium/buyback simply vanished from the
+        cumulative ``option_premium_net`` (the 38 August round-trip closes
+        contributed nothing);
+      - every still-open contract landed 100% in ``option_premium_net`` at
+        its full entry premium with ``option_mtm`` stuck at $0 since
+        inception (the observed 2026-08-13 panel: "Option premium (net):
+        +$39,858 · Option mark-to-market delta: +$0");
+      - the day-over-day change of the cumulative bucket therefore did NOT
+        equal the daily line (observed: cumulative absorbed the new
+        SOXL/GOOG opens' premium while "Since last snapshot: … premium
+        +$0" rendered — reads as a false zero).
+
+    Chaining sums the SAME per-day (snapshot-to-snapshot) measurements the
+    daily line shows, so ``cum(as of D) − cum(as of D−1) == daily(D)`` for
+    every bucket, by construction. NLV endpoints telescope and are kept
+    endpoint-based. Notes are capped at ``max_notes`` (+ an honest "+N
+    more" marker). Fail-open like compute_attribution.
+    """
+    if not snapshots or len(snapshots) < 2:
+        pa = PeriodAttribution(name=name)
+        if snapshots:
+            pa.start_date = pa.end_date = _coerce_date(snapshots[0].get("date"))
+        return pa
+    total = PeriodAttribution(name=name)
+    try:
+        total.start_date = _coerce_date(snapshots[0].get("date"))
+        total.end_date = _coerce_date(snapshots[-1].get("date"))
+        total.nlv_start = _f(balance_nlv((snapshots[0].get("balance") or {})))
+        total.nlv_end = _f(balance_nlv((snapshots[-1].get("balance") or {})))
+        total.nlv_change = total.nlv_end - total.nlv_start
+        notes: list[str] = []
+        for prior, cur in zip(snapshots, snapshots[1:]):
+            link = compute_attribution(cur, prior, name=f"{name}_link")
+            for k in BUCKET_KEYS:
+                total.buckets[k] += link.buckets.get(k, 0.0)
+            total.unattributed += link.unattributed
+            notes.extend(link.notes)
+        if len(notes) > max_notes:
+            extra = len(notes) - max_notes
+            notes = notes[:max_notes] + [
+                f"… +{extra} more inferred-trade note(s) across the chain"]
+        total.notes = notes
+        total.notes.append(
+            f"buckets chain-summed across {len(snapshots) - 1} "
+            f"snapshot-to-snapshot windows — the same per-day measurement "
+            f"as the daily line (one source of truth)")
+    except Exception as e:  # noqa: BLE001 — fail-open
+        total.notes.append(f"chained attribution failed: {e}")
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Snapshot loading + multi-period report
 # ---------------------------------------------------------------------------
@@ -514,12 +581,21 @@ def build_attribution_report(snapshot_root: Path, as_of=None,
                 start_d = after[0]
             if start_d >= latest:
                 return
-            prior = load_snapshot(Path(snapshot_root) / start_d.isoformat())
-            if prior is None:
+            # 2026-08-13 fix: chain-sum the per-day (snapshot-to-snapshot)
+            # attributions across the period instead of one endpoint diff —
+            # the same measurement the daily line uses, so the cumulative
+            # buckets and "Since last snapshot" reconcile by construction.
+            period_dates = [d for d in dates if start_d <= d <= latest]
+            snaps = []
+            for d in period_dates:
+                s = load_snapshot(Path(snapshot_root) / d.isoformat())
+                if s is not None:
+                    snaps.append(s)
+            if len(snaps) < 2:
                 return
-            pa = compute_attribution(cur, prior, name=name)
+            pa = compute_chained_attribution(snaps, name=name)
             pa.cash_drag = _cash_drag(
-                snapshot_root, [d for d in dates if start_d <= d <= latest],
+                snapshot_root, period_dates,
                 spy_closes or {}, start_d, latest)
             report.periods.append(pa)
 
@@ -531,6 +607,22 @@ def build_attribution_report(snapshot_root: Path, as_of=None,
                 pa = compute_attribution(cur, prior, name="daily")
                 pa.cash_drag = _cash_drag(snapshot_root, [prior_d, latest],
                                           spy_closes or {}, prior_d, latest)
+                # Timing-artifact context (2026-08-13): opens executed
+                # intraday on the prior date are captured by the prior
+                # snapshot (possibly an intraday rerun) and counted in the
+                # PRIOR window — today's honest $0 must be able to say so.
+                if len(dates) >= 3:
+                    prior2 = load_snapshot(
+                        Path(snapshot_root) / dates[-3].isoformat())
+                    if prior2 is not None:
+                        pw = compute_attribution(prior, prior2,
+                                                 name="prior_window")
+                        pa.prior_window = {
+                            "start_date": dates[-3].isoformat(),
+                            "end_date": prior_d.isoformat(),
+                            "option_premium_net": round(
+                                pw.buckets.get("option_premium_net", 0.0), 2),
+                        }
                 report.periods.append(pa)
 
         _period("30d", latest - timedelta(days=30))
