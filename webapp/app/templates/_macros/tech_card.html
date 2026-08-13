@@ -5,7 +5,15 @@
    header · returns · signal chips · BB track · S/R track · trend 2×2 ·
    ST/LT verdicts. Hard rule #19: when the deep read is missing, the card
    says "chart data unavailable, verify manually" — never placeholders. #}
-{% macro tech_card(t) %}
+{# demote_zone (George 2026-08-13): when the surrounding card carries a
+   Setup Grade, the RSI zone chip is an RSI-leg-only read that visually
+   contradicts the full five-component grade ("CSP zone" beside a D).
+   The grade already contains the RSI read as a driver, so the zone chip
+   demotes to a small secondary detail. Cards with no grade (pure
+   technical-read surfaces) keep the zone chip primary. The
+   data-rsi-zones attribute is UNCHANGED either way — filter bars key on
+   data, not on the visual chip. #}
+{% macro tech_card(t, demote_zone=false) %}
 <article class="tech-card{% if not t.available %} tech-card-unavailable{% endif %}" data-ticker="{{ t.ticker }}" data-rsi-zones="{{ t.rsi_zones or 'unknown' }}">
     <header class="tc-head">
         <div class="tc-head-l">
@@ -38,7 +46,11 @@
            CC-range read next to the RSI chip. Humanized label (rule #31);
            omitted entirely when RSI is unknown (rule #19). #}
         {% if t.rsi_zone_badge %}
+        {% if demote_zone %}
+        <span class="tc-chip tc-chip-neutral tc-zone-chip tc-zone-secondary" title="{{ t.rsi_zone_badge.title }} (RSI leg only — the Setup Grade on this card is the full five-component read.)">{{ t.rsi_zone_badge.label }}</span>
+        {% else %}
         <span class="tc-chip tc-chip-{{ t.rsi_zone_badge.tone }} tc-zone-chip" title="{{ t.rsi_zone_badge.title }}">{{ t.rsi_zone_badge.label }}</span>
+        {% endif %}
         {% endif %}
     </div>
 

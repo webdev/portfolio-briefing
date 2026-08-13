@@ -1,19 +1,39 @@
-{# ─── unified_card(base, tech, tab_kind, extra=None) — task #10 ───
-   One universal ticker card for every briefing tab:
-     top    — tab-specific extras (verb badge / weight / contract / …)
-     middle — the full infographic tech card (task #7 macro, reused);
-              when the deep read is missing, a compact "chart data
-              unavailable" skeleton (hard rule #19 — explicit, never
-              fabricated); when the row has NO ticker at all (capacity
-              placeholders), the tech section is omitted entirely.
-     bottom — tab-specific affordances (counterpoint disclosure w/ the
-              existing HTMX lazy-load pattern, unchanged).
+{# ─── unified_card(base, tech, tab_kind, extra=None) — task #10 + hierarchy v2 ───
+   One universal ticker card for every briefing tab.
+
+   Card hierarchy v2 (George 2026-08-13: "unified cards are hard to read
+   now. I don't even know what to pay attention to... It just doesn't
+   feel very actionable."). The card answers three questions in strict
+   visual order:
+
+     1. WHAT TO DO — one primary line (.uc-primary): Setup Grade letter
+        + the action/verdict, large + bold, tone-colored. The only line
+        that must be readable at a glance.
+     2. WHY — one compact row (.uc-why) of small muted driver chips
+        (the grade's own drivers, else measured RSI / IVr / DTE / P&L).
+     3. EVERYTHING ELSE — collapsed behind <details class="uc-more">:
+        source chips (Parkev / tier / entry token / matrix cell), metric
+        rows, rationale, and the full tech card (S/R · BB · MACD).
+
+   BLOCKING flags stay OUTSIDE the collapse — they change the action:
+   option warnings, idea status chips (deferred / capacity blocked),
+   the waiting/gated trade-line prefixes, and gate/wait rationale on
+   demoted ideas. Non-blocking context lives inside the collapse.
+
+   The RSI zone chip inside the embedded tech card DEMOTES to a small
+   secondary detail whenever the card carries a Setup Grade (the grade
+   already contains the RSI read as a driver — a primary "🎯 CSP zone"
+   beside a "CC setup D" reads as a contradiction). Zone chips remain
+   primary on cards with no grade. Filter bars are untouched: they key
+   on the data-rsi-zones / data-setup-grades ATTRIBUTES, which are
+   emitted exactly as before.
 
    MUST be imported `with context` — it calls the context helpers
-   resolve_ticker / option_pl_pct / extras_tone and the context
-   functions parkev_chip / tier_badge, plus briefing + counterpoint_keys
-   for the actions footer. Every field access is guarded so a missing
-   value renders "—" (fail open), never a 500. #}
+   resolve_ticker / option_pl_pct / extras_tone / grade_letter_info /
+   why_chips and the context functions parkev_chip / tier_badge, plus
+   briefing + counterpoint_keys for the actions footer. Every field
+   access is guarded so a missing value renders "—" (fail open), never
+   a 500. #}
 {% from "_macros/tech_card.html" import tech_card %}
 
 {% macro _metric(label, value) %}
@@ -26,9 +46,27 @@
 {%- else -%}—{%- endif -%}
 {% endmacro %}
 
+{# Primary-line grade letter chip — pipeline grade only, never fabricated. #}
+{% macro _letter(g) %}
+{% if g %}<span class="uc-primary-letter uc-letter-{{ g.tone }}" title="{{ g.title }}">{{ g.letter }}</span>{% endif %}
+{% endmacro %}
+
+{# WHY row — top 2-3 measured drivers as small muted chips. #}
+{% macro _why_row(chips) %}
+{% if chips %}<div class="uc-why">{% for c in chips %}<span class="uc-chip-mini">{{ c }}</span>{% endfor %}</div>{% endif %}
+{% endmacro %}
+
 {% macro unified_card(base, tech, tab_kind, extra=None) %}
 {% set _tk = resolve_ticker(base, tab_kind) %}
 {% set _opl = option_pl_pct(base) if tab_kind == 'option' else none %}
+{% set _grade = grade_letter_info(base) %}
+{% set _why = why_chips(base, tab_kind, tech) %}
+{% set _sg_badge = setup_grade_badge(base) %}
+{# A Setup Grade "present on the card" includes grades riding on attached
+   strategy affordances (SOXL/SOXX-class CC-writes on option cards) —
+   they demote the embedded zone chip just like the card's own grade. #}
+{% set _att_grade = namespace(v=false) %}
+{% if tab_kind == 'option' and strategy_attached is defined and _tk and strategy_attached.get(_tk) %}{% for _su in strategy_attached.get(_tk) %}{% if grade_letter_info(_su) %}{% set _att_grade.v = true %}{% endif %}{% endfor %}{% endif %}
 {# Rule #43 UX — waiting/gated idea cards render at reduced visual weight
    (uc-muted) so a demoted ticket never reads as a recommendation. #}
 <article class="uc-card uc-{{ tab_kind }}{% if tab_kind == 'idea' and base.group in ('waiting', 'gated') %} uc-muted{% endif %}"
@@ -49,10 +87,10 @@
          {# Task #17 — Ideas filter chips key off these attributes. #}
          {% if tab_kind == 'idea' %}data-idea-kind="{{ base.kind or '' }}" data-idea-status="{{ base.status or '' }}" data-idea-dte="{{ base.dte if base.dte is not none else '' }}" data-idea-bucket="{{ base.dte_bucket or '' }}" data-idea-group="{{ base.group or '' }}"{% endif %}>
 
-    {# ══ TOP: tab-specific extras ══ #}
+    {# ══ VISIBLE ZONE: primary line + why + blocking flags ══ #}
     {% if tab_kind == 'action' %}
     <div class="uc-extras uc-tone-{{ extras_tone(base.kind) }}">
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-{{ extras_tone(base.kind) }}">
             <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ base.kind }}</strong></span>
             <span class="uc-ident">{{ base.ident | pretty_contract }}</span>
             <span class="uc-extras-right">
@@ -63,69 +101,50 @@
                 {% else %}
                     <span class="muted">◔ new</span>
                 {% endif %}
-                <span class="muted uc-recon">{{ base.recon_status or "—" }}</span>
             </span>
         </div>
+        {{ _why_row(_why) }}
+        {# The summary IS the ticket — it stays visible (actionable). #}
         {% if base.summary %}<div class="uc-extras-note">{{ base.summary | summary_html(base.kind, base.ident) }}</div>{% endif %}
     </div>
 
     {% elif tab_kind == 'equity' %}
     <div class="uc-extras uc-tone-{{ extras_tone(base.recommendation) }}">
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-{{ extras_tone(base.recommendation) }}">
             <span class="uc-badge rec-{{ base.recommendation }}" title="{{ base.recommendation or '' }}"><span class="action-icon">{{ base.recommendation | action_icon }}</span> <strong>{{ (base.recommendation | humanize_action) if base.recommendation else "—" }}</strong></span>
+            {% if _tk %}<span class="uc-ident"><strong>{{ _tk }}</strong></span>{% endif %}
             <span class="uc-extras-right">
-                {{ parkev_chip(base.ticker) | safe }}
-                {{ tier_badge(base.ticker) | safe }}
+                <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(base.pl_pct) }}</span></span>
             </span>
         </div>
-        <div class="uc-extras-metrics">
-            {{ _metric("Weight", "{:.1%}".format(base.weight) if base.weight is not none else none) }}
-            {{ _metric("Spot", "${:,.2f}".format(base.price) if base.price is not none else none) }}
-            {{ _metric("Qty", "{:,.0f}".format(base.qty) if base.qty is not none else none) }}
-            {{ _metric("Value", "${:,.0f}".format(base.market_value) if base.market_value is not none else none) }}
-            <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(base.pl_pct) }}</span></span>
-        </div>
-        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+        {{ _why_row(_why) }}
     </div>
 
     {% elif tab_kind == 'option' %}
     {% set _short = (base.qty is not none) and (base.qty < 0) %}
     <div class="uc-extras uc-tone-{{ extras_tone(base.recommendation) }}">
-        <div class="uc-extras-head">
-            <span class="uc-badge uc-badge-contract {{ 'uc-put' if (base.type or '')|upper == 'PUT' else 'uc-call' }}">{{ 'SHORT' if _short else 'LONG' }} {{ (base.type or '?')|upper }}</span>
-            <span class="uc-ident">{% if base.contract %}{{ base.contract | pretty_contract }}{% else %}<strong>{{ base.underlying }}</strong>{% endif %}</span>
+        <div class="uc-extras-head uc-primary uc-primary-{{ extras_tone(base.recommendation) }}">
+            <span class="uc-badge rec-{{ base.recommendation }}" title="{{ base.recommendation or '' }}"><span class="action-icon">{{ base.recommendation | action_icon }}</span> <strong>{{ (base.recommendation | humanize_action) if base.recommendation else "—" }}</strong></span>
+            {% if _opl is not none %}<span class="uc-primary-capture num {{ 'uc-pos' if _opl > 0 else ('uc-neg' if _opl < 0 else '') }}">{{ "{:+.0%}".format(_opl) }}{% if _short %} captured{% endif %}</span>{% endif %}
             <span class="uc-extras-right">
-                <span class="uc-badge rec-{{ base.recommendation }}" title="{{ base.recommendation or '' }}"><span class="action-icon">{{ base.recommendation | action_icon }}</span> <strong>{{ (base.recommendation | humanize_action) if base.recommendation else "—" }}</strong></span>
+                <span class="uc-badge uc-badge-contract {{ 'uc-put' if (base.type or '')|upper == 'PUT' else 'uc-call' }}">{{ 'SHORT' if _short else 'LONG' }} {{ (base.type or '?')|upper }}</span>
             </span>
         </div>
-        <div class="uc-extras-metrics">
-            {{ _metric("Qty", "{:.0f}".format(base.qty) if base.qty is not none else none) }}
-            {{ _metric("DTE", base.days_to_expiry if base.days_to_expiry is not none else none) }}
-            {{ _metric("Mid", "${:,.2f}".format(base.current_mid) if base.current_mid is not none else none) }}
-            {{ _metric("Entry", "${:,.2f}".format(base.entry_price) if base.entry_price is not none else none) }}
-            <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(_opl) }}</span></span>
-            {{ _metric("IV rank", "{:.1f}".format(base.iv_rank) if base.iv_rank else none) }}
-        </div>
         <div class="uc-extras-sub">
-            {% if base.matrix_cell_id %}<code class="uc-matrix-cell" title="wheel-roll-advisor matrix cell">{{ base.matrix_cell_id }}</code>{% endif %}
-            {{ parkev_chip(base.underlying) | safe }}
-            {# George 2026-08-13 — 🎓 entry grade (pre-humanized token from
-               the pipeline's locked ledger record; no token → nothing,
-               never a fabricated grade — rules #19/#31). #}
-            {% if base.entry_grade and base.entry_grade.get('token') %}<span class="uc-entry-grade" title="Entry grade — graded on entry-day conditions, locked at first write (state/entry_grade_ledger.json)">{{ base.entry_grade.get('token') }}</span>{% endif %}
+            <span class="uc-ident">{% if base.contract %}{{ base.contract | pretty_contract }}{% else %}<strong>{{ base.underlying }}</strong>{% endif %}</span>
         </div>
+        {{ _why_row(_why) }}
+        {# BLOCKING: warnings change the action — never collapsed. #}
         {% if base.warnings %}
         <div class="uc-warnings">{% for w in base.warnings %}<span class="uc-warning">⚠ {{ w }}</span>{% endfor %}</div>
         {% endif %}
-        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
         {# Task #17 — inline strategy-upgrade affordances (WRITE CC /
-           COLLAR) attached to this underlying's option card. Data comes
-           from split_strategy_upgrades in the route; when the context
-           doesn't provide it (other callers), nothing renders. #}
+           COLLAR): recommendations, so they stay visible. #}
         {% if strategy_attached is defined and _tk and strategy_attached.get(_tk) %}
         <div class="uc-strategy-affordances">
             {% for su in strategy_attached.get(_tk) %}
             <div class="uc-affordance uc-affordance-{{ su.type }}">
+                {{ _letter(grade_letter_info(su)) }}
                 <span class="uc-badge rec-{{ su.type }}" title="{{ su.type or '' }}"><span class="action-icon">{{ su.type | action_icon }}</span> <strong>{{ strategy_affordance_label(su.type) or (su.type | humanize_action) }}</strong></span>
                 {% if su.rationale %}<span class="uc-extras-note muted">{{ su.rationale | inline_md }}</span>{% endif %}
             </div>
@@ -136,70 +155,57 @@
 
     {% elif tab_kind == 'longterm' %}
     <div class="uc-extras uc-tone-{{ extras_tone(base.kind) }}">
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-{{ extras_tone(base.kind) }}">
+            {{ _letter(_grade) }}
             <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind or '' }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ (base.kind | humanize_action) if base.kind else "—" }}</strong></span>
-            {% if _tk %}<span class="uc-extras-right">{{ parkev_chip(_tk) | safe }} {{ tier_badge(_tk) | safe }}</span>{% endif %}
         </div>
         {% if base.concrete_trade %}<div class="uc-extras-note uc-trade">{{ base.concrete_trade | inline_md }}</div>{% endif %}
-        {% if base.yield_or_cost %}<div class="uc-extras-sub muted num">{{ base.yield_or_cost }}</div>{% endif %}
-        {% if base.trigger_reasons %}
-        <div class="uc-chips">{% for t in base.trigger_reasons %}<span class="uc-chip-mini">{{ t }}</span>{% endfor %}</div>
-        {% endif %}
-        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+        {{ _why_row(_why) }}
     </div>
 
     {% elif tab_kind == 'strategy' %}
     <div class="uc-extras uc-tone-{{ extras_tone(base.type) }}">
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-{{ extras_tone(base.type) }}">
+            {{ _letter(_grade) }}
             <span class="uc-badge rec-{{ base.type }}" title="{{ base.type or '' }}"><span class="action-icon">{{ base.type | action_icon }}</span> <strong>{{ (base.type | humanize_action) if base.type else "—" }}</strong></span>
-            {# Setup Grade badge (George 2026-08-10) — CC-side timing. #}
-            {% set _sg_badge = setup_grade_badge(base) %}
-            {% if _sg_badge %}<span class="rep-badge rep-badge-{{ _sg_badge.rep_tone }} uc-grade-badge" title="{{ _sg_badge.title }}">{{ _sg_badge.label }}</span>{% endif %}
+            {% if _tk %}<span class="uc-ident"><strong>{{ _tk }}</strong></span>{% endif %}
             <span class="uc-extras-right">
                 <span class="chip tier-{{ base.tier }}">{{ base.tier or "—" }}</span>
-                {% if _tk %}{{ parkev_chip(_tk) | safe }}{% endif %}
             </span>
         </div>
-        <div class="uc-extras-metrics">
-            {{ _metric("Shares", base.shares_held if base.shares_held is not none else none) }}
-            {{ _metric("Price", "${:,.2f}".format(base.current_price) if base.current_price is not none else none) }}
-            {{ _metric("Weight", "{:.1f}%".format(base.current_weight_pct) if base.current_weight_pct is not none else none) }}
-        </div>
-        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+        {{ _why_row(_why) }}
     </div>
 
     {% elif tab_kind == 'idea' %}
     <div class="uc-extras uc-tone-{{ extras_tone(base.kind) }}">
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-{{ extras_tone(base.kind) }}">
+            {{ _letter(_grade) }}
             <span class="uc-badge rec-{{ base.kind }}" title="{{ base.kind or '' }}"><span class="action-icon">{{ base.kind | action_icon }}</span> <strong>{{ (base.kind | humanize_action) if base.kind else "—" }}</strong></span>
+            {# BLOCKING: the status chip changes the action — stays with the
+               primary line, never collapsed. #}
             <span class="status-chip {{ base.status_class }}">{{ base.status_label }}</span>
-            {# Setup Grade badge (George 2026-08-10) — tooltip lists the
-               measured drivers + the entry message; no grade → no badge. #}
-            {% set _sg_badge = setup_grade_badge(base) %}
-            {% if _sg_badge %}<span class="rep-badge rep-badge-{{ _sg_badge.rep_tone }} uc-grade-badge" title="{{ _sg_badge.title }}">{{ _sg_badge.label }}</span>{% endif %}
-            <span class="uc-extras-right">
-                {% if _tk %}{{ parkev_chip(_tk) | safe }} {{ tier_badge(_tk) | safe }}{% endif %}
-            </span>
         </div>
-        {% if base.source_label and base.source_label != "—" %}<div class="uc-extras-sub muted">Source: {{ base.source_label }}</div>{% endif %}
         {# Rule #43 UX — mirror the markdown's "Trade (when RSI cools):"
            honesty: a demoted ticket is never rendered as a bare trade. #}
         {% if base.concrete_trade %}<div class="uc-extras-note uc-trade">{% if base.group == 'waiting' %}<span class="uc-trade-prefix">when conditions clear:</span> {% elif base.group == 'gated' %}<span class="uc-trade-prefix">excluded:</span> {% endif %}{{ base.concrete_trade | inline_md }}</div>{% endif %}
-        {% if base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+        {{ _why_row(_why) }}
+        {# BLOCKING: on waiting/gated ideas the rationale IS the gate/wait
+           reason — visible. On actionable ideas it's context → collapsed. #}
+        {% if base.rationale and base.group in ('waiting', 'gated') %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
     </div>
 
     {% elif tab_kind == 'rotation' %}
     {% set _mode = (extra or {}).get('mode', 'equity') %}
     <div class="uc-extras uc-tone-roll">
         {% if _mode == 'option' %}
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-roll">
             <span class="uc-badge uc-badge-contract">🔄 RESET</span>
             <span class="uc-ident">{{ base['from'].symbol | pretty_contract }}</span>
             <span class="uc-extras-right"><span class="muted num">at {{ "{:.0f}".format(base['from'].captured_pct) if base['from'].captured_pct is not none else "—" }}% capture</span></span>
         </div>
         {% if base.to and base.to.hint %}<div class="uc-extras-note muted">{{ base.to.hint | inline_md }}</div>{% endif %}
         {% else %}
-        <div class="uc-extras-head">
+        <div class="uc-extras-head uc-primary uc-primary-roll">
             <span class="uc-rotation-from">
                 <a href="/positions/{{ base['from'].ticker }}" class="rotation-ticker">{{ base['from'].ticker }}</a>
                 {% if base['from'].weight_pct is not none %}<span class="muted num">{{ base['from'].weight_pct }}%</span>{% endif %}
@@ -221,16 +227,76 @@
     </div>
     {% endif %}
 
-    {# ══ MIDDLE: the shared tech card (or explicit fallback) ══ #}
-    {% if tech %}
-    <div class="uc-tech">{{ tech_card(tech) }}</div>
-    {% elif _tk %}
-    <div class="tc-skeleton-compact" data-ticker="{{ _tk }}">
-        <div class="tc-skeleton-head">
-            <a class="tc-tk no-popover" href="/positions/{{ _tk }}">{{ _tk }}</a>
+    {# ══ EVERYTHING ELSE: collapsed details — sources · data · technicals ══
+       The zone chip inside the tech card demotes when a Setup Grade is
+       present on this card (grade is the full read; zone = RSI leg). #}
+    {% if _tk or tech %}
+    <details class="uc-more">
+        <summary class="uc-more-summary">Details <span class="uc-more-hint">sources · data · technicals</span></summary>
+        <div class="uc-more-body">
+            {# Sources row — third-party / policy chips in ONE place. #}
+            <div class="uc-sources">
+                {% if _tk %}{{ parkev_chip(_tk) | safe }}{% endif %}
+                {% if _tk and tab_kind in ('equity', 'idea', 'longterm', 'strategy') %}{{ tier_badge(_tk) | safe }}{% endif %}
+                {% if _sg_badge %}<span class="rep-badge rep-badge-{{ _sg_badge.rep_tone }} uc-grade-badge" title="{{ _sg_badge.title }}">{{ _sg_badge.label }}</span>{% endif %}
+                {% if tab_kind == 'option' and base.matrix_cell_id %}<code class="uc-matrix-cell" title="wheel-roll-advisor matrix cell">{{ base.matrix_cell_id }}</code>{% endif %}
+                {# George 2026-08-13 — 🎓 entry grade (pre-humanized token from
+                   the pipeline's locked ledger record; no token → nothing,
+                   never a fabricated grade — rules #19/#31). #}
+                {% if tab_kind == 'option' and base.entry_grade and base.entry_grade.get('token') %}<span class="uc-entry-grade" title="Entry grade — graded on entry-day conditions, locked at first write (state/entry_grade_ledger.json)">{{ base.entry_grade.get('token') }}</span>{% endif %}
+                {% if tab_kind == 'idea' and base.source_label and base.source_label != "—" %}<span class="muted">Source: {{ base.source_label }}</span>{% endif %}
+            </div>
+
+            {# Metric rows #}
+            {% if tab_kind == 'equity' %}
+            <div class="uc-extras-metrics">
+                {{ _metric("Weight", "{:.1%}".format(base.weight) if base.weight is not none else none) }}
+                {{ _metric("Spot", "${:,.2f}".format(base.price) if base.price is not none else none) }}
+                {{ _metric("Qty", "{:,.0f}".format(base.qty) if base.qty is not none else none) }}
+                {{ _metric("Value", "${:,.0f}".format(base.market_value) if base.market_value is not none else none) }}
+                <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(base.pl_pct) }}</span></span>
+            </div>
+            {% elif tab_kind == 'option' %}
+            <div class="uc-extras-metrics">
+                {{ _metric("Qty", "{:.0f}".format(base.qty) if base.qty is not none else none) }}
+                {{ _metric("DTE", base.days_to_expiry if base.days_to_expiry is not none else none) }}
+                {{ _metric("Mid", "${:,.2f}".format(base.current_mid) if base.current_mid is not none else none) }}
+                {{ _metric("Entry", "${:,.2f}".format(base.entry_price) if base.entry_price is not none else none) }}
+                <span class="uc-metric"><span class="uc-metric-label">P&amp;L</span><span class="uc-metric-value">{{ _pl(_opl) }}</span></span>
+                {{ _metric("IV rank", "{:.1f}".format(base.iv_rank) if base.iv_rank else none) }}
+            </div>
+            {% elif tab_kind == 'strategy' %}
+            <div class="uc-extras-metrics">
+                {{ _metric("Shares", base.shares_held if base.shares_held is not none else none) }}
+                {{ _metric("Price", "${:,.2f}".format(base.current_price) if base.current_price is not none else none) }}
+                {{ _metric("Weight", "{:.1f}%".format(base.current_weight_pct) if base.current_weight_pct is not none else none) }}
+            </div>
+            {% endif %}
+
+            {# Non-blocking notes / rationale #}
+            {% if tab_kind == 'action' and base.recon_status %}<div class="muted uc-recon">Recon: {{ base.recon_status }}</div>{% endif %}
+            {% if tab_kind == 'longterm' %}
+                {% if base.yield_or_cost %}<div class="uc-extras-sub muted num">{{ base.yield_or_cost }}</div>{% endif %}
+                {% if base.trigger_reasons %}
+                <div class="uc-chips">{% for t in base.trigger_reasons %}<span class="uc-chip-mini">{{ t }}</span>{% endfor %}</div>
+                {% endif %}
+            {% endif %}
+            {% if tab_kind in ('equity', 'option', 'strategy', 'longterm') and base.rationale %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+            {% if tab_kind == 'idea' and base.rationale and base.group not in ('waiting', 'gated') %}<div class="uc-extras-note muted">{{ base.rationale | inline_md }}</div>{% endif %}
+
+            {# The shared tech card (or explicit fallback — hard rule #19). #}
+            {% if tech %}
+            <div class="uc-tech">{{ tech_card(tech, demote_zone=(_sg_badge is not none or _att_grade.v)) }}</div>
+            {% elif _tk %}
+            <div class="tc-skeleton-compact" data-ticker="{{ _tk }}">
+                <div class="tc-skeleton-head">
+                    <a class="tc-tk no-popover" href="/positions/{{ _tk }}">{{ _tk }}</a>
+                </div>
+                <div class="tc-unavailable-note">📉 Chart data unavailable this cycle — verify manually.</div>
+            </div>
+            {% endif %}
         </div>
-        <div class="tc-unavailable-note">📉 Chart data unavailable this cycle — verify manually.</div>
-    </div>
+    </details>
     {% endif %}
 
     {# ══ BOTTOM: tab-specific affordances ══ #}

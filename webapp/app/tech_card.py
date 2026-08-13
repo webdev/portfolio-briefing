@@ -288,7 +288,11 @@ def build_card(
         "rsi_zone_badge": rsi_zones.zone_badge(rsi_val),
         "returns": [r for r in returns if r],
         "chips": [
-            rsi_chip(deep.get("rsi_14")),
+            # One-voice RSI (George 2026-08-13): the RSI chip and the zone
+            # badge MUST derive from the same coerced value — a chip saying
+            # "RSI 54" beside a zone badge computed from a different read
+            # is exactly the "indicators feel wrong" failure mode.
+            rsi_chip(rsi_val),
             bb_chip(bb_pos),
             macd_chip(hist, hist_5d),
         ],

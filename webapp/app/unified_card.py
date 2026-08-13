@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import contract
+from . import contract, setup_grade_ui
 
 # Plain equity tickers: letters, optional dot (BRK.B), optional digits.
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,7}$")
@@ -137,6 +137,99 @@ def extras_tone(kind: Any) -> str:
     if k in _TONE_OK:
         return "ok"
     return "neutral"
+
+
+# ─── Card hierarchy v2 (George 2026-08-13) ────────────────────────────
+# "unified cards are hard to read now. I don't even know what to pay
+# attention to... It just doesn't feel very actionable."
+#
+# The card answers three questions in strict visual order:
+#   1. WHAT TO DO — one primary line: Setup Grade letter + action/verdict.
+#   2. WHY — top 2-3 drivers as small muted chips.
+#   3. EVERYTHING ELSE — collapsed behind a <details> disclosure.
+# These helpers feed (1) and (2); both are pure and fail-open (missing
+# data → None / [], never a fabricated value — hard rule #19).
+
+# Grade letter → visual tone for the primary-line letter chip.
+_LETTER_TONES = {"A": "good", "A-": "good", "B": "good", "C": "mid", "D": "low"}
+
+
+def grade_letter_info(base: Any) -> dict[str, str] | None:
+    """Primary-line grade chip for a card: {letter, side, tone, title}.
+
+    Letter/side come from the pipeline grade riding on the briefing JSON
+    (setup_grade_ui.grade_of — never re-derived in the webapp). Tone:
+    A/A-/B → good (green), C → mid (muted), D → low (amber), '—'/'n/a' →
+    bad (red). None when the card is ungraded — no letter is ever
+    fabricated (rule #19)."""
+    side, letter, raw = setup_grade_ui.grade_of(base)
+    if not side or not letter:
+        return None
+    badge = setup_grade_ui.grade_badge(base)
+    title = badge["title"] if badge else ""
+    side_label = "CSP" if side == "csp" else "CC"
+    return {
+        "letter": letter,
+        "side": side_label,
+        "tone": _LETTER_TONES.get(letter, "bad"),
+        "title": f"{side_label} setup grade {letter} — {title}" if title
+                 else f"{side_label} setup grade {letter}",
+    }
+
+
+def why_chips(base: Any, tab_kind: str, tech: Any = None,
+              max_chips: int = 3) -> list[str]:
+    """Top 2-3 measured drivers for the WHY row, as short strings.
+
+    Graded cards use the pipeline's own setup_grade_drivers (the grade's
+    actual components). Ungraded cards fall back to measured facts from
+    the card's data: RSI (tech view-model), IV rank, DTE, weight, P&L.
+    Everything comes from this cycle's data — no defaults, no
+    placeholders (rule #19). Empty list when nothing is measured."""
+    kind = (tab_kind or "").lower()
+    chips: list[str] = []
+
+    _side, letter, raw = setup_grade_ui.grade_of(base)
+    if letter:
+        drivers = [str(d) for d in (raw.get("setup_grade_drivers") or []) if d]
+        if drivers:
+            return drivers[:max_chips]
+
+    rsi = None
+    if isinstance(tech, dict) and tech.get("rsi") is not None:
+        try:
+            rsi = float(tech["rsi"])
+        except (TypeError, ValueError):
+            rsi = None
+    if rsi is not None:
+        chips.append(f"RSI {rsi:.0f}")
+
+    try:
+        ivr = _get(base, "iv_rank")
+        if ivr is not None and float(ivr):
+            chips.append(f"IVr {float(ivr):.0f}")
+    except (TypeError, ValueError):
+        pass
+
+    if kind == "option":
+        dte = _get(base, "days_to_expiry")
+        if dte is not None:
+            chips.append(f"{dte} DTE")
+    elif kind == "equity":
+        try:
+            w = _get(base, "weight")
+            if w is not None:
+                chips.append(f"{float(w):.1%} wt")
+        except (TypeError, ValueError):
+            pass
+        try:
+            pl = _get(base, "pl_pct")
+            if pl is not None:
+                chips.append(f"P&L {float(pl):+.1%}")
+        except (TypeError, ValueError):
+            pass
+
+    return chips[:max_chips]
 
 
 # ─── Task #17 — Strategy tab redistribution ───────────────────────────

@@ -68,7 +68,20 @@ def _grade_of(base: Any) -> tuple[str | None, str | None, dict]:
     else parsed from the LTO trigger-reason note. (None, None, {}) when
     ungraded — fail closed, no badge."""
     if not isinstance(base, dict):
-        return None, None, {}
+        # Strategy upgrades reach the briefing route as Pydantic models
+        # (models/briefing.py StrategyUpgrade, extra="allow") — the grade
+        # rides in the extras. Without this dump, every graded CC-write
+        # rendered ungraded on the real page (the exact 2026-08-13
+        # NFLX/SOFI/SOXL/SOXX/VRT "graded D but shouting CSP zone" case).
+        dump = getattr(base, "model_dump", None)
+        if not callable(dump):
+            return None, None, {}
+        try:
+            base = dump()
+        except Exception:
+            return None, None, {}
+        if not isinstance(base, dict):
+            return None, None, {}
     raw = base.get("raw") if isinstance(base.get("raw"), dict) else base
     upgrade_type = str(base.get("type") or raw.get("type") or "").lower()
     kind = str(base.get("kind") or raw.get("kind") or "").upper()
@@ -90,6 +103,14 @@ def _grade_of(base: Any) -> tuple[str | None, str | None, dict]:
     else:
         side = "csp"  # every other graded surface is put-side today
     return side, str(letter), raw
+
+
+def grade_of(base: Any) -> tuple[str | None, str | None, dict]:
+    """Public accessor for the card-hierarchy redesign (George 2026-08-13):
+    (side, letter, raw) — side 'csp'/'cc', letter 'A'..'D'/'—'/'n/a', raw
+    the dict the grade fields were read from. (None, None, {}) when
+    ungraded (fail closed, rule #19)."""
+    return _grade_of(base)
 
 
 def grade_tokens(base: Any) -> str:

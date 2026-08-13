@@ -78,48 +78,58 @@
     </div>
     {% endif %}
 
-    {% if c.fair_value %}
-    <div class="rep-row rep-fv">
-        <span class="rep-row-label">FV</span>
-        <span class="rep-row-body">{{ c.fair_value | inline_md }}</span>
-    </div>
-    {% endif %}
-
-    {% if c.earnings %}
-    <div class="rep-row rep-earn">
-        <span class="rep-row-label">Earnings</span>
-        <span class="rep-row-body">{{ c.earnings | inline_md }}</span>
-    </div>
-    {% endif %}
-
+    {# BLOCKING (deferred / capacity gate) — changes the action, so it
+       stays visible outside the collapse (hierarchy v2, 2026-08-13). #}
     {% if c.deferred_note %}
     <div class="rep-row rep-deferred">
         <span class="rep-row-body">{{ c.deferred_note | inline_md }}</span>
     </div>
     {% endif %}
 
-    {# Task #18 — visible tech card, matching the unified card design on
-       /briefing/{date} (task #10). The full infographic technical read
-       renders inline (no collapsed disclosure). When the ticker's deep
-       read is missing this cycle, an explicit compact skeleton — never
-       fabricated numbers (hard rule #19). #}
-    {% if tech %}
-    <div class="rep-tech">{{ tech_card(tech) }}</div>
-    {% elif tech_enabled and c.ticker %}
-    <div class="rep-tech">
-        <div class="tc-skeleton-compact" data-ticker="{{ c.ticker }}">
-            <div class="tc-skeleton-head">
-                <a class="tc-tk no-popover" href="/positions/{{ c.ticker }}">{{ c.ticker }}</a>
+    {# ── Hierarchy v2 (George 2026-08-13: "hard to read... don't know
+       what to pay attention to") — FV, earnings, extras, and the full
+       technical read (S/R · BB · MACD) collapse behind a details
+       disclosure. The action line, metrics, read/verdict/trigger, and
+       blocking flags above stay visible at a glance. Tech content is
+       still explicit on expand — never fabricated (hard rule #19). #}
+    {% if c.fair_value or c.earnings or c.extras or tech or (tech_enabled and c.ticker) %}
+    <details class="rep-more">
+        <summary class="uc-more-summary">Details <span class="uc-more-hint">FV · earnings · technicals</span></summary>
+        <div class="uc-more-body">
+            {% if c.fair_value %}
+            <div class="rep-row rep-fv">
+                <span class="rep-row-label">FV</span>
+                <span class="rep-row-body">{{ c.fair_value | inline_md }}</span>
             </div>
-            <div class="tc-unavailable-note">📉 Chart data unavailable this cycle — verify manually.</div>
-        </div>
-    </div>
-    {% endif %}
+            {% endif %}
 
-    {% if c.extras %}
-    <div class="rep-extras">
-        {% for x in c.extras %}<div>{{ x | inline_md }}</div>{% endfor %}
-    </div>
+            {% if c.earnings %}
+            <div class="rep-row rep-earn">
+                <span class="rep-row-label">Earnings</span>
+                <span class="rep-row-body">{{ c.earnings | inline_md }}</span>
+            </div>
+            {% endif %}
+
+            {% if tech %}
+            <div class="rep-tech">{{ tech_card(tech) }}</div>
+            {% elif tech_enabled and c.ticker %}
+            <div class="rep-tech">
+                <div class="tc-skeleton-compact" data-ticker="{{ c.ticker }}">
+                    <div class="tc-skeleton-head">
+                        <a class="tc-tk no-popover" href="/positions/{{ c.ticker }}">{{ c.ticker }}</a>
+                    </div>
+                    <div class="tc-unavailable-note">📉 Chart data unavailable this cycle — verify manually.</div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if c.extras %}
+            <div class="rep-extras">
+                {% for x in c.extras %}<div>{{ x | inline_md }}</div>{% endfor %}
+            </div>
+            {% endif %}
+        </div>
+    </details>
     {% endif %}
 </article>
 {% endmacro %}

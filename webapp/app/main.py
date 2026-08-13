@@ -567,6 +567,10 @@ def _wire_routes(app: FastAPI) -> None:
                     resolve_ticker=unified_card.resolve_ticker,
                     option_pl_pct=unified_card.option_pl_pct,
                     extras_tone=unified_card.extras_tone,
+                    # Card hierarchy v2 (George 2026-08-13) — primary-line
+                    # grade letter + WHY driver chips.
+                    grade_letter_info=unified_card.grade_letter_info,
+                    why_chips=unified_card.why_chips,
                 ),
             )
         finally:

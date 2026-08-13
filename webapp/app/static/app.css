@@ -2943,6 +2943,61 @@ html[data-theme="solarized-light"] .tech-card {
 .sg-hidden { display: none !important; }
 .uc-grade-badge { border: 1px dashed currentColor; font-weight: 600; white-space: nowrap; }
 
+/* ─── Card hierarchy v2 (George 2026-08-13) ───
+   "unified cards are hard to read now. I don't even know what to pay
+   attention to... It just doesn't feel very actionable."
+   Strict visual order: (1) WHAT TO DO — one large bold primary line,
+   (2) WHY — small muted driver chips, (3) everything else collapsed
+   behind a details disclosure. Theme-token colors only (WCAG-safe). */
+
+/* (1) Primary line — the ONLY line that must read at a glance. */
+.uc-primary { font-size: 14.5px; }
+.uc-primary > .uc-badge { font-size: 14px; }
+.uc-primary > .uc-badge strong { font-size: 14.5px; font-weight: 700; }
+.uc-primary .uc-ident { font-size: 13.5px; font-weight: 600; }
+.uc-primary-ok    > .uc-badge strong { color: var(--color-positive); }
+.uc-primary-close > .uc-badge strong { color: var(--color-danger); }
+.uc-primary-roll  > .uc-badge strong { color: #E5A82C; }
+.uc-primary-capture { font-weight: 700; font-size: 13.5px; }
+
+/* Setup Grade letter chip on the primary line — grade tones:
+   A/A-/B good (green) · C mid (muted) · D low (amber) · —/n/a bad (red). */
+.uc-primary-letter {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 24px; height: 24px; padding: 0 5px;
+    border: 2px solid currentColor; border-radius: 7px;
+    font-weight: 800; font-size: 14px; line-height: 1;
+}
+.uc-letter-good { color: var(--color-positive); }
+.uc-letter-mid  { color: var(--color-text-secondary); }
+.uc-letter-low  { color: #E5A82C; }
+.uc-letter-bad  { color: var(--color-danger); }
+
+/* (2) WHY row — compact muted driver chips. */
+.uc-why { display: flex; gap: 5px; flex-wrap: wrap; }
+.uc-why .uc-chip-mini { color: var(--color-text-secondary); }
+
+/* (3) Collapsed details — sources · data · technicals. */
+.uc-more, .rep-more { border-top: 1px dashed var(--color-border-subtle); padding-top: 4px; }
+.uc-more-summary {
+    cursor: pointer; font-size: 11.5px; font-weight: 600;
+    color: var(--color-text-secondary); padding: 3px 0;
+    list-style-position: inside;
+}
+.uc-more-summary:hover { color: var(--color-text-primary); }
+.uc-more-hint { font-weight: 400; font-size: 10.5px; color: var(--color-text-tertiary); margin-left: 4px; }
+.uc-more-body { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
+.uc-sources { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
+.uc-sources:empty { display: none; }
+
+/* Demoted RSI zone chip — when the card carries a Setup Grade, the zone
+   read (RSI leg only) steps back so it can't visually contradict the
+   full five-component grade ("CSP zone" beside a CC setup D). */
+.tc-zone-secondary {
+    border-style: dotted; font-weight: 400; font-size: 9.5px;
+    color: var(--color-text-secondary); opacity: .85;
+}
+
 /* ════════════════════════════════════════════════════════════════════
    Tech legend (task #13) — collapsible "how to read the signals" panel
    ────────────────────────────────────────────────────────────────────

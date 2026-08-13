@@ -1,10 +1,21 @@
-"""Regression tests for task #18 — Setups ticker cards use the unified
-card design: the technical read renders VISIBLE inline, not collapsed.
+"""Regression tests for task #18 — Setups ticker cards carry the same
+tech content as /briefing/{date}, through the same card structure.
 
-User's symptom: "On /setups/{date}, the tech data lives in a collapsed
-<sl-details> disclosure at the bottom of each card. You have to click
-'📈 Technical read — click to expand' to see the same signals that render
-prominently on /briefing/{date}. Inconsistent."
+Original symptom (June): "On /setups/{date}, the tech data lives in a
+collapsed <sl-details> disclosure at the bottom of each card. You have to
+click '📈 Technical read — click to expand' to see the same signals that
+render prominently on /briefing/{date}. Inconsistent." — the fix at the
+time rendered tech inline.
+
+SUPERSEDED by hierarchy v2 (George 2026-08-13: "unified cards are hard
+to read now. I don't even know what to pay attention to"): tech content
+now sits inside the SHARED <details class="rep-more"> collapse used by
+every card surface — consistent with /briefing/{date}, which collapses
+the same content behind <details class="uc-more">. What these tests
+still pin: the tech markers are present in the card DOM (real data,
+never dropped), the OLD one-off 'tc-details' expander stays gone, and
+the skeleton/fail-closed paths are unchanged. The collapse contract
+itself is pinned in test_card_hierarchy.py.
 
 Fixtures: candidates_2026-06-30.md + when_to_enter_2026-06-30.md, with
 snapshots/2026-06-30/technicals.json carrying NVDA (full deep read) and
@@ -17,22 +28,24 @@ from __future__ import annotations
 DATE = "2026-06-30"
 
 
-def test_setups_renders_tech_card_inline_not_collapsed(client):
-    """/setups/{date} returns 200 with the tech card markers directly in
-    the document — NOT hidden inside a <sl-details class="tc-details">."""
+def test_setups_renders_full_tech_card_content(client):
+    """/setups/{date} returns 200 with the full tech card markers in the
+    card DOM (inside the shared rep-more collapse — hierarchy v2). The
+    OLD one-off <sl-details class="tc-details"> expander stays gone."""
     r = client.get(f"/setups/{DATE}")
     assert r.status_code == 200
     body = r.text
-    # Full tech card markers present inline
+    # Full tech card markers present in the card DOM
     assert "tech-card" in body
     assert "tc-bb-track" in body       # Bollinger visualization
     assert "tc-sr-track" in body       # Support/Resistance visualization
-    assert "tc-verdicts" in body       # ST/LT verdicts visible
-    # The old collapsed disclosure is gone
+    assert "tc-verdicts" in body       # ST/LT verdicts
+    # The old one-off collapsed disclosure is gone
     assert "tc-details" not in body
     assert "Technical read — BB" not in body  # old sl-details summary text
-    # The new wrapper is present
+    # The wrapper is present, inside the shared hierarchy-v2 collapse
     assert 'class="rep-tech"' in body
+    assert '<details class="rep-more">' in body
 
 
 def test_setups_card_without_tech_renders_compact_skeleton(client):
@@ -48,9 +61,9 @@ def test_setups_card_without_tech_renders_compact_skeleton(client):
     assert 'data-ticker="AMAT"' in body or 'data-ticker="SMCI"' in body
 
 
-def test_setups_actionable_hero_carries_visible_tech(client):
+def test_setups_actionable_hero_carries_tech_content(client):
     """The 🎯 Actionable-today hero reuses the same card macro — its
-    preview cards must also carry the visible tech data (NVDA is the
+    preview cards must also carry the tech content (NVDA is the
     fixture's actionable candidate with a deep read)."""
     r = client.get(f"/setups/{DATE}")
     assert r.status_code == 200
