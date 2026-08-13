@@ -161,6 +161,10 @@ def aggregate_briefing(
 
     # Make config visible to render layer (used for core_positions/ltcg_rate/etc.)
     snapshot_data["_config"] = config
+    # George 2026-08-13 — the Watch panel's 🎓 entry-grade tokens resolve
+    # the ledger from here when aggregate runs standalone (tests /
+    # re-render) and the Step 7.6 maintenance stash is absent.
+    snapshot_data["_snapshot_dir"] = str(snapshot_dir)
 
     # 2026-08-06 length diet — render.compact (default ON) turns the four
     # longest surfaces (LTO, Candidate Trades, Technical Read, Watch) into

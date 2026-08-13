@@ -579,12 +579,37 @@ def compute_scorecard(ledger: dict, today_iso: str,
             b: {"avg_capture_pct": round(sum(v) / len(v), 1), "n": len(v)}
             for b, v in buckets.items()}
 
+    # Open book (George 2026-08-13: "where in the briefing i can see the
+    # entries grades for my current options") — grade distribution + avg
+    # over the CURRENTLY OPEN graded entries only, so the scorecard
+    # answers the question at a glance. None when nothing open+graded.
+    open_graded = [e for e in graded if e.get("status") == "open"]
+    open_book = None
+    if open_graded:
+        ob_dist: dict = {}
+        for e in open_graded:
+            letter = e["grade"]["letter"]
+            ob_dist[letter] = ob_dist.get(letter, 0) + 1
+        ob_avg = sum(_score(e) for e in open_graded) / len(open_graded)
+        _order = {g: i for i, g in enumerate(_GRADEABLE)}
+        ob_sorted = sorted(ob_dist.items(),
+                           key=lambda kv: _order.get(kv[0], 99))
+        open_book = {
+            "n": len(open_graded),
+            "avg": round(ob_avg, 1),
+            "letter": _sg.letter_for(ob_avg, config),
+            "distribution": dict(ob_sorted),
+            "line": (" · ".join(f"{v} {k}" for k, v in ob_sorted)
+                     + f" · avg {ob_avg:.0f}/100"),
+        }
+
     sc = {
         "as_of": today_iso,
         "total": len(entries),
         "graded": len(graded),
         "open": sum(1 for e in entries if e.get("status") == "open"),
         "closed": sum(1 for e in entries if e.get("status") == "closed"),
+        "open_book": open_book,
         "averages": averages,
         "distribution": dict(sorted(distribution.items())),
         "trend": trend,
@@ -693,6 +718,14 @@ def render_scorecard_panel(sc: dict | None) -> list[str]:
     lines.append(f"- **Running averages:** last 10: {_ab(av.get('last_10'))}"
                  f" · last 30d: {_ab(av.get('last_30d'))}"
                  f" · all-time: {_ab(av.get('all_time'))}")
+    # George 2026-08-13 — "where in the briefing i can see the entries
+    # grades for my current options": one-line open-book read; the
+    # per-position detail lives on each Watch row (🎓 tokens).
+    ob = sc.get("open_book")
+    if ob:
+        lines.append("- **Current open positions by entry grade:** "
+                     f"Open book: {ob['line']} (n={ob['n']}) — "
+                     "per-position 🎓 tokens on the Watch rows")
     dist = sc.get("distribution") or {}
     if dist:
         lines.append("- **Grade distribution:** "
@@ -737,3 +770,130 @@ def render_scorecard_panel(sc: dict | None) -> list[str]:
                      f"entries")
     lines.append("")
     return lines
+
+
+# ── Watch-panel entry tokens (George 2026-08-13) ─────────────────────────
+# "where in the briefing i can see the entries grades for my current
+# options" — every option row/block in the Watch panel carries a compact
+# 🎓 token looked up from the ledger by the SAME canonical contract key
+# the maintenance pass uses. All fail-open, never fabricated (rule #19).
+
+
+def resolve_ledger_path(snapshot_data: dict | None) -> Path:
+    """Ledger path for a READ-ONLY lookup: the live run's maintenance
+    stash first, then the snapshot dir, then the cwd-relative default."""
+    up = (snapshot_data or {}).get("entry_ledger_update")
+    if isinstance(up, dict) and up.get("ledger_path"):
+        return Path(up["ledger_path"])
+    sd = (snapshot_data or {}).get("_snapshot_dir")
+    if sd:
+        return default_ledger_path(sd)
+    return default_ledger_path(None)
+
+
+def open_grade_index(snapshot_data: dict | None,
+                     config: dict | None = None) -> dict | None:
+    """One-shot, config-gated ledger load for the Watch panel.
+
+    Returns None when entry_scorecard is disabled (legacy byte-identical)
+    OR the ledger file exists but is unreadable/corrupt (fail-open: no
+    tokens at all — a broken ledger must not paint every row 'n/a').
+    A missing/empty ledger → {} (readable absence: full blocks render an
+    explicit `🎓 entry n/a`, rule #19)."""
+    cfg = config if config is not None \
+        else (snapshot_data or {}).get("_config")
+    if not entry_scorecard_enabled(cfg):
+        return None
+    try:
+        path = resolve_ledger_path(snapshot_data)
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return {}  # no ledger yet — readable absence
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None  # corrupt file — no tokens, no crash
+        if not (isinstance(data, dict)
+                and isinstance(data.get("entries"), list)):
+            return None
+        idx: dict = {}
+        for e in data.get("entries") or []:
+            if not isinstance(e, dict) or e.get("status") != "open":
+                continue
+            c = e.get("contract") or {}
+            try:
+                k = (str(c["underlying"]).upper(), str(c["type"]).upper(),
+                     float(c["strike"]), str(c["expiration"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            idx[k] = e
+        return idx
+    except Exception:
+        return {}
+
+
+def review_contract_key(review: dict | None):
+    """Canonical contract key from a Watch options-review dict — the same
+    (UND, TYPE, strike, ISO-exp) tuple ``entry_audit.option_key`` builds
+    from a position, so the ledger lookup can never drift."""
+    r = review or {}
+    und = r.get("underlying") or (
+        str(r.get("contract") or "").split("_")[0])
+    typ = str(r.get("type") or "").upper()
+    strike = r.get("strike")
+    exp = str(r.get("expiration") or "")[:10]
+    if not und or typ not in ("PUT", "CALL") or not strike or not exp:
+        return None
+    try:
+        return (str(und).upper(), typ, float(strike), exp)
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_date_short(iso) -> str | None:
+    try:
+        d = datetime.strptime(str(iso)[:10], "%Y-%m-%d")
+        return f"{d.strftime('%b')} {d.day}"
+    except (ValueError, TypeError):
+        return None
+
+
+def _clean_driver(text: str) -> str:
+    """Driver text minus the ✓/✗ marks — parenthetical-compact, never
+    rephrased (the measured driver string is the source of truth)."""
+    return " ".join(str(text).replace("✓", "").replace("✗", "").split())
+
+
+def watch_entry_token(record: dict | None, *, full: bool) -> str | None:
+    """Compact 🎓 token for one Watch option row.
+
+    - graded record → ``🎓 entry D (30) · Aug 5``; the FULL block adds the
+      locked top driver: ``🎓 entry D (30, RSI 60 off-band) · Aug 5``
+    - record graded n/a (hedge/long leg, before-archive, insufficient
+      data) → full block only: ``🎓 entry n/a — hedge/long leg`` (the
+      ledger's own convention); one-liners stay clean
+    - no ledger record → full block only: ``🎓 entry n/a``
+    Rule #19: every value is the LOCKED ledger record — never recomputed,
+    never fabricated."""
+    if record is None:
+        return "🎓 entry n/a" if full else None
+    g = record.get("grade") or {}
+    letter = g.get("letter")
+    score = _f(g.get("score"))
+    if letter in (None, "n/a") or score is None:
+        if not full:
+            return None
+        if "hedge" in str(g.get("message") or ""):
+            return "🎓 entry n/a — hedge/long leg"
+        return "🎓 entry n/a"
+    token = f"🎓 entry {letter} ({score:.0f}"
+    if full:
+        td = _top_driver(g)
+        if td:
+            token += f", {_clean_driver(td)}"
+    token += ")"
+    ed = _entry_date_short(record.get("entry_date"))
+    if ed:
+        token += f" · {ed}"
+    return token

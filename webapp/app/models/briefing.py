@@ -65,6 +65,10 @@ class OptionsReview(_Base):
     roll_target: dict[str, Any] | None = None
     roll_candidates: list[RollCandidate] = Field(default_factory=list)
     warnings: list[Any] = Field(default_factory=list)
+    # George 2026-08-13 — 🎓 entry grade for this contract (locked ledger
+    # record: letter/score/entry_date/top_driver + pre-humanized token).
+    # None on briefings that predate the feature.
+    entry_grade: dict[str, Any] | None = None
 
 
 class NewIdea(_Base):

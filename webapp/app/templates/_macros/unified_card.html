@@ -109,6 +109,10 @@
         <div class="uc-extras-sub">
             {% if base.matrix_cell_id %}<code class="uc-matrix-cell" title="wheel-roll-advisor matrix cell">{{ base.matrix_cell_id }}</code>{% endif %}
             {{ parkev_chip(base.underlying) | safe }}
+            {# George 2026-08-13 — 🎓 entry grade (pre-humanized token from
+               the pipeline's locked ledger record; no token → nothing,
+               never a fabricated grade — rules #19/#31). #}
+            {% if base.entry_grade and base.entry_grade.get('token') %}<span class="uc-entry-grade" title="Entry grade — graded on entry-day conditions, locked at first write (state/entry_grade_ledger.json)">{{ base.entry_grade.get('token') }}</span>{% endif %}
         </div>
         {% if base.warnings %}
         <div class="uc-warnings">{% for w in base.warnings %}<span class="uc-warning">⚠ {{ w }}</span>{% endfor %}</div>

@@ -259,6 +259,30 @@ def render_watch_with_commentary(
     lines = ["## Watch / Portfolio Review", ""]
     technicals = (snapshot_data or {}).get("technicals", {}) or {}
 
+    # 🎓 Entry-grade tokens (George 2026-08-13: "where in the briefing i
+    # can see the entries grades for my current options"). The ledger is
+    # loaded ONCE per render, config-gated (entry_scorecard.enabled →
+    # disabled = byte-identical legacy), and fail-open: an unreadable
+    # ledger means no tokens, never a crash. Lookup uses the same
+    # canonical contract key entry_ledger's maintenance pass uses.
+    _entry_idx = None
+    _el = None
+    try:
+        from analysis import entry_ledger as _el_mod
+        _el = _el_mod
+        _entry_idx = _el_mod.open_grade_index(snapshot_data)
+    except Exception:
+        _entry_idx = None
+
+    def _entry_record(review):
+        if _entry_idx is None or _el is None:
+            return None
+        try:
+            k = _el.review_contract_key(review)
+            return _entry_idx.get(k) if k else None
+        except Exception:
+            return None
+
     if equity_reviews:
         lines.append("### Equities")
         lines.append("")
@@ -328,6 +352,32 @@ def render_watch_with_commentary(
             # 🚨-urgent check can inspect it).
             commentary = generate_commentary(review, snapshot_data, equity_reviews)
 
+            # 🎓 Entry-grade token for this contract (George 2026-08-13).
+            # One-liners carry the compact form only when a real grade
+            # exists (no n/a clutter); full blocks always show the read,
+            # incl. `🎓 entry n/a` / `n/a — hedge/long leg`. The record is
+            # also attached to the review dict (entry_grade) so the
+            # briefing JSON → webapp Options tab renders the same token.
+            _entry_rec = _entry_record(review)
+            _entry_tok_compact = _entry_tok_full = None
+            if _entry_idx is not None and _el is not None:
+                try:
+                    _entry_tok_compact = _el.watch_entry_token(
+                        _entry_rec, full=False)
+                    _entry_tok_full = _el.watch_entry_token(
+                        _entry_rec, full=True)
+                    if _entry_rec is not None:
+                        _g = _entry_rec.get("grade") or {}
+                        review["entry_grade"] = {
+                            "letter": _g.get("letter"),
+                            "score": _g.get("score"),
+                            "entry_date": _entry_rec.get("entry_date"),
+                            "top_driver": (_g.get("drivers") or [None])[0],
+                            "token": _entry_tok_full,
+                        }
+                except Exception:
+                    _entry_tok_compact = _entry_tok_full = None
+
             # Monthly opex-week awareness (2026-08-10, informational and
             # non-directional — rule #9): a position expiring on a standard
             # monthly (3rd Friday) gets ONE mechanics line during its final
@@ -363,6 +413,10 @@ def render_watch_with_commentary(
                     why = _humanize_matrix_cell(cell)
                 if why:
                     summary += f" — {_truncate_phrase(why)}"
+                # 🎓 entry grade — compact form, real grades only (no n/a
+                # clutter on one-liners).
+                if _entry_tok_compact:
+                    summary += f" · {_entry_tok_compact}"
                 lines.append(summary)
                 if _opex_line:
                     lines.append(f"  • {_opex_line}")
@@ -375,6 +429,11 @@ def render_watch_with_commentary(
             if pl_dollars is not None and pl_pct is not None:
                 lines.append(f"  P&L: +${pl_dollars:,.0f} ({pl_pct:+.0f}%) | {dte}d left" if pl_dollars > 0
                             else f"  P&L: ${pl_dollars:,.0f} ({pl_pct:.0f}%) | {dte}d left")
+
+            # 🎓 entry grade — full-block form (top driver parenthetical;
+            # `🎓 entry n/a` when the ledger has no record — rule #19).
+            if _entry_tok_full:
+                lines.append(f"  {_entry_tok_full}")
 
             # Monthly opex-week note (informational, non-directional)
             if _opex_line:
