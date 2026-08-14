@@ -589,7 +589,33 @@ covered_call_tiers:
     # eligible under either strict or engineered mode below.
     # 2026-07-07: NVDA + MSFT — user's rally names where he's willing to
     # write when they're genuinely stretched (rule #34).
+    # NOTE: obsolete while algorithm_gated below is enabled (rule #50) —
+    # kept so disabling algorithm_gated falls back to the legacy whitelist.
     willing_to_write_cc_on: [NVDA, MSFT]
+
+    # ALGORITHM-GATED mode (rule #50, 2026-08-14). George: "I want to relax
+    # our covered calls strategy... we have long-term stocks notion... we
+    # should allow writing covered calls for ALL of them and incorporate
+    # that in the code, in the algorithm." Every Tier A holding becomes
+    # CC-eligible; the green light comes from THE ENTRY ALGORITHM (rule
+    # #48 — evaluate_entry(side='cc'): RSI wait-for-strength band, IVr with
+    # proxy honesty, resistance-anchored strike, day color per rule #49,
+    # B floor, vintage-resolved RSI per #47). This envelope preserves the
+    # two compounder protections the formula alone doesn't give:
+    #   1. coverage_cap_pct ≤ 50 — at least half the upside stays uncapped.
+    #   2. tax_aware_assignment_block — never a write backed by a lot
+    #      inside the 60-day pre-LTCG window (rule #29 machinery).
+    # When enabled, the strict envelope above and the whitelist are
+    # superseded for Tier A; engineered mode below stays an alternative
+    # path. Disable to restore the legacy ban byte-identically.
+    algorithm_gated:
+      enabled: true
+      min_otm_pct: 10.0
+      max_delta: 0.15
+      coverage_cap_pct: 50      # keep ≥ half the round lots uncapped
+      min_dte: 21               # monthly window (prefer_monthly applies)
+      max_dte: 45
+      tax_aware_assignment_block: true
 
     # ENGINEERED mode (task #47): the "smart middle ground" that fires
     # even when RSI < 75, provided the strike is REBOUND-PROOF — above

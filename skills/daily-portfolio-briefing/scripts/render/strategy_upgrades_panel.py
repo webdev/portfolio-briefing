@@ -77,10 +77,17 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
     # setup_floor_wait (George 2026-08-12: "recommendations are A or B,
     # not D"): a write graded below the actionable B floor is demoted to
     # the wait list with the measured demotion note — shown, never hidden.
+    # algo_wait (rule #50 — George 2026-08-14: "we should allow writing
+    # covered calls for ALL of them and incorporate that in the code, in
+    # the algorithm"): a Tier A algorithm-gated write whose canonical
+    # entry-algorithm verdict (rule #48) is WAIT/BLOCKED — or whose live
+    # chain was unavailable (fail closed) — demotes to the wait list with
+    # the evaluator's measured reason.
     def _is_wait(c: dict) -> bool:
         return bool(
             c.get("rsi_wait") or c.get("lt_secular_wait")
             or c.get("tier_envelope_wait") or c.get("setup_floor_wait")
+            or c.get("algo_wait")
         )
 
     cc_ready = [c for c in new_ccs if not _is_wait(c)]
@@ -153,6 +160,21 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
         # analysis/setup_grade.py). Absent → byte-identical legacy card.
         if cc.get("setup_grade_line"):
             lines.append(f"  - {cc['setup_grade_line']}")
+        # Rule #50 — the canonical entry algorithm's read on a Tier A
+        # algorithm-gated write: the ENTER one-liner (grade + 💎 when
+        # prime) on actionable tickets, the measured WAIT/BLOCKED reason
+        # on demoted ones ('⏸ GOOG — CC waits: RSI 51 below 60' style).
+        if cc.get("algorithm_gated"):
+            if cc.get("entry_verdict") == "ENTER" and not cc.get("algo_wait") \
+                    and cc.get("entry_one_line"):
+                lines.append(f"  - 🧮 {cc['entry_one_line']}")
+            elif cc.get("entry_reason"):
+                lines.append(
+                    f"  - **🧮 Entry algorithm:** {cc['entry_reason']}")
+        # Tax-aware LTCG lot note (rule #50 protection #2) — the measured
+        # coverage cap / defer reason from the lot data.
+        if cc.get("tax_aware_note"):
+            lines.append(f"  - **{cc['tax_aware_note']}**")
         # B floor demotion note (George 2026-08-12) — the measured reason
         # the write sits in the wait list; composes with tier/RSI notes.
         if cc.get("setup_floor_note"):
@@ -217,6 +239,16 @@ def render_strategy_upgrades(upgrades: list[dict]) -> list[str]:
                 _render_cc(cc, "⏸ BELOW SETUP FLOOR")
             elif cc.get("tier_envelope_wait") and not cc.get("rsi_wait"):
                 _render_cc(cc, "⏸ TIER ENVELOPE NOT MET")
+            elif cc.get("algo_wait") and not cc.get("rsi_wait"):
+                # Rule #50 — the canonical entry algorithm (rule #48) said
+                # WAIT/BLOCKED on a Tier A algorithm-gated write (or the
+                # live chain was unavailable, fail closed).
+                _render_cc(
+                    cc,
+                    "⛔ ENTRY ALGORITHM — BLOCKED"
+                    if cc.get("entry_verdict") == "BLOCKED"
+                    else "⏸ ENTRY ALGORITHM — WAIT",
+                )
             else:
                 _render_cc(cc, "⏸ WAIT FOR STRENGTH")
 

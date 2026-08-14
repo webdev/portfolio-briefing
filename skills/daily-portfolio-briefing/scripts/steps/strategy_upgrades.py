@@ -876,6 +876,24 @@ def compute_strategy_upgrades(
         if contracts_writable < 1:
             continue
 
+        # Tax-aware LTCG lot block (rule #50 protection #2, reusing the
+        # rule-#29 machinery): lots inside the 60-day pre-LTCG window must
+        # never back a new write — coverage is capped to the LTCG-safe
+        # round lots; when NO safe lot exists the write is demoted to the
+        # wait list with the measured note (shown, never hidden — rule
+        # #24). Fail-open: no lot data on the position → no adjustment.
+        tax_aware_note = None
+        tax_block_all = False
+        _tax_adj = position_tiers.tax_aware_cc_lot_adjustment(
+            equity_pos, cc_settings)
+        if _tax_adj is not None:
+            if _tax_adj["max_safe_contracts"] < 1:
+                tax_block_all = True
+                tax_aware_note = _tax_adj["note"]
+            elif _tax_adj["max_safe_contracts"] < contracts_writable:
+                contracts_writable = _tax_adj["max_safe_contracts"]
+                tax_aware_note = _tax_adj["note"]
+
         # Tier-aware DTE / strike-selection knobs. Tier B uses a tight
         # 30-DTE / 10% OTM / 0.15 delta envelope; Tier C inherits the
         # legacy 35-DTE / 6% OTM / 0.25 delta settings from briefing.yaml's
@@ -1030,6 +1048,18 @@ def compute_strategy_upgrades(
             tier_violations.append(
                 f"needs DTE ≤ {tier_max_dte}d (proposed {actual_dte}d)"
             )
+        # Rule #50 monthly window floor — only tiers whose envelope carries
+        # a min_dte (the algorithm-gated Tier A one, 21-45d) test it;
+        # legacy Tier B/C envelopes have no min_dte → no-op, byte-identical.
+        tier_min_dte = int(cc_settings.get("min_dte", 0) or 0)
+        if tier_min_dte and actual_dte < tier_min_dte:
+            tier_violations.append(
+                f"needs DTE ≥ {tier_min_dte}d (proposed {actual_dte}d)"
+            )
+        # Tax-aware LTCG block with NO safe lot (rule #50 protection #2) —
+        # a tier-envelope violation so the write demotes to the wait list.
+        if tax_block_all and tax_aware_note:
+            tier_violations.append(tax_aware_note)
 
         # Rule-#43 fix: for the strict Tier A opt-in envelope and the Tier B
         # conservative envelope, ANY violation demotes the write out of the
@@ -1087,6 +1117,53 @@ def compute_strategy_upgrades(
         # 3 touches)". Always carries the *measured* delta — never a fabrication.
         sr_anchor_payload = chain_quote.get("sr_anchor") if chain_quote else None
 
+        # ─── Rule #50: Tier A ALGORITHM-GATED writes consult THE ENTRY
+        # ALGORITHM (rule #48 — the canonical six-step evaluator; never a
+        # parallel re-derivation). George (2026-08-14): "we should allow
+        # writing covered calls for ALL of them and incorporate that in
+        # the code, in the algorithm." Verdict ENTER is REQUIRED for the
+        # actionable ticket; WAIT/BLOCKED demote to the wait-for-strength
+        # section with the evaluator's measured reason ('⏸ GOOG — CC
+        # waits: RSI 51 below 60' style). A missing live chain fails
+        # CLOSED on this surface — capping a Tier A compounder on a
+        # rule-of-thumb estimate is exactly the wrong trade (rule #10).
+        algorithm_gated = bool(
+            tier == position_tiers.TIER_A
+            and cc_settings.get("algorithm_gated")
+        )
+        entry_verdict = None
+        entry_reason = None
+        entry_one_line = None
+        entry_prime = False
+        algo_wait = False
+        if algorithm_gated:
+            try:
+                from analysis.entry_algorithm import evaluate_entry
+                _dec = evaluate_entry(
+                    "cc", symbol, target_strike,
+                    (chain_quote.get("expiration") if chain_quote else None),
+                    (premium_per_share if chain_quote else None),
+                    snapshot_data, analytics, params,
+                    positions=positions, dte=actual_dte,
+                    annualized_pct=annualized)
+                entry_verdict = _dec.verdict
+                entry_reason = _dec.primary_detail or None
+                entry_one_line = _dec.one_line
+                entry_prime = bool(_dec.prime)
+            except Exception:
+                # Evaluator failure → fail-open to the envelope + RSI
+                # gates already computed above (rule #19); never crash
+                # the composer.
+                entry_verdict = None
+            if chain_source != "etrade_live":
+                algo_wait = True
+                entry_reason = (
+                    "live E*TRADE chain unavailable — no actionable Tier A "
+                    "write (fail closed); verify the chain at the broker"
+                )
+            elif entry_verdict is not None and entry_verdict != "ENTER":
+                algo_wait = True
+
         # Setup Grade (George 2026-08-10: "a very clear message as to when
         # I should get in on every transaction") — CC-side entry-timing
         # grade on every proposed write (READY and wait-list alike; the
@@ -1126,6 +1203,15 @@ def compute_strategy_upgrades(
             "tier_envelope_wait": tier_envelope_wait,
             # Rule 13 belt-and-suspenders finding (or None)
             "tier_validator": tier_validator_finding,
+            # Rule #50 — Tier A algorithm-gated write fields. False/None on
+            # every legacy config path (byte-identical old behavior).
+            "algorithm_gated": algorithm_gated,
+            "entry_verdict": entry_verdict,
+            "entry_reason": entry_reason,
+            "entry_one_line": entry_one_line,
+            "entry_prime": entry_prime,
+            "algo_wait": algo_wait,
+            "tax_aware_note": tax_aware_note,
             "tier_max_delta": tier_max_delta,
             "tier_min_otm_pct": tier_min_otm_pct,
             "tier_rsi_floor": tier_rsi_floor,

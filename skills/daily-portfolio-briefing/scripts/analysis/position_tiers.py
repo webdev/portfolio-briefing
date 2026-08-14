@@ -6,8 +6,11 @@ CLAUDE.md hard rule #29 contract: every equity position is assigned a tier
 that gates covered-call recommendations and tunes concentration caps:
 
   • Tier A — LT Core compounders (NVDA, GOOG, MSFT, META, PLTR, AMZN, SPY/VOO):
-        NO CC recommendations EVER. Concentration cap raised to ~22%
-        (concentration in conviction IS the strategy).
+        NO CC recommendations by default. Concentration cap raised to ~22%
+        (concentration in conviction IS the strategy). Rule #50: when
+        `tier_a.algorithm_gated.enabled` is on, CC writes are ALGORITHM-
+        GATED for every Tier A holding (canonical entry algorithm is the
+        green light; ≤50% coverage + tax-aware LTCG block preserved).
   • Tier B — Income holdings (MU, SMH):
         Conservative CC only — RSI ≥ 70, ≤ 0.15 delta, ≥ 10% OTM,
         ≤ 50% coverage cap of held shares, ≤ 30 DTE. Cap ~12%.
@@ -28,6 +31,7 @@ carries the 🅿️ Parkev chip, so the tier badge sits next to the rating chip.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from typing import NamedTuple
 
 # Shared rule-#27 exclusion list (same helper as parkev_chip /
@@ -101,6 +105,44 @@ _FALLBACK_CC_TIER_PARAMS = {
         "tax_aware_assignment_block": False,
     },
 }
+
+# ─── Tier A ALGORITHM-GATED covered calls (rule #50, 2026-08-14) ──────────
+#
+# George (2026-08-14): "I want to relax our covered calls strategy... we
+# have long-term stocks notion... we should allow writing covered calls for
+# ALL of them and incorporate that in the code, in the algorithm. So when
+# there is a good [wheel] formula for selling a covered call based on RSI,
+# IV rank, resistance, and strike, and everything included in the
+# recommendation obviously, based on my holdings."
+#
+# When `covered_call_tiers.tier_a.algorithm_gated.enabled` is true, the
+# Tier A CC ban becomes ALGORITHM-GATED writes for EVERY Tier A holding —
+# the per-name `willing_to_write_cc_on` whitelist becomes obsolete (it is
+# still honored when this block is absent/disabled — backward compatible;
+# the engineered mode stays unchanged as an alternative path). The green
+# light itself comes from the CANONICAL entry algorithm (rule #48/#49 —
+# strategy_upgrades Type D consults evaluate_entry(side='cc'); no parallel
+# logic lives here). This envelope preserves the two compounder
+# protections the formula alone doesn't give:
+#   1. coverage_cap_pct ≤ 50 — at least half the upside stays uncapped.
+#   2. tax_aware_assignment_block — never a coverage that risks resetting
+#      an LTCG-window lot (see tax_aware_cc_lot_adjustment below).
+_FALLBACK_ALGORITHM_GATED = {
+    "enabled": False,          # opt-in via config — legacy ban is the default
+    "min_otm_pct": 10.0,
+    "max_delta": 0.15,
+    "coverage_cap_pct": 50,    # keep ≥ half the round lots uncapped
+    "min_dte": 21,             # monthly window 21-45 DTE
+    "max_dte": 45,
+    "tax_aware_assignment_block": True,
+}
+
+# LTCG lot-window constants (rule #29 tax machinery, consumed by rule #50):
+# a lot acquired 305-365 days ago sits inside the 60-day window before the
+# 365-day LTCG threshold — assignment on it realizes/resets short-term.
+LTCG_THRESHOLD_DAYS = 365
+LTCG_WINDOW_DAYS = 60
+
 
 # Default per-tier concentration caps (% of NLV). Tier A is intentionally
 # permissive — capping a conviction compounder at 10% fights the strategy.
@@ -249,6 +291,16 @@ def cc_settings_for_tier(tier: str, config: dict | None) -> dict:
             roll_up_trigger: float,  # spot/strike ratio that triggers roll-up
             tax_aware_assignment_block: bool,
         }
+
+    Rule #50 (George 2026-08-14: "we should allow writing covered calls
+    for ALL of them and incorporate that in the code, in the algorithm"):
+    when `covered_call_tiers.tier_a.algorithm_gated.enabled` is true, the
+    Tier A envelope returned here is the ALGORITHM-GATED one (min_otm_pct
+    10 / max_delta 0.15 / coverage_cap_pct 50 / DTE 21-45 / tax-aware
+    block), marked with `algorithm_gated: True`. `rsi_floor` collapses to
+    0 because the canonical entry algorithm (rule #48) owns the RSI gate —
+    a duplicate tier floor here would be parallel logic. Absent/disabled
+    block → the legacy strict envelope, byte-identical.
     """
     t = (tier or _DEFAULT_TIER).upper().strip()
     if t not in _VALID_TIERS:
@@ -256,14 +308,142 @@ def cc_settings_for_tier(tier: str, config: dict | None) -> dict:
     fallback = dict(_FALLBACK_CC_TIER_PARAMS[t])
     cfg = _cc_tiers_block(config)
     user = cfg.get(f"tier_{t.lower()}") if isinstance(cfg, dict) else None
+    out = dict(fallback)
+    if isinstance(user, dict):
+        # Merge user-overrides on top of fallback; user wins per-key.
+        for k, v in user.items():
+            if v is not None:
+                out[k] = v
+    if t == TIER_A:
+        ag = algorithm_gated_settings(config)
+        # The user merge above copies the RAW `algorithm_gated` config
+        # sub-dict (truthy even when {"enabled": false}) — normalize: the
+        # marker is a BOOL, present only when the mode is actually on.
+        out.pop("algorithm_gated", None)
+        if ag.get("enabled"):
+            out.update({
+                "enabled": True,
+                "algorithm_gated": True,
+                # The canonical entry algorithm (rule #48) owns the RSI
+                # gate; no duplicate tier floor (parallel logic is a bug).
+                "rsi_floor": 0,
+                "min_otm_pct": float(ag.get("min_otm_pct", 10.0)),
+                "max_delta": float(ag.get("max_delta", 0.15)),
+                "coverage_cap_pct": int(ag.get("coverage_cap_pct", 50)),
+                "min_dte": int(ag.get("min_dte", 21)),
+                "max_dte": int(ag.get("max_dte", 45)),
+                "tax_aware_assignment_block": bool(
+                    ag.get("tax_aware_assignment_block", True)),
+            })
+    return out
+
+
+def algorithm_gated_settings(config: dict | None) -> dict:
+    """Return the rule-#50 Tier A algorithm-gated CC envelope from
+    `covered_call_tiers.tier_a.algorithm_gated`, merged over canonical
+    fallbacks. Missing/empty config → `enabled: False` (fail-closed): the
+    legacy Tier A ban + whitelist behavior is byte-identical until the
+    config opts in."""
+    fallback = dict(_FALLBACK_ALGORITHM_GATED)
+    tier_a = _cc_tiers_block(config).get("tier_a")
+    user = tier_a.get("algorithm_gated") if isinstance(tier_a, dict) else None
     if not isinstance(user, dict):
         return fallback
-    # Merge user-overrides on top of fallback; user wins per-key.
     out = dict(fallback)
     for k, v in user.items():
         if v is not None:
             out[k] = v
     return out
+
+
+def is_algorithm_gated_cc_enabled(config: dict | None) -> bool:
+    """True when rule #50's Tier A algorithm-gated CC mode is on."""
+    return bool(algorithm_gated_settings(config).get("enabled"))
+
+
+def tax_aware_cc_lot_adjustment(
+    equity_pos: dict | None,
+    cc_settings: dict | None,
+    as_of: date | None = None,
+) -> dict | None:
+    """LTCG-window lot check for a NEW covered-call write — the rule-#29
+    tax-aware machinery consumed by the rule-#50 algorithm-gated envelope.
+
+    A lot acquired 305-365 days ago (inside the 60-day window before the
+    365-day LTCG threshold) must never back a covered call: assignment on
+    it realizes short-term gains right before they convert to long-term
+    (and a deep-ITM write can reset the holding period outright). Coverage
+    is capped to the LTCG-safe round lots.
+
+    Reads ``equity_pos["lots"]`` — a list of dicts carrying an acquisition
+    date (``acquiredDate`` / ``acquired`` / ``dateAcquired`` /
+    ``acquired_date``) and a share count (``qty`` / ``quantity``).
+
+    Returns None (no adjustment) when the tier's
+    ``tax_aware_assignment_block`` flag is off, no parseable lot data
+    exists, or no lot sits inside the window — a tax block is never
+    fabricated from missing data (hard rule #19, fail-open). Otherwise:
+
+        {"at_risk_shares": int, "safe_shares": int,
+         "max_safe_contracts": int, "note": str}
+    """
+    if not isinstance(cc_settings, dict) \
+            or not cc_settings.get("tax_aware_assignment_block"):
+        return None
+    lots = (equity_pos or {}).get("lots")
+    if not isinstance(lots, list) or not lots:
+        return None
+    today = as_of or date.today()
+    at_risk = 0.0
+    safe = 0.0
+    parsed_any = False
+    for lot in lots:
+        if not isinstance(lot, dict):
+            continue
+        raw = (lot.get("acquiredDate") or lot.get("acquired")
+               or lot.get("dateAcquired") or lot.get("acquired_date"))
+        try:
+            qty = float(lot.get("qty") or lot.get("quantity") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0 or not raw:
+            continue
+        try:
+            acq = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        held_days = (today - acq).days
+        parsed_any = True
+        if (LTCG_THRESHOLD_DAYS - LTCG_WINDOW_DAYS) <= held_days \
+                < LTCG_THRESHOLD_DAYS:
+            at_risk += qty
+        else:
+            safe += qty
+    if not parsed_any or at_risk <= 0:
+        return None
+    max_safe = int(safe // 100)
+    if max_safe >= 1:
+        note = (
+            f"🧾 tax-aware block (rule #50): {int(at_risk)} shares sit inside "
+            f"the {LTCG_WINDOW_DAYS}-day pre-LTCG window — assignment would "
+            f"realize short-term right before the {LTCG_THRESHOLD_DAYS}-day "
+            f"threshold; coverage capped to {max_safe} LTCG-safe round "
+            f"lot{'s' if max_safe != 1 else ''}"
+        )
+    else:
+        note = (
+            f"🧾 tax-aware block (rule #50): all lot-backed shares "
+            f"({int(at_risk)}) sit inside the {LTCG_WINDOW_DAYS}-day "
+            f"pre-LTCG window — no LTCG-safe round lot to write against; "
+            f"defer until the lots cross the {LTCG_THRESHOLD_DAYS}-day "
+            f"threshold"
+        )
+    return {
+        "at_risk_shares": int(at_risk),
+        "safe_shares": int(safe),
+        "max_safe_contracts": max_safe,
+        "note": note,
+    }
 
 
 def engineered_cc_eligible(
@@ -399,10 +579,21 @@ def is_cc_enabled_for_tier(tier: str, config: dict | None,
     "✅ READY TO WRITE" bug. With a whitelist present, membership gates;
     no ticker context → disabled (fail-closed on the compounder side).
     Without a whitelist, the `enabled` flag drives it (legacy).
+
+    Rule #50 (George 2026-08-14: "we should allow writing covered calls
+    for ALL of them and incorporate that in the code, in the algorithm"):
+    when `tier_a.algorithm_gated.enabled` is true, EVERY Tier A ticker is
+    CC-eligible — the whitelist is obsolete; the CANONICAL entry algorithm
+    (rule #48, consulted by strategy_upgrades Type D) is the gate, and the
+    algorithm-gated envelope (≤50% coverage, tax-aware LTCG block) rides
+    via cc_settings_for_tier. Absent/disabled block → whitelist honored
+    (legacy, byte-identical).
     """
     settings = cc_settings_for_tier(tier, config)
     base_enabled = bool(settings.get("enabled", True))
     if (tier or "").upper().strip() == TIER_A:
+        if settings.get("algorithm_gated"):
+            return True
         whitelist_upper = _normalize_tier_list(
             settings.get("willing_to_write_cc_on")
         )
