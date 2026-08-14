@@ -152,8 +152,14 @@ def grade_badge(base: Any) -> dict[str, str] | None:
     if not title:
         title = ("Entry-timing setup grade (WHEN, not WHAT) — see the "
                  "briefing's Best Setups section.")
+    label = f"🏁 {side_label} setup {letter}"
+    # 💎 PRIME (George 2026-08-14: "we should clearly see all of the good
+    # entries based on this algorithm") — rides the pipeline's
+    # ``setup_grade_prime`` field on the same dicts; never derived here.
+    if raw.get("setup_grade_prime"):
+        label += " · 💎 PRIME"
     return {
-        "label": f"🏁 {side_label} setup {letter}",
+        "label": label,
         "tone": tone,
         "rep_tone": rep_tone,
         "title": title,

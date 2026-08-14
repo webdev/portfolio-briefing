@@ -105,6 +105,28 @@ def test_badge_none_when_ungraded():
     assert setup_grade_ui.grade_badge({"kind": "NEW_CSP", "raw": {}}) is None
 
 
+def test_badge_carries_prime_token_when_pipeline_flags_it():
+    """George (2026-08-14): "we should clearly see all of the good entries
+    based on this algorithm" — a card the pipeline marks
+    ``setup_grade_prime`` (the card-strict conjunction: RSI 35-45, chain
+    IVr ≥ 60, ≥2-touch support under strike, trend intact, red day +
+    earnings clear) carries the 💎 PRIME token next to the grade. The flag
+    flows through the existing JSON fields — the webapp never re-derives
+    it (rule #19)."""
+    base = {"kind": "NEW_CSP", "raw": {
+        "setup_grade": "A", "setup_grade_score": 90.0,
+        "setup_grade_prime": True}}
+    b = setup_grade_ui.grade_badge(base)
+    assert b["label"] == "🏁 CSP setup A · 💎 PRIME"
+
+
+def test_badge_no_prime_token_when_not_flagged():
+    base = {"kind": "NEW_CSP", "raw": {
+        "setup_grade": "B", "setup_grade_score": 70.0,
+        "setup_grade_prime": False}}
+    assert "💎" not in setup_grade_ui.grade_badge(base)["label"]
+
+
 def test_badge_hard_block_is_red():
     b = setup_grade_ui.grade_badge(
         {"type": "write_covered_call", "setup_grade": "—"})

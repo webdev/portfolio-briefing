@@ -395,6 +395,156 @@ def _context_component(day_change_pct, days_to_earnings, drawdown_pct,
     return sum(subs) / len(subs), notes
 
 
+# ── 💎 Prime conjunction — George's card-strict entry check ──────────────
+#
+# George (2026-08-14): "strengthen our algorithm by essentially validating
+# that, for CSP, our [RSI] between 35 and 45, [IV] rank is greater than
+# 60, support under strike — basically all the tight algorithm... should
+# absolutely get incorporated into the daily briefing, and we should
+# clearly see all of the good entries based on this algorithm."
+#
+# The weighted Setup Grade permits tradeoffs (a B can pass with a thin
+# vol rank when the other legs are perfect). The prime conjunction is a
+# TIER ON TOP — strict AND across every component, thresholds drawn from
+# the SAME config single sources the grade uses (never re-weighted, never
+# a second voice on any band):
+#
+#   CSP: RSI in the prime band (lower half of put_entry_band → 35-45) AND
+#        TRUE chain IVr ≥ the vol target (floor 40 → 60) AND a ≥2-touch
+#        support cluster AT/UNDER the strike AND trend intact AND red
+#        day + earnings clear.
+#   CC:  RSI ≥ prime strength (favored_above + 10 → 70) AND TRUE chain
+#        IVr ≥ the vol floor (40) AND a tested (≥2-touch) resistance at
+#        the strike AND trend intact AND green day + earnings clear.
+#
+# An RVr-proxy-only vol read can NEVER satisfy prime — the proxy is
+# labeled as the reason (rule #19: the missing list carries the measured
+# value vs the target for every non-prime component).
+
+
+def prime_conjunction(components: dict, side: str,
+                      config: dict | None = None) -> tuple[bool, list[str]]:
+    """(is_prime, missing) — TRUE only when EVERY component is in its
+    prime band (strict conjunction, George's paper card 2026-08-14).
+
+    ``components`` carries the RAW measured inputs (the same kwargs the
+    graders take): rsi, iv_rank, iv_rank_source, support_resistance,
+    strike, spot, sma_200, lt_verdict, day_change_pct, days_to_earnings,
+    plus optional ``earnings_exempt`` (basket/ETF — no print) and
+    ``thresholds`` (pre-loaded rsi_discipline thresholds).
+
+    ``missing`` lists each non-prime component with its measured value vs
+    the config-derived target (rule #19 — never a bare "no"); an
+    UNMEASURED component is non-prime by construction (a conjunction
+    can't be verified on missing data) and is listed as such.
+    """
+    cfg = load_setup_grade_config(config)
+    s = _SIDE_CSP if (side or "").lower() in (_SIDE_CSP, "put") else _SIDE_CC
+    th = components.get("thresholds") or _rsi_mod.load_thresholds(config)
+    missing: list[str] = []
+
+    # 1 — RSI in the side's prime band.
+    rsi = components.get("rsi")
+    if s == _SIDE_CSP:
+        lo, hi = _rsi_mod.put_entry_band(th)
+        peak_hi = (lo + hi) / 2.0
+        if rsi is None:
+            missing.append(f"RSI n/a (prime {lo:.0f}-{peak_hi:.0f})")
+        elif not (lo <= float(rsi) <= peak_hi):
+            missing.append(
+                f"RSI {float(rsi):.0f} (prime {lo:.0f}-{peak_hi:.0f})")
+    else:
+        favored = float((th.get("call") or {}).get("favored_above", 60.0))
+        prime_min = favored + _CC_PEAK_SPAN
+        if rsi is None:
+            missing.append(f"RSI n/a (prime ≥ {prime_min:.0f})")
+        elif float(rsi) < prime_min:
+            missing.append(f"RSI {float(rsi):.0f} < {prime_min:.0f}")
+
+    # 2 — vol payment: TRUE chain IVr at/over the side's prime target.
+    iv = components.get("iv_rank")
+    src = components.get("iv_rank_source")
+    vol_target = (_vol_target(cfg) if s == _SIDE_CSP
+                  else float(cfg["vol_floor_rank"]))
+    if iv is None:
+        missing.append(f"IVr n/a (prime ≥ {vol_target:.0f})")
+    elif src != "chain":
+        missing.append(
+            f"RVr {float(iv):.0f} is a realized-vol proxy — TRUE chain "
+            f"IVr ≥ {vol_target:.0f} required for prime")
+    elif float(iv) < vol_target:
+        missing.append(f"IVr {float(iv):.0f} < {vol_target:.0f}")
+
+    # 3 — ≥2-touch S/R cluster on the RIGHT side of the strike.
+    strike = components.get("strike")
+    spot = components.get("spot")
+    ref = strike if strike else spot
+    sr_key = "supports" if s == _SIDE_CSP else "resistances"
+    levels = _sr_levels(components.get("support_resistance"), sr_key)
+    sr_score, sr_best = _sr_component(levels, ref, s, cfg)
+    ref_word = "strike" if strike else "spot"
+    if sr_score is None:
+        missing.append("S/R n/a (no measured levels)")
+    elif sr_best is None:
+        missing.append(
+            f"no ≥2-touch support under the {ref_word}" if s == _SIDE_CSP
+            else f"no tested (≥2-touch) resistance at the {ref_word}")
+    elif s == _SIDE_CSP and ref and float(sr_best.get("price", 0)) > float(ref):
+        missing.append(
+            f"support ${float(sr_best['price']):g} sits above the "
+            f"${float(ref):g} {ref_word} (prime needs support under)")
+
+    # 4 — trend intact.
+    lt_verdict = components.get("lt_verdict")
+    _tscore, vs = _trend_component(spot, components.get("sma_200"),
+                                   lt_verdict, s, cfg)
+    verdict = str(lt_verdict or "").lower()
+    if verdict in ("broken", "downtrend", "weakening"):
+        missing.append(f"LT trend {verdict} (prime needs intact)")
+    elif vs is not None and vs < 0:
+        missing.append(
+            f"price {vs:+.0f}% vs 200-SMA (prime needs at/above)")
+    elif vs is None and "uptrend" not in verdict:
+        missing.append("trend n/a (no 200-SMA / LT read)")
+
+    # 5 — context: day color right for the side + earnings clear.
+    move = components.get("day_change_pct")
+    if move is None:
+        missing.append("day color n/a (no live quote)")
+    else:
+        try:
+            move_f = float(move)
+        except (TypeError, ValueError):
+            move_f = None
+        if move_f is None:
+            missing.append("day color n/a (no live quote)")
+        else:
+            good = (move_f < 0) if s == _SIDE_CSP else (move_f > 0)
+            if not good:
+                color = ("red" if move_f < 0
+                         else ("green" if move_f > 0 else "flat"))
+                want = "red" if s == _SIDE_CSP else "green"
+                missing.append(f"{color} day (prime wants a {want} day)")
+    clear = int(cfg["earnings_clear_days"])
+    if not components.get("earnings_exempt"):
+        d2e = components.get("days_to_earnings")
+        if d2e is None:
+            missing.append(
+                f"earnings date unknown (prime needs ≥ {clear}d clear)")
+        else:
+            try:
+                d = int(d2e)
+            except (TypeError, ValueError):
+                d = None
+            if d is None:
+                missing.append(
+                    f"earnings date unknown (prime needs ≥ {clear}d clear)")
+            elif d < clear:
+                missing.append(f"earnings {d}d away (< {clear}d clear)")
+
+    return (not missing), missing
+
+
 # ── The two public scorers ────────────────────────────────────────────────
 
 
@@ -402,6 +552,7 @@ def csp_setup(*, rsi=None, iv_rank=None, iv_rank_source=None,
               support_resistance=None, strike=None, spot=None,
               sma_200=None, lt_verdict=None, day_change_pct=None,
               days_to_earnings=None, drawdown_pct=None,
+              earnings_exempt: bool = False,
               thresholds: dict | None = None,
               config: dict | None = None) -> dict:
     """Grade a NEW cash-secured-put open (entry timing only)."""
@@ -412,6 +563,7 @@ def csp_setup(*, rsi=None, iv_rank=None, iv_rank_source=None,
                   day_change_pct=day_change_pct,
                   days_to_earnings=days_to_earnings,
                   drawdown_pct=drawdown_pct,
+                  earnings_exempt=earnings_exempt,
                   thresholds=thresholds, config=config)
 
 
@@ -419,6 +571,7 @@ def cc_setup(*, rsi=None, iv_rank=None, iv_rank_source=None,
              support_resistance=None, strike=None, spot=None,
              sma_200=None, lt_verdict=None, day_change_pct=None,
              days_to_earnings=None, drawdown_pct=None,
+             earnings_exempt: bool = False,
              thresholds: dict | None = None,
              config: dict | None = None) -> dict:
     """Grade a NEW covered-call write (entry timing only)."""
@@ -429,12 +582,14 @@ def cc_setup(*, rsi=None, iv_rank=None, iv_rank_source=None,
                   day_change_pct=day_change_pct,
                   days_to_earnings=days_to_earnings,
                   drawdown_pct=drawdown_pct,
+                  earnings_exempt=earnings_exempt,
                   thresholds=thresholds, config=config)
 
 
 def _grade(side: str, *, rsi, iv_rank, iv_rank_source, support_resistance,
            strike, spot, sma_200, lt_verdict, day_change_pct,
-           days_to_earnings, drawdown_pct, thresholds, config) -> dict:
+           days_to_earnings, drawdown_pct, thresholds, config,
+           earnings_exempt: bool = False) -> dict:
     cfg = load_setup_grade_config(config)
     th = thresholds if thresholds is not None else _rsi_mod.load_thresholds(config)
     sr_key = "supports" if side == _SIDE_CSP else "resistances"
@@ -450,6 +605,8 @@ def _grade(side: str, *, rsi, iv_rank, iv_rank_source, support_resistance,
             "drivers": [f"RSI {float(rsi):.0f} hard block ✗"],
             "missing": [],
             "components": {},
+            "prime": False,
+            "prime_missing": [f"RSI {float(rsi):.0f} hard block"],
             "message": f"🏁 Entry: — — blocked: {assess.reason}",
         }
 
@@ -478,6 +635,8 @@ def _grade(side: str, *, rsi, iv_rank, iv_rank_source, support_resistance,
             "side": side, "score": None, "letter": "n/a",
             "hard_blocked": False, "iv_source": iv_rank_source,
             "drivers": [], "missing": missing, "components": components,
+            "prime": False,
+            "prime_missing": ["insufficient measured data (fail closed)"],
             "message": ("🏁 Entry: n/a — insufficient measured data to "
                         "grade (fail closed)."),
         }
@@ -508,10 +667,23 @@ def _grade(side: str, *, rsi, iv_rank, iv_rank_source, support_resistance,
                        driver_by_comp=driver_by_comp, capped=capped,
                        n_missing=len(missing))
 
+    # 💎 Prime conjunction (George 2026-08-14) — a TIER ON TOP of the
+    # weighted grade, never a re-weighting: strict AND across every
+    # component's prime band, thresholds from the same config sources.
+    prime, prime_missing = prime_conjunction(
+        {"rsi": rsi, "iv_rank": iv_rank, "iv_rank_source": iv_rank_source,
+         "support_resistance": support_resistance, "strike": strike,
+         "spot": spot, "sma_200": sma_200, "lt_verdict": lt_verdict,
+         "day_change_pct": day_change_pct,
+         "days_to_earnings": days_to_earnings,
+         "earnings_exempt": earnings_exempt, "thresholds": th},
+        side, config)
+
     return {
         "side": side, "score": round(score, 1), "letter": letter,
         "hard_blocked": False, "iv_source": iv_rank_source,
         "drivers": drivers, "missing": missing, "components": components,
+        "prime": prime, "prime_missing": prime_missing,
         "message": message,
     }
 
@@ -667,7 +839,11 @@ def format_grade_note(grade: dict | None, max_drivers: int = 3) -> str:
         return ""
     letter = grade.get("letter")
     score = grade.get("score")
-    head = f"**Setup Grade: {letter}**"
+    # 💎 PRIME badge (George 2026-08-14: "we should clearly see all of
+    # the good entries based on this algorithm") — rides NEXT TO the
+    # grade on every surface that prints the note line.
+    head = (f"**Setup Grade: {letter} 💎 PRIME**" if grade.get("prime")
+            else f"**Setup Grade: {letter}**")
     if isinstance(score, (int, float)) and letter not in ("—", "n/a"):
         head += f" ({score:.0f}/100)"
     drivers = [str(d) for d in (grade.get("drivers") or [])][:max_drivers]
@@ -736,8 +912,14 @@ def grade_for_new_open(ticker: str, side: str, *, snapshot_data: dict,
             quote.get("last") if isinstance(quote, dict) else None)
     iv_rank, iv_src = effective_iv(ticker, sd)
     deep = tech.get("deep") if isinstance(tech.get("deep"), dict) else {}
+    try:
+        from analysis.earnings_unknown import is_earnings_exempt
+        exempt = is_earnings_exempt(tk, config)
+    except Exception:
+        exempt = False
     fn = csp_setup if side in (_SIDE_CSP, "put") else cc_setup
     grade = fn(
+        earnings_exempt=exempt,
         rsi=rsi, iv_rank=iv_rank, iv_rank_source=iv_src,
         support_resistance=tech.get("support_resistance"),
         strike=strike, spot=spot,
@@ -820,6 +1002,10 @@ def _cap_unverified_grade(grade: dict, config: dict | None) -> dict:
     if UNVERIFIED_RSI_NOTE not in msg:
         g["message"] = (f"{msg} — {note}" if msg else note)
     g["rsi_unverified"] = True
+    # 💎 prime requires a VERIFIED RSI vintage (rule #46) — an unverified
+    # read can never claim every check is in its prime band.
+    g["prime"] = False
+    g["prime_missing"] = [UNVERIFIED_RSI_NOTE]
     return g
 
 
@@ -997,7 +1183,7 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         return reasons
 
     def _consider(side, ticker, grade, ticket, ann_pct, deferred, source,
-                  strike=None):
+                  strike=None, expiration=None, dte=None, premium_mid=None):
         if not grade or grade.get("letter") in ("—", "n/a", None):
             return
         if grade.get("score") is None:
@@ -1057,10 +1243,17 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
             "ticket": ticket, "annualized_pct": round(float(ann_pct), 1),
             "drivers": list(grade.get("drivers") or [])[:2],
             "message": grade.get("message") or "",
+            # 💎 prime conjunction (George 2026-08-14) — card-strict tier.
+            "prime": bool(grade.get("prime")),
+            "prime_missing": list(grade.get("prime_missing") or []),
             "deferred_tag": (capacity_tag if deferred and capacity_tag
                              else None),
             "deferred": bool(deferred),
             "source": source,
+            # Rule #48 — the canonical entry algorithm re-evaluates every
+            # pooled entry before ranking; it needs the real contract data.
+            "strike": strike, "expiration": expiration, "dte": dte,
+            "premium_mid": premium_mid,
         }
         prev = pools.get(key)
         if prev is None or entry["score"] > prev["score"]:
@@ -1086,7 +1279,10 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         grade = {"letter": idea.get("setup_grade"),
                  "score": idea.get("setup_grade_score"),
                  "drivers": idea.get("setup_grade_drivers") or [],
-                 "message": idea.get("setup_grade_message") or ""}
+                 "message": idea.get("setup_grade_message") or "",
+                 "prime": bool(idea.get("setup_grade_prime")),
+                 "prime_missing": list(
+                     idea.get("setup_grade_prime_missing") or [])}
         strike = idea.get("strike")
         exp = idea.get("expiration_pretty") or idea.get("expiration") or ""
         ticket = (f"SELL ${strike:g}P {exp}".strip()
@@ -1094,7 +1290,9 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         _consider("csp", idea.get("ticker"), grade, ticket,
                   idea.get("annualized_pct"),
                   bool(idea.get("capacity_blocked")), "income opportunity",
-                  strike=idea.get("strike"))
+                  strike=idea.get("strike"),
+                  expiration=idea.get("expiration"),
+                  dte=idea.get("dte"), premium_mid=idea.get("mid"))
 
     # 2) LT_CSP opportunities — re-graded here from the same snapshot
     #    inputs (the op dict itself only carries the note inside
@@ -1117,7 +1315,8 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
                   (float(am.group(1)) if am else None),
                   bool(op.get("capacity_deferred")) or gates_closed,
                   "long-term opportunity",
-                  strike=(float(sm.group(1)) if sm else None))
+                  strike=(float(sm.group(1)) if sm else None),
+                  dte=op.get("target_dte"))
 
     # 3) Covered-call writes + index CCs (CC side).
     for up in strategy_upgrades or []:
@@ -1137,13 +1336,16 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         grade = {"letter": up.get("setup_grade"),
                  "score": up.get("setup_grade_score"),
                  "drivers": (up.get("setup_grade_drivers") or []),
-                 "message": up.get("setup_grade_message") or ""}
+                 "message": up.get("setup_grade_message") or "",
+                 "prime": bool(up.get("setup_grade_prime")),
+                 "prime_missing": list(
+                     up.get("setup_grade_prime_missing") or [])}
         if not grade["drivers"] and up.get("setup_grade_line"):
             # drivers ride inside the composed line; keep it short
             grade["drivers"] = []
         _consider("cc", up.get("underlying"), grade, ticket,
                   up.get("est_annualized_pct"), False, "covered call",
-                  strike=strike)
+                  strike=strike, dte=dte)
 
     # 4) Scout candidates with a live CSP ticket — graded here.
     for r in scout_results or []:
@@ -1169,12 +1371,69 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         exp = q.get("expiration") or ""
         ticket = f"SELL 1× ${float(strike):g}P exp {exp} ({dte} DTE)"
         _consider("csp", r.get("ticker"), grade, ticket, ann,
-                  gates_closed, "scout candidate", strike=strike)
+                  gates_closed, "scout candidate", strike=strike,
+                  expiration=q.get("expiration"), dte=dte, premium_mid=mid)
+
+    # Rule #48 — THE ENTRY ALGORITHM is the decision path for the spotlight:
+    # no slot may green-light a ticket the canonical six-step evaluator
+    # rejects. The pool entries already passed this function's own inlined
+    # canonical checks (vintage, overlap, closing-today, concentration,
+    # floors), so on shared inputs the evaluator agrees — a BLOCKED verdict
+    # here means a step this pool did NOT run (earnings window, LT-verdict
+    # gate, tenor cap, tail risk) caught the ticket. Moved to the visible
+    # exclusions (rule #24), never silently dropped. Fail-open: evaluator
+    # unavailable/erroring → pool unchanged (rule #19).
+    try:
+        from analysis.entry_algorithm import evaluate_entry as _ea_eval
+    except Exception:       # pragma: no cover — import failure fails open
+        _ea_eval = None
+    if _ea_eval is not None:
+        for key in list(pools):
+            e = pools[key]
+            try:
+                dec = _ea_eval(
+                    e["side"], e["ticker"], e.get("strike"),
+                    e.get("expiration"), e.get("premium_mid"),
+                    _snapshot, None, config, positions=_positions,
+                    action_close_idents=closing_today,
+                    dte=e.get("dte"),
+                    annualized_pct=e.get("annualized_pct"))
+            except Exception:
+                continue    # evaluator failure never drops a slot (rule #19)
+            if dec.blocked:
+                pool_x = excluded if e["side"] == "csp" else excluded_cc
+                x_entry = {
+                    "side": e["side"], "ticker": e["ticker"],
+                    "letter": e["letter"], "score": e["score"],
+                    "ticket": e["ticket"], "reason": dec.primary_detail,
+                }
+                prev_x = pool_x.get(e["ticker"])
+                if prev_x is None or x_entry["score"] > prev_x["score"]:
+                    pool_x[e["ticker"]] = x_entry
+                del pools[key]
 
     ranked = sorted(pools.values(), key=lambda e: -float(e["score"]))
+    # 💎 Prime conjunction-passers (George 2026-08-14: "we should clearly
+    # see all of the good entries based on this algorithm") — EVERY passer
+    # across the full ranked pool (never capped at top_n; a prime entry
+    # must be unmistakable even when outscored on the weighted axis).
+    # Closest miss = the top-scored non-prime candidate with a MEASURED
+    # missing list (rule #19 — never padded, never a fabricated reason).
+    prime_entries = [e for e in ranked if e.get("prime")]
+    prime_closest_miss = None
+    for e in ranked:
+        if not e.get("prime") and e.get("prime_missing"):
+            prime_closest_miss = {
+                "ticker": e["ticker"], "letter": e["letter"],
+                "score": e["score"],
+                "missing": list(e["prime_missing"]),
+            }
+            break
     return {
         "csp": [e for e in ranked if e["side"] == "csp"][:top_n],
         "cc": [e for e in ranked if e["side"] == "cc"][:top_n],
+        "prime": prime_entries,
+        "prime_closest_miss": prime_closest_miss,
         # Position/concentration/vintage-aware exclusions — rendered as
         # visible ⏸ lines (rule #24), never silently dropped, never in the
         # pool (so the redeploy-path A/B pool never sees them either).
@@ -1207,6 +1466,32 @@ def render_best_setups(best: dict | None, config: dict | None = None) -> list[st
         "",
     ]
 
+    # 💎 Prime entries — George's card-strict conjunction (2026-08-14:
+    # "we should clearly see all of the good entries based on this
+    # algorithm"). FIRST subsection: every conjunction-passer, with the
+    # same deferred/capacity tags as ever. None qualify → the closest
+    # miss with its MEASURED missing list (rule #19 — never padded).
+    prime = best.get("prime") or []
+    lines.append("**💎 Prime entries — card-strict "
+                 "(every check in its prime band):**")
+    if prime:
+        for e in prime:
+            seg = (f"- 💎 **{e['letter']}** ({e['score']:.0f}) "
+                   f"`{e['ticker']}` — {e['ticket']} · "
+                   f"{e['annualized_pct']:.0f}% ann — {e['message']}")
+            lines.append(seg)
+            if e.get("deferred_tag"):
+                lines.append(f"  - **{e['deferred_tag']}**")
+    else:
+        cm = best.get("prime_closest_miss")
+        if cm and cm.get("missing"):
+            miss = "; ".join(str(m) for m in cm["missing"])
+            lines.append(f"- _none today — closest miss: "
+                         f"{cm['ticker']} ({miss})_")
+        else:
+            lines.append("- _none today_")
+    lines.append("")
+
     def _emit(title: str, entries: list, excluded: list | None = None) -> None:
         lines.append(title)
         if not entries and not excluded:
@@ -1215,7 +1500,9 @@ def render_best_setups(best: dict | None, config: dict | None = None) -> list[st
             return
         for e in entries:
             drivers = " · ".join(str(d) for d in (e.get("drivers") or []))
-            seg = (f"- **{e['letter']}** ({e['score']:.0f}) `{e['ticker']}` — "
+            seg = (f"- **{e['letter']}** ({e['score']:.0f}) "
+                   + ("💎 " if e.get("prime") else "")
+                   + f"`{e['ticker']}` — "
                    f"{e['ticket']} · {e['annualized_pct']:.0f}% ann")
             if drivers:
                 seg += f" · {drivers}"

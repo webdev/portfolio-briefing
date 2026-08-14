@@ -533,6 +533,11 @@ def generate_new_ideas(
                         idea["setup_grade_message"] = _sg_g["message"]
                         idea["setup_grade_drivers"] = _sg_g["drivers"]
                         idea["setup_grade_line"] = _sgm.format_grade_note(_sg_g)
+                        # 💎 prime conjunction (George 2026-08-14) —
+                        # card-strict tier on top of the weighted grade.
+                        idea["setup_grade_prime"] = bool(_sg_g.get("prime"))
+                        idea["setup_grade_prime_missing"] = list(
+                            _sg_g.get("prime_missing") or [])
                         # B floor (George 2026-08-12: "recommendations
                         # [must be] A or B, not D") — below-floor tickets
                         # demote to the planning subsection with the

@@ -619,6 +619,9 @@ def compute_strategy_upgrades(
                 "setup_grade_score": _str_sg["score"],
                 "setup_grade_message": _str_sg["message"],
                 "setup_grade_drivers": _str_sg["drivers"],
+                "setup_grade_prime": bool(_str_sg.get("prime")),
+                "setup_grade_prime_missing": list(
+                    _str_sg.get("prime_missing") or []),
                 "setup_grade_line": _str_sg_line} if _str_sg else
                ({"setup_grade_line": _str_sg_line}
                 if _str_sg_line else {})),
@@ -1156,6 +1159,9 @@ def compute_strategy_upgrades(
                 "setup_grade_score": _sg_grade["score"],
                 "setup_grade_message": _sg_grade["message"],
                 "setup_grade_drivers": _sg_grade["drivers"],
+                "setup_grade_prime": bool(_sg_grade.get("prime")),
+                "setup_grade_prime_missing": list(
+                    _sg_grade.get("prime_missing") or []),
                 "setup_grade_line": _sg_line} if _sg_grade else
                # Fail-OPEN n/a note under the actionable floor (rule #19).
                ({"setup_grade_line": _sg_line} if _sg_line else {})),
@@ -1421,6 +1427,9 @@ def compute_strategy_upgrades(
                     "setup_grade_score": _idx_sg["score"],
                     "setup_grade_message": _idx_sg["message"],
                     "setup_grade_drivers": _idx_sg["drivers"],
+                    "setup_grade_prime": bool(_idx_sg.get("prime")),
+                    "setup_grade_prime_missing": list(
+                        _idx_sg.get("prime_missing") or []),
                     "setup_grade_line": _idx_sg_line} if _idx_sg else
                    ({"setup_grade_line": _idx_sg_line}
                     if _idx_sg_line else {})),

@@ -957,6 +957,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
     thin_premium: list[tuple[str, dict, dict]] = []  # rule #44 yield floor (bug 3)
     below_floor: list[tuple[str, dict, str]] = []    # B floor (George 2026-08-12)
+    algo_blocked: list[tuple[str, dict, object]] = []  # rule #48 entry algorithm
     oversize: list[tuple[str, dict, str]] = []       # projected concentration
     # over the tier cap (2026-08-13 SNDK gap) — planning only, never green-lit
     seen: set[str] = set()
@@ -1001,6 +1002,36 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
             _g = _candidate_setup_grade(res, rsi_th, config, _chain_iv_cb)
             _b, _n = _sgm_fl.below_actionable_floor(_g, config)
             return _n if _b else None
+        except Exception:
+            return None
+
+    # Rule #48 — THE ENTRY ALGORITHM is the FINAL green-light decision on a
+    # candidate card. The buckets above run the same canonical checks the
+    # evaluator conducts (one voice — parity is pinned by tests); the
+    # evaluator additionally conducts the steps this surface never ran
+    # inline (vintage-resolved live RSI, earnings-inside-contract, the
+    # LT-verdict gate, tenor cap) so no card can green-light a ticket the
+    # canonical algorithm rejects. BLOCKED → the visible "Held back by the
+    # entry algorithm" bucket (rule #24). Fail-open: no ticket / evaluator
+    # error → None (the card keeps its existing wiring — rule #19).
+    _recs_map_cb: dict = {}
+    for _rec in (recommendations_list or []):
+        if isinstance(_rec, dict) and _rec.get("ticker"):
+            _recs_map_cb[str(_rec["ticker"]).upper()] = _rec
+
+    def _entry_algo_decision(res: dict):
+        _q = res.get("csp_entry") or {}
+        if not _q.get("strike"):
+            return None
+        try:
+            from analysis.entry_algorithm import evaluate_entry
+            _tk_ea = (res.get("ticker") or "").upper()
+            return evaluate_entry(
+                "csp", _tk_ea, _q.get("strike"), _q.get("expiration"),
+                _q.get("mid"), snapshot_data, analytics, config,
+                positions=_positions_cb, dte=_q.get("dte"),
+                parkev_rec=_recs_map_cb.get(_tk_ea),
+                sector_pcts=_sector_pcts_cb or None)
         except Exception:
             return None
     for theme_key, results in rbt.items():
@@ -1055,7 +1086,11 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                         if _fl_n:
                             below_floor.append((tname, r, _fl_n))
                         else:
-                            cands.append((tname, r))
+                            _dec = _entry_algo_decision(r)
+                            if _dec is not None and _dec.blocked:
+                                algo_blocked.append((tname, r, _dec))
+                            else:
+                                cands.append((tname, r))
             elif status == "held_rsi":
                 seen.add(tk)
                 held.append((tname, r, rv))
@@ -1256,6 +1291,31 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
             card[0] = f"{card[0]}  · _{tname}_"
             lines.extend(card)
             lines.append("")
+
+    if algo_blocked:
+        # Rule #48 — the canonical six-step entry algorithm rejected a
+        # ticket every generator-side bucket above green-lit (a step this
+        # surface never ran inline: vintage-resolved live RSI, earnings
+        # inside the contract, LT-verdict gate, tenor cap). Visible with
+        # the measured primary reason (rule #24), never a candidate slot.
+        lines.append(f"{_h_sub} ⛔ Held back by the entry algorithm "
+                     f"({len(algo_blocked)})")
+        lines.append("_The canonical six-step entry evaluator (rule #48: "
+                     "data freshness → hard blocks → payment floors → setup "
+                     "grade → B floor → book gates) rejected these — the "
+                     "first failing step is shown; nothing hidden._")
+        lines.append("")
+        for tname, r, _dec in sorted(
+                algo_blocked, key=lambda x: (x[0], x[1].get("ticker", ""))):
+            tk = (r.get("ticker") or "").upper()
+            q = r.get("csp_entry") or {}
+            _p = _dec.primary or {}
+            lines.append(
+                f"- **`{tk}`** ({tname}) — SELL ${q.get('strike', 0):g}P → "
+                f"**BLOCKED** (step {_p.get('step')}: {_p.get('check')}) — "
+                f"{_dec.primary_detail}"
+            )
+        lines.append("")
 
     if thin_premium:
         # Rule #44 (2026-08-10 bug 3) — visible with measured numbers

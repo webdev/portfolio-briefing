@@ -1205,6 +1205,27 @@ def aggregate_briefing(
         print(f"[aggregate] rsi-consistency sweep failed: {_e}",
               file=_sys.stderr)
 
+    # 🧮 Entry Algorithm Conformance (rule #48, George 2026-08-14: "the
+    # exact algorithm that ensures that the entry is as good as possible
+    # ... I definitely don't want a coin-flip algorithm"): re-run the
+    # canonical six-step evaluator over every green-lit new-open ticket in
+    # the rendered briefing — any ticket the algorithm would NOT mark
+    # ENTER is flagged, so no surface can green-light what the evaluator
+    # rejects. Zero flags on a healthy render. Fail-open: any error → no
+    # panel, briefing unchanged.
+    try:
+        from analysis import entry_algorithm as _ea
+        from analysis import setup_grade as _ea_sg
+        _ea_offenders = _ea.audit_conformance(
+            "\n".join(lines), snapshot_data, analytics, config,
+            action_close_idents=_ea_sg.closing_today_from_action_lines(
+                action_list_lines))
+        lines.extend(_ea.render_conformance_panel(_ea_offenders))
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] entry-algorithm conformance failed: {_e}",
+              file=_sys.stderr)
+
     lines.extend(render_inconsistencies(flagged_inconsistencies))
 
     # Task #40 fix 9 / task #43 fix 1: detect user-executed rolls from the
