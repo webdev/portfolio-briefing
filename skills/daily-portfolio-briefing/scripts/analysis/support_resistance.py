@@ -69,6 +69,14 @@ DEFAULT_CONFIG = {
     "min_strength": 1.5,        # rendering threshold (touches + confluence bonus)
     "max_levels_each_side": 2,  # render at most N supports / N resistances
     "anchor_proximity_pct": 0.03,  # strike selection anchors when within 3% of a cluster
+    # Data-artifact sanity bounds (rule #43, 2026-08-14: SNDK rendered
+    # "S: $44.4 (52w low, 1 touch)" on a $1,625 stock — a post-spinoff /
+    # short-history OHLC artifact). A SINGLE-TOUCH 52w-extreme-only level
+    # with NO other confluence is dropped when it sits below this fraction
+    # of spot (supports) / above this multiple of spot (resistances).
+    # Multi-touch or confluent levels are NEVER dropped (fail-open).
+    "artifact_support_min_pct_of_spot": 0.50,
+    "artifact_resistance_max_pct_of_spot": 2.00,
     "recency_weights": {
         "30d": 1.0,
         "90d": 0.6,
@@ -405,6 +413,35 @@ def add_confluence(
     return levels
 
 
+def _is_far_extreme_artifact(level: Level, spot: float, cfg: dict) -> bool:
+    """True when ``level`` is a single-touch 52w-extreme-only level with no
+    other confluence sitting absurdly far from spot — a data artifact
+    (post-spinoff / short-history OHLC), not a tradeable level.
+
+    Rule #43 origin (2026-08-14): SNDK's action card rendered
+    "S: … $44.4 (52w low, 1 touch)" on a $1,625 stock. Fail-open by
+    design: multi-touch levels, swing/pivot/SMA levels, and levels with any
+    NON-SELF confluence are never dropped; unresolvable config disables the
+    filter entirely (never drops on missing data)."""
+    try:
+        sup_min = float(cfg.get("artifact_support_min_pct_of_spot", 0.50))
+        res_max = float(cfg.get("artifact_resistance_max_pct_of_spot", 2.00))
+    except (TypeError, ValueError):
+        return False
+    if sup_min <= 0 or res_max <= 0 or spot <= 0:
+        return False
+    if level.touches > 1:
+        return False
+    if level.source not in (SRC_LOW_52W, SRC_HIGH_52W):
+        return False
+    # Self-confluence (the 52w reference matching itself) doesn't count.
+    if any(c != level.source for c in level.confluence):
+        return False
+    if level.side == SUPPORT:
+        return level.price < spot * sup_min
+    return level.price > spot * res_max
+
+
 def standalone_reference_levels(
     *,
     side: str,
@@ -620,6 +657,17 @@ def compute_sr(
         confluence_pct=cfg["confluence_pct"],
         confluence_bonus=cfg["confluence_bonus"],
     )
+
+    # 6b) Data-artifact sanity filter (rule #43, 2026-08-14): drop a
+    #     SINGLE-TOUCH 52w-extreme-only level with no other confluence when
+    #     it is absurdly far from spot (support < ~50% of spot, resistance
+    #     > ~200% of spot) — a post-spinoff/short-history OHLC artifact, not
+    #     a level (the SNDK "$44.4 (52w low, 1 touch)" on a $1,625 stock).
+    #     Fail-open: multi-touch or genuinely-confluent levels always stay.
+    all_supports = [lv for lv in all_supports
+                    if not _is_far_extreme_artifact(lv, spot, cfg)]
+    all_resistances = [lv for lv in all_resistances
+                       if not _is_far_extreme_artifact(lv, spot, cfg)]
 
     # 7) Filter by strength + side + sort by proximity to spot.
     min_strength = float(cfg.get("min_strength", 1.5))

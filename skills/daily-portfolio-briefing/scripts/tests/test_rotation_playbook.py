@@ -616,8 +616,13 @@ def _big_sweep_helds(collateral_k=200):
 
 def test_phase2_gates_use_projected_cash():
     """2026-07-22 symptom: cash 4% NLV pre-close → every Phase 2 candidate
-    hit 🚫 BLOCK (CASH_FLOOR), even though Phase 1 frees $200K (projected
-    cash ~24% NLV). The gate must evaluate the POST-close state."""
+    hit 🚫 BLOCK (CASH_FLOOR). The composed rotation must still deploy:
+    it is ~cash-neutral (winner buyback out, new premium in) and
+    obligation-reducing (deploy ≤ freed), so a pre-existing cash-floor
+    breach is not worsened by it. NOTE (rule #43, 2026-08-14): the old
+    rationale "freed $200K → projected cash ~24% NLV" was fiction — freed
+    collateral never becomes cash on a margin-secured book; the sanctioned
+    rebuild path stands on obligation reduction instead."""
     an = {
         "nlv": 1_000_000.0,
         "snapshot_data": {
@@ -635,7 +640,13 @@ def test_phase2_gates_use_projected_cash():
 
 def test_phase2_projected_coverage_reopens_gate():
     """Pre-close coverage 0.10× (< 0.50× floor) → ENTRY_GATES_CLOSED would
-    block. Post-close projection (cash+freed)/(obl−freed) = 0.57× → allowed."""
+    block. The coverage-IMPROVING composed rotation is still admitted, and
+    coverage_after uses the HONEST margin-secured formula (rule #43,
+    2026-08-14 — the real briefing rendered "Coverage after: 0.11× →
+    ~0.38×" by treating $123K of freed SNDK collateral as new cash; the
+    honest number was ~0.13×): (cash − buybacks + new premium) /
+    (obl − freed + deployed). Freed collateral shrinks the obligation; it
+    never becomes cash."""
     an = {
         "nlv": 2_000_000.0,
         "stress_coverage": {"coverage_ratio": 0.10,
@@ -649,12 +660,15 @@ def test_phase2_projected_coverage_reopens_gate():
                   {"CRM": rec(3, "High", 5)}, an=an)
     assert pb is not None
     assert pb.total_freed == pytest.approx(300_000)
-    # (100K + 300K) / (1M − 300K) = 0.571× ≥ 0.50× → candidate admitted.
+    # Honest projection: (100K − 1K btc) / (1M − 300K) ≈ 0.141× ≥ 0.10×
+    # measured → coverage-improving → candidate admitted.
     assert [o.ticker for o in pb.opens] == ["CRM"]
     assert any("unlocks after Phase 1" in f for f in pb.opens[0].setup_flags)
-    # coverage_after uses the corrected formula:
-    # (cash + freed) / (obl − freed + deployed) = 400K / 715K ≈ 0.5594×.
-    assert pb.coverage_after == pytest.approx(400_000 / 715_000, abs=1e-3)
+    # coverage_after — HONEST: (100,000 − 1,000 + 240) / (1,000,000 −
+    # 300,000 + 15,000) = 99,240 / 715,000 ≈ 0.1388×. NEVER the fictional
+    # (cash + freed) / (obl − freed + deployed) = 400K/715K ≈ 0.5594×.
+    assert pb.coverage_after == pytest.approx(99_240 / 715_000, abs=1e-3)
+    assert pb.coverage_after < 0.20  # the 0.38×-style fiction can't return
 
 
 def test_projected_state_none_preserves_current_behavior():
@@ -988,9 +1002,11 @@ def test_adaptive_cap_crisis_30pct():
 
 
 def test_adaptive_cap_defensive_50pct():
-    """Projected coverage (80K+67.5K)/(500K−67.5K) ≈ 0.34× → defensive band,
-    cap 50% ($33,750) — both candidates ($28K total) fit."""
-    an = _coverage_an(cash=80_000.0, obligations=500_000.0)
+    """HONEST projected coverage (100K − 1.4K buybacks)/(500K − 67.5K
+    freed) ≈ 0.23× → defensive band, cap 50% ($33,750) — both candidates
+    ($28K total) fit. (Freed collateral shrinks the obligation; it does
+    NOT become cash — rule #43, 2026-08-14.)"""
+    an = _coverage_an(cash=100_000.0, obligations=500_000.0)
     pb = playbook(_sweeper(), _two_cands(), _TWO_RECS, an=an,
                   config=ADAPTIVE_CFG)
     assert pb.deploy_cap_pct == pytest.approx(0.50)
@@ -1000,9 +1016,10 @@ def test_adaptive_cap_defensive_50pct():
 
 
 def test_adaptive_cap_healthy_90pct():
-    """Projected coverage (60K+67.5K)/(200K−67.5K) ≈ 0.96× → healthy band,
-    cap 90% (the current default) — no reduced-band note."""
-    an = _coverage_an(cash=60_000.0, obligations=200_000.0)
+    """HONEST projected coverage (80K − 1.4K buybacks)/(200K − 67.5K freed)
+    ≈ 0.59× → healthy band, cap 90% (the current default) — no
+    reduced-band note."""
+    an = _coverage_an(cash=80_000.0, obligations=200_000.0)
     pb = playbook(_sweeper(), _two_cands(), _TWO_RECS, an=an,
                   config=ADAPTIVE_CFG)
     assert pb.deploy_cap_pct == pytest.approx(0.90)
@@ -1011,16 +1028,19 @@ def test_adaptive_cap_healthy_90pct():
 
 
 def test_adaptive_cap_uses_projected_not_current():
-    """Pre-close coverage 0.06× (crisis) but Phase 1 frees $300K → projected
-    (330K)/(200K) = 1.65× → HEALTHY band cap 0.90, not the crisis 0.30.
-    The cap reads the post-close state — Phase 1 already happened."""
-    an = _coverage_an(cash=30_000.0, obligations=500_000.0)
+    """Pre-close coverage 0.30× (defensive) but Phase 1 retires $300K of
+    obligation → HONEST projected (150K − 1K buybacks)/(500K − 300K freed)
+    = 0.745× → HEALTHY band cap 0.90, not the defensive 0.50. The cap reads
+    the post-close state — Phase 1 already happened. (The projection is the
+    honest margin-secured one: obligation shrinks; freed collateral never
+    becomes cash — rule #43, 2026-08-14.)"""
+    an = _coverage_an(cash=150_000.0, obligations=500_000.0)
     pb = playbook(_big_sweep_helds(300), [cand(ticker="CRM")],
                   {"CRM": rec(3, "High", 5)}, an=an, config=ADAPTIVE_CFG)
     assert pb is not None
     assert pb.deploy_cap_pct == pytest.approx(0.90)
     assert "healthy" in pb.deploy_cap_label
-    assert pb.deploy_cap_coverage == pytest.approx(330_000 / 200_000, abs=1e-3)
+    assert pb.deploy_cap_coverage == pytest.approx(149_000 / 200_000, abs=1e-3)
 
 
 def test_flat_deploy_target_fallback():

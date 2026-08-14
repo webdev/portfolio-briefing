@@ -94,10 +94,16 @@ class PeriodAttribution:
     # premium was counted when today's window shows $0 (opens captured by an
     # intraday rerun of the prior snapshot land in the prior window).
     prior_window: dict = field(default_factory=dict)
+    # Chained periods (2026-08-14): how many snapshot-to-snapshot windows
+    # were summed — lets the renderer derive the residual honestly ("cash
+    # residual chain-summed across N windows"), so a large
+    # interest_dividends value is self-explaining instead of alarming.
+    n_windows: int | None = None
 
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "n_windows": self.n_windows,
             "start_date": self.start_date.isoformat() if self.start_date else None,
             "end_date": self.end_date.isoformat() if self.end_date else None,
             "nlv_start": round(self.nlv_start, 2) if self.nlv_start is not None else None,
@@ -438,6 +444,7 @@ def compute_chained_attribution(snapshots: list, name: str = "period",
         total.nlv_end = _f(balance_nlv((snapshots[-1].get("balance") or {})))
         total.nlv_change = total.nlv_end - total.nlv_start
         notes: list[str] = []
+        total.n_windows = len(snapshots) - 1
         for prior, cur in zip(snapshots, snapshots[1:]):
             link = compute_attribution(cur, prior, name=f"{name}_link")
             for k in BUCKET_KEYS:

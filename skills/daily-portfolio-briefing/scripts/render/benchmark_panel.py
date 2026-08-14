@@ -167,12 +167,34 @@ def _render_attribution(lines: list[str], attribution) -> None:
     lines.append(f"- NLV change: **{_fmt_usd(_get(main, 'nlv_change'))}** "
                  f"({_fmt_usd_plain(_get(main, 'nlv_start'))} → "
                  f"{_fmt_usd_plain(_get(main, 'nlv_end'))})")
+    nlv_start = _get(main, "nlv_start") or 0.0
     for key, label in _BUCKET_LABELS:
         if key in buckets:
             lines.append(f"- {label}: {_fmt_usd(buckets.get(key))}")
+            # Derivation note (rule #43, 2026-08-14): a large residual-cash
+            # bucket must be self-explaining — it is the chain-summed CASH
+            # residual (measured cash change − cash inferred from position
+            # deltas) per snapshot window, so dividends, interest, fees AND
+            # per-window trade-price estimate error all accumulate here. It
+            # is NOT a broker statement line and can move materially in one
+            # day when a window's fills are proxied at snapshot marks.
+            if key == "interest_dividends":
+                _idv = buckets.get(key) or 0.0
+                if nlv_start and abs(_idv) >= max(0.005 * nlv_start, 5000.0):
+                    _nw = _get(main, "n_windows")
+                    _win_txt = (f"chain-summed across {int(_nw)} snapshot "
+                                f"windows" if _nw
+                                else "chain-summed across the period's "
+                                     "snapshot windows")
+                    lines.append(
+                        f"  - _derivation: per-window cash residual "
+                        f"(measured cash change − cash inferred from "
+                        f"position deltas), {_win_txt} — dividends, "
+                        f"interest, fees AND per-window trade-price "
+                        f"estimate error accumulate here; not a broker "
+                        f"statement line._")
 
     unattr = _get(main, "unattributed", 0.0) or 0.0
-    nlv_start = _get(main, "nlv_start") or 0.0
     flag = ""
     if nlv_start and abs(unattr) > max(0.005 * nlv_start, 500.0):
         flag = " ⚠️ (large residual — balance vs positions disagree; investigate)"

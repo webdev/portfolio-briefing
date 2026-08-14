@@ -62,9 +62,28 @@ def _f(v, default: float = 0.0) -> float:
         return default
 
 
+def _is_hold_kind(kind: str) -> bool:
+    """HOLD / GTC verbs — a resting order, not a fill (rule #43, 2026-08-14:
+    'HOLD — GTC AT 50% NOK $11P' is NOT banked today and NOT a buyback;
+    counting it dragged the Money Plan to −$7,100 buybacks while Total
+    Impact honestly said −$5,320)."""
+    k = (kind or "").upper()
+    return "GTC" in k or k.startswith("HOLD")
+
+
 def _is_close_kind(kind: str) -> bool:
     k = (kind or "").upper()
+    if _is_hold_kind(k):
+        return False  # a GTC/hold never fills at mid today
     return "CLOSE" in k or k.startswith("TAKE_PROFIT")
+
+
+def gtc_hold_idents(action_list_lines: list) -> set:
+    """Contract idents the composed action list resolved to a HOLD / GTC
+    verb. Shared by every surface that folds in playbook closes, so a
+    contract the briefing says to HOLD can never be counted as a close."""
+    return {b["ident"] for b in actionable_blocks(action_list_lines or [])
+            if _is_hold_kind(b["kind"])}
 
 
 def _is_roll_kind(kind: str) -> bool:
@@ -203,9 +222,14 @@ def compute_net_option_cash(
         # Other kinds (equity TRIM/EXIT, WATCH…) are not option cash.
 
     # ── Playbook composition (when the caller has it) ────────────────────
+    # A playbook close whose contract the action list resolved to HOLD/GTC
+    # is dropped — the briefing's own verdict wins (one voice, rule #43).
+    hold_idents = gtc_hold_idents(action_list_lines)
     pb = playbook if isinstance(playbook, dict) else {}
     for c in pb.get("closes") or []:
         if not isinstance(c, dict) or c.get("contract") in counted_close_idents:
+            continue
+        if c.get("contract") in hold_idents:
             continue
         btc_mid = _f(c.get("buy_to_close_mid"))
         qty = abs(_f(c.get("qty")) or 1)

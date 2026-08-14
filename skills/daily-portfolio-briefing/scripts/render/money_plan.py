@@ -10,9 +10,13 @@ Every number is measured this cycle (hard rule #19 — no fabrication):
     composed action list (deferred/gated/skipped blocks are excluded),
     cross-referenced against options_reviews / new_ideas for the dollar
     math; plus the Rotation Playbook's composed closes/opens.
-  - **Coverage after** — the playbook's existing projected math
-    (coverage_before → coverage_after); falls back to the current stress
-    coverage ratio when no playbook composed this cycle.
+  - **Coverage after** — the playbook's projected math (coverage_before →
+    coverage_after), computed with the HONEST margin-secured formula
+    ((cash − buybacks + new premium) / (obligation − freed + deployed) —
+    single source: analysis/redeploy_path.coverage_after_components; freed
+    collateral shrinks the obligation, it does NOT become cash). Falls back
+    to the current stress coverage ratio when no playbook composed this
+    cycle. A small gain carries "— obligation shrinks; cash does not".
   - **Month so far** — MATCHED per-contract realized P/L on option
     positions closed this month, from position diffs across
     ``state/briefing_snapshots/*/positions.json`` (the same source
@@ -60,6 +64,10 @@ except ImportError:  # pragma: no cover — standalone use
     )
 
 _NET_CREDIT_RE = re.compile(r"net \+\$([\d,]+(?:\.\d+)?) credit")
+
+# Below this coverage-after gain the line explains the honest physics —
+# closing puts shrinks the obligation; freed collateral is NOT new cash.
+_SMALL_COVERAGE_GAIN = 0.10
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -330,6 +338,17 @@ def build_money_plan(
             })
 
     # ── Playbook opens/closes (the composed rotation) ────────────────────
+    # GTC-hold consistency (rule #43, 2026-08-14): a contract the action
+    # list resolved to "HOLD — GTC AT 50%" is a RESTING order, not a fill —
+    # it is neither banked today nor a buyback. The playbook's sweep doesn't
+    # know the render-time verdict, so its close for that contract is
+    # dropped here (NOK $11P rendered in "Bank today: 4 close(s)" and
+    # inflated buybacks to −$7,100 while Total Impact said −$5,320).
+    try:
+        from analysis.net_option_cash import gtc_hold_idents
+        _hold_idents = gtc_hold_idents(action_list_lines)
+    except Exception:
+        _hold_idents = set()
     pb = playbook if isinstance(playbook, dict) else {}
     pb_close_contracts = {b.get("ident") for b in banks}
     for c in pb.get("closes") or []:
@@ -337,6 +356,8 @@ def build_money_plan(
             continue
         if c.get("contract") in pb_close_contracts:
             continue
+        if c.get("contract") in _hold_idents:
+            continue  # action list says HOLD — GTC; not a close today
         realized = _f(c.get("realized_profit"))
         banks.append({
             "label": f"{c.get('ticker', '?')} ${_f(c.get('strike')):g}P",
@@ -498,6 +519,11 @@ def build_money_plan(
     if cov_now is not None and cov_after is not None \
             and abs(cov_after - cov_now) >= 0.005:
         cash_line += f" · **Coverage after:** {cov_now:.2f}× → ~{cov_after:.2f}×"
+        # Honest-physics note (rule #43, 2026-08-14): when the improvement
+        # is small, say WHY — closing puts shrinks the obligation side; on
+        # a margin-secured book the freed collateral does not become cash.
+        if 0 < (cov_after - cov_now) < _SMALL_COVERAGE_GAIN:
+            cash_line += " — obligation shrinks; cash does not"
     elif cov_now is not None:
         cash_line += f" · **Coverage:** {cov_now:.2f}×"
     lines.append(cash_line)

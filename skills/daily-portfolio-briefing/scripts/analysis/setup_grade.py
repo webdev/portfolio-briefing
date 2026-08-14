@@ -767,23 +767,123 @@ def _yield_floor_pct(config: dict | None) -> float:
         return 12.0
 
 
+def _held_short_put_strikes(positions) -> dict:
+    """{ticker: [strikes]} of currently HELD short puts — the rule #17
+    position-aware pool the spotlight/redeploy exclusions check against."""
+    out: dict[str, list] = {}
+    for p in positions or []:
+        if not isinstance(p, dict) or (p.get("assetType") or "") != "OPTION":
+            continue
+        if (p.get("type") or "").upper() != "PUT":
+            continue
+        try:
+            qty = float(p.get("qty") or 0)
+            strike = float(p.get("strike") or 0)
+        except (TypeError, ValueError):
+            continue
+        und = (p.get("underlying") or "").upper()
+        if qty < 0 and strike > 0 and und:
+            out.setdefault(und, []).append(strike)
+    return out
+
+
+_CLOSE_IDENT_RE = re.compile(
+    r"^([A-Z.]{1,6})_(?:PUT|CALL)_(\d+(?:\.\d+)?)(?:_\d{6,8})?$")
+
+
+def closing_today_from_action_lines(action_list_lines) -> set:
+    """Contract idents the composed action list recommends CLOSING today.
+    Used so the spotlight never re-recommends selling a contract the same
+    briefing tells the user to buy back (the SNDK $1230P case)."""
+    try:
+        from analysis.net_option_cash import _is_close_kind, actionable_blocks
+    except ImportError:  # pragma: no cover — standalone use
+        return set()
+    return {b["ident"] for b in actionable_blocks(list(action_list_lines or []))
+            if _is_close_kind(b["kind"])}
+
+
 def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
                         strategy_upgrades=None, scout_results=None,
                         snapshot_data=None, capacity_tag=None,
                         gates_closed: bool = False,
-                        config: dict | None = None) -> dict:
+                        config: dict | None = None,
+                        closing_today=None) -> dict:
     """Top-N CSP + top-N CC setups across the graded universe.
 
     Filters (per spec): the side's RSI hard block ('—' letters excluded)
     and the delivered annualized-yield floor. Capacity-gated names STAY,
     carrying the ⏸ tag (rules #24/#41). Never padded — fewer than N
-    qualify → show what exists."""
+    qualify → show what exists.
+
+    Position/concentration awareness (rule #43, 2026-08-14: the spotlight
+    listed "B (66) SNDK — SELL 1× $1230P" while the user HELD that exact
+    put, action #1 was CLOSE it, and SNDK sat over its 8% Tier C cap; the
+    SNDK close card then offered SNDK as its own redeploy target). A CSP
+    setup is EXCLUDED — with a visible reason line (rule #24) — when:
+      (a) a same/near (5%) strike put is currently held (rule #17 pattern,
+          via put_overlap_check against the snapshot's short puts);
+      (b) the name is over its projected obligation-inclusive tier cap
+          (position_tiers.projected_name_concentration, 1 new contract);
+      (c) ``closing_today`` (contract idents from the composed action list)
+          recommends closing that same/near-strike contract.
+    Exclusions land in ``excluded_csp`` for the renderer and are absent
+    from ``csp`` — so the redeploy-path A/B pool never sees them either."""
     cfg = load_setup_grade_config(config)
     top_n = int((cfg.get("spotlight") or {}).get("top_n", 3) or 3)
     floor_pct = _yield_floor_pct(config)
     pools: dict[str, dict] = {}   # (side, ticker) → best entry
+    excluded: dict[str, dict] = {}  # ticker → best excluded CSP entry
 
-    def _consider(side, ticker, grade, ticket, ann_pct, deferred, source):
+    _positions = (snapshot_data or {}).get("positions") or []
+    _held_puts = _held_short_put_strikes(_positions)
+    _nlv = None
+    try:
+        _nlv = float(((snapshot_data or {}).get("balance") or {})
+                     .get("accountValue") or 0) or None
+    except (TypeError, ValueError):
+        _nlv = None
+    _closing: dict[str, list] = {}   # ticker → [strikes] closing today
+    for ident in (closing_today or set()):
+        m = _CLOSE_IDENT_RE.match(str(ident or "").upper())
+        if m:
+            _closing.setdefault(m.group(1), []).append(float(m.group(2)))
+
+    def _csp_exclusion_reasons(ticker: str, strike) -> list[str]:
+        """Measured exclusion reasons for a would-be CSP spotlight entry.
+        Fail-open: unresolvable inputs produce no reason (rule #19)."""
+        reasons: list[str] = []
+        tk = (ticker or "").upper()
+        if not tk or strike is None:
+            return reasons
+        try:
+            from analysis.put_overlap_check import check_strike_overlap
+        except Exception:
+            check_strike_overlap = None
+        if check_strike_overlap is not None:
+            ov = check_strike_overlap(tk, strike, _held_puts)
+            if ov.get("overlap"):
+                reasons.append(f"you hold this put "
+                               f"(${float(ov['existing_strike']):g}P held)")
+            cv = check_strike_overlap(tk, strike, _closing)
+            if cv.get("overlap"):
+                reasons.append("the action list closes this contract today")
+        if _nlv:
+            try:
+                from analysis.position_tiers import (
+                    projected_name_concentration)
+                proj = projected_name_concentration(
+                    tk, strike, 1, _nlv, _positions, config)
+            except Exception:
+                proj = None
+            if proj is not None and proj.over:
+                reasons.append(
+                    f"over the {proj.cap_pct:g}% cap "
+                    f"({proj.cap_label}; projected {proj.pct:.1f}% of NLV)")
+        return reasons
+
+    def _consider(side, ticker, grade, ticket, ann_pct, deferred, source,
+                  strike=None):
         if not grade or grade.get("letter") in ("—", "n/a", None):
             return
         if grade.get("score") is None:
@@ -796,6 +896,20 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
             return
         if ann_pct is None or float(ann_pct) < floor_pct:
             return  # delivered-yield floor (rule #44) — not income
+        if side == "csp":
+            _reasons = _csp_exclusion_reasons(ticker, strike)
+            if _reasons:
+                _tk = (ticker or "").upper()
+                _entry = {
+                    "side": side, "ticker": _tk,
+                    "letter": grade["letter"], "score": grade["score"],
+                    "ticket": ticket,
+                    "reason": " / ".join(_reasons),
+                }
+                _prev = excluded.get(_tk)
+                if _prev is None or _entry["score"] > _prev["score"]:
+                    excluded[_tk] = _entry
+                return
         key = f"{side}:{(ticker or '').upper()}"
         entry = {
             "side": side, "ticker": (ticker or "").upper(),
@@ -839,7 +953,8 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
                   if strike else (idea.get("instruction") or "")[:60])
         _consider("csp", idea.get("ticker"), grade, ticket,
                   idea.get("annualized_pct"),
-                  bool(idea.get("capacity_blocked")), "income opportunity")
+                  bool(idea.get("capacity_blocked")), "income opportunity",
+                  strike=idea.get("strike"))
 
     # 2) LT_CSP opportunities — re-graded here from the same snapshot
     #    inputs (the op dict itself only carries the note inside
@@ -861,7 +976,8 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
                   ct[:70] or "LT CSP — see Long-Term Opportunities",
                   (float(am.group(1)) if am else None),
                   bool(op.get("capacity_deferred")) or gates_closed,
-                  "long-term opportunity")
+                  "long-term opportunity",
+                  strike=(float(sm.group(1)) if sm else None))
 
     # 3) Covered-call writes + index CCs (CC side).
     for up in strategy_upgrades or []:
@@ -912,12 +1028,16 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         exp = q.get("expiration") or ""
         ticket = f"SELL 1× ${float(strike):g}P exp {exp} ({dte} DTE)"
         _consider("csp", r.get("ticker"), grade, ticket, ann,
-                  gates_closed, "scout candidate")
+                  gates_closed, "scout candidate", strike=strike)
 
     ranked = sorted(pools.values(), key=lambda e: -float(e["score"]))
     return {
         "csp": [e for e in ranked if e["side"] == "csp"][:top_n],
         "cc": [e for e in ranked if e["side"] == "cc"][:top_n],
+        # Position/concentration-aware exclusions — rendered as visible
+        # ⏸ lines (rule #24), never silently dropped, never in the pool.
+        "excluded_csp": sorted(excluded.values(),
+                               key=lambda e: -float(e["score"])),
         "yield_floor_pct": floor_pct,
         "top_n": top_n,
     }
@@ -943,9 +1063,9 @@ def render_best_setups(best: dict | None, config: dict | None = None) -> list[st
         "",
     ]
 
-    def _emit(title: str, entries: list) -> None:
+    def _emit(title: str, entries: list, excluded: list | None = None) -> None:
         lines.append(title)
-        if not entries:
+        if not entries and not excluded:
             lines.append("- _none qualify today_")
             lines.append("")
             return
@@ -959,9 +1079,19 @@ def render_best_setups(best: dict | None, config: dict | None = None) -> list[st
             lines.append(seg)
             if e.get("deferred_tag"):
                 lines.append(f"  - **{e['deferred_tag']}**")
+        # Position/concentration-aware exclusions — one visible line each
+        # (rule #24: never hidden), never a green-lit slot (rule #43,
+        # 2026-08-14: the spotlight offered SNDK $1230P while the user held
+        # that exact put, over-cap, with the action list closing it).
+        for e in excluded or []:
+            lines.append(f"- ⏸ {e['ticker']} {e['letter']} "
+                         f"({e['score']:.0f}) — excluded: {e['reason']}")
+        if not entries:
+            lines.append("- _none qualify today (excluded names above)_")
         lines.append("")
 
-    _emit("**Sell puts into weakness (CSP):**", csp)
+    _emit("**Sell puts into weakness (CSP):**", csp,
+          best.get("excluded_csp") or [])
     _emit("**Sell covered calls into strength (CC):**", cc)
     return lines
 

@@ -58,3 +58,4 @@ build/
 dist/
 *.egg-info/
 .etrade_tokens_sync.json
+gpt-image/

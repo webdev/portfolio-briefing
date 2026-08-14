@@ -139,6 +139,41 @@ def _stress_numbers(analytics) -> tuple[float, float] | None:
     return cash_f, obl_f
 
 
+def coverage_after_components(cash: float, obligation: float, *,
+                              freed: float = 0.0, btc_cost: float = 0.0,
+                              new_obligation: float = 0.0,
+                              new_premium: float = 0.0) -> float | None:
+    """The HONEST post-action coverage projection — single source of truth.
+
+    ``(cash − buybacks + new premium) / (obligation − freed + new obligation)``
+
+    The book is margin-secured: freed put collateral does NOT return to cash
+    when a put closes (verifiable on the real snapshots — cash history did
+    not drop $123K when SNDK $1230P opened, so it cannot rise $123K when it
+    closes). Closing a put shrinks the OBLIGATION side; the only cash moves
+    are the buyback debit and any new-open premium credit. The 2026-08-14
+    briefing's "Coverage after: 0.11× → ~0.38×" treated freed collateral as
+    new cash ((cash + freed) / (obl − freed)); the honest number was ~0.13×.
+
+    Returns ``inf`` when the projected obligation is retired entirely; None
+    when the inputs are unresolvable (fail-open — never fabricate)."""
+    try:
+        cash_f = float(cash)
+        obl_f = float(obligation)
+        freed_f = float(freed or 0.0)
+        btc_f = float(btc_cost or 0.0)
+        new_obl_f = float(new_obligation or 0.0)
+        new_prem_f = float(new_premium or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(cash_f) and math.isfinite(obl_f)):
+        return None
+    proj_obl = obl_f - freed_f + new_obl_f
+    if proj_obl <= 0:
+        return float("inf")
+    return (cash_f - btc_f + new_prem_f) / proj_obl
+
+
 def post_close_coverage(analytics, close_impact: dict | None) -> float | None:
     """Projected coverage ratio AFTER closing this position:
     (cash − buyback) / (obligation − freed collateral). ``inf`` when the
@@ -157,10 +192,7 @@ def post_close_coverage(analytics, close_impact: dict | None) -> float | None:
     if nums is None:
         return None
     cash, obl = nums
-    new_obl = obl - freed
-    if new_obl <= 0:
-        return float("inf")
-    return (cash - btc) / new_obl
+    return coverage_after_components(cash, obl, freed=freed, btc_cost=btc)
 
 
 def ab_setups(best_setups: dict | None) -> list[dict]:

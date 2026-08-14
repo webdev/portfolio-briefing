@@ -74,9 +74,10 @@ Config (briefing.yaml → rotation_playbook):
       instead of being dropped silently; BLOCK findings still exclude.
   adaptive_deploy_bands (default unset = flat)   task #28: coverage-adaptive
       deployment cap. A list of {below, cap_pct, label} bands resolved
-      against the PROJECTED post-Phase-1 coverage ratio (the freed cash is
-      the whole point — at 0.06× coverage the correct behavior is
-      closes-heavy, opens-light). When set, the resolved cap OVERRIDES the
+      against the PROJECTED post-Phase-1 coverage ratio, computed with the
+      HONEST margin-secured math ((cash − buybacks) / (obligation − freed)
+      — freed collateral shrinks the obligation, it does NOT become cash;
+      at 0.06× coverage the correct behavior is closes-heavy, opens-light). When set, the resolved cap OVERRIDES the
       flat deploy_target_pct and acts as a HARD ceiling on deployed
       collateral (never exceeded by a single large candidate). When unset /
       null, or when no coverage is measurable (fail-open), the legacy flat
@@ -106,6 +107,7 @@ Config (briefing.yaml → rotation_playbook):
 
 from __future__ import annotations
 
+import math as _math
 import sys
 from dataclasses import dataclass, field
 from datetime import date as _date
@@ -1125,10 +1127,14 @@ def _compute(
     if total_freed < min_freed:
         return None                   # not worth composing a playbook
 
-    # ── Bug #23: projected post-Phase-1 portfolio state ──────────────────
-    # Phase 2 candidates are gated against the state AFTER the closes fire
-    # (cash + freed, obligations − freed) — gating the composed deployment
-    # on the PRE-close cash floor defeats the playbook's purpose. All
+    # ── Bug #23 / rule #43 (2026-08-14): projected post-Phase-1 state ────
+    # Phase 2 candidates are gated against the state AFTER the closes fire.
+    # HONEST math: the book is margin-secured — freed collateral does NOT
+    # return to cash when a put closes (cash history is flat across six-
+    # figure put opens/closes). Post-close cash = cash − buyback costs;
+    # obligations shrink by the freed collateral. The old (cash + freed)
+    # projection rendered "Coverage after: 0.11× → ~0.38×" on the real
+    # 2026-08-14 briefing when the honest number was ~0.13×. All
     # fail-open: an uncomputable projection silences the portfolio gates.
     try:
         from analysis.capacity_gate import coverage_ratio_from as _cov_from
@@ -1138,7 +1144,10 @@ def _compute(
     measured_cash = _cash_from(analytics)
     obligations_measured = _total_put_obligations(analytics)
     nlv = _nlv_from(analytics)
-    projected_cash = (measured_cash + total_freed
+    total_btc_cost = sum(
+        _f(c.buy_to_close_mid) * 100.0 * abs(_f(c.qty) or 1)
+        for c in closes)
+    projected_cash = (measured_cash - total_btc_cost
                       if measured_cash is not None else None)
     projected_obl = (max(obligations_measured - total_freed, 0.0)
                      if obligations_measured and obligations_measured > 0
@@ -1550,6 +1559,16 @@ def _compute(
                     if (proj_cov_c is not None and coverage_measured is not None
                             and proj_cov_c >= float(coverage_measured)):
                         ignorable.add("ENTRY_GATES_CLOSED")
+                    # Honest-cash re-basing (rule #43, 2026-08-14): the
+                    # projected state no longer pretends freed collateral is
+                    # cash, so the validator's CASH_FLOOR would re-block
+                    # every rotation on a low-cash book. The composed
+                    # rotation is ~cash-neutral (winner buyback out, new
+                    # premium in) and obligation-reducing (deploy ≤ freed),
+                    # so a pre-existing cash-floor breach is not worsened by
+                    # it — the 2026-07-22 "sanctioned rebuild path" intent
+                    # stands on obligation reduction, not on cash fiction.
+                    ignorable.add("CASH_FLOOR")
                     # Rule #46: build_context_from_snapshot resolves the LIVE
                     # RSI, so RSI_OVERBOUGHT_PUT can now fire here — but the
                     # phase-2 gate battery right below is THIS surface's RSI
@@ -1847,11 +1866,25 @@ def _compute(
             after_obl = obligations - total_freed + deployed
             if after_obl > 0:
                 if measured_cash is not None:
-                    # Bug #23: freed collateral returns to cash, so the
-                    # post-playbook ratio is (cash + freed) / (obligations
-                    # − freed + newly deployed) — both sides move.
-                    coverage_after = round(
-                        (measured_cash + total_freed) / after_obl, 4)
+                    # HONEST post-playbook coverage (rule #43, 2026-08-14):
+                    # freed collateral does NOT return to cash on a margin-
+                    # secured book — only buyback debits and new-open
+                    # premium credits move cash; the obligation side shrinks
+                    # by freed and grows by deployed. Single source of
+                    # truth: analysis/redeploy_path.coverage_after_components.
+                    try:
+                        from analysis.redeploy_path import (
+                            coverage_after_components as _cov_after)
+                    except ImportError:  # pragma: no cover — standalone use
+                        from redeploy_path import (
+                            coverage_after_components as _cov_after)
+                    _ca = _cov_after(
+                        measured_cash, obligations,
+                        freed=total_freed, btc_cost=total_btc_cost,
+                        new_obligation=deployed, new_premium=total_premium)
+                    coverage_after = (round(_ca, 4)
+                                      if _ca is not None
+                                      and not _math.isinf(_ca) else _ca)
                 else:
                     # No measured cash → first-order scale of the measured
                     # ratio by the obligation change (legacy estimate).

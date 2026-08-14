@@ -1013,7 +1013,11 @@ def aggregate_briefing(
                 capacity_tag=_bs_tag,
                 gates_closed=(gate_state is not None
                               and not getattr(gate_state, "open", True)),
-                config=config)
+                config=config,
+                # Rule #43 (2026-08-14): never spotlight a contract the SAME
+                # briefing's action list recommends closing (SNDK $1230P).
+                closing_today=_sg_best.closing_today_from_action_lines(
+                    action_list_lines))
             _bs_lines = _sg_best.render_best_setups(best_setups_json,
                                                     config=config)
             if _bs_lines:
