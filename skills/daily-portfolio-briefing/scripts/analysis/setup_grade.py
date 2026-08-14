@@ -776,8 +776,18 @@ def _message(side, letter, score, cfg, th, weights, present, *, rsi,
         cap_seg = (f" (capped at B — {n_missing} inputs unmeasured)"
                    if capped else "")
         top_seg = f"; {top}" if top else ""
+        # Rule #49 proxy-vol honesty (George 2026-08-14, the WDC "A- …
+        # RVr 84 ✓ — Enter per plan" card: "It's misleading."): when the
+        # vol component was measured by the RVr realized-vol PROXY (not
+        # true chain IVr), the ENTER message may not read "Enter per
+        # plan" unqualified. Message-level only — grade/letter unchanged
+        # (💎 PRIME already excludes proxies).
+        enter_seg = "Enter per plan."
+        if iv_rank is not None and iv_source != "chain":
+            enter_seg = ("Enter per plan — verify true IVr at the broker "
+                         "(vol measured by RVr proxy).")
         return (f"🏁 Entry: {letter} — {qual}{cap_seg}"
-                f"{top_seg}. Enter per plan.")
+                f"{top_seg}. {enter_seg}")
     # C / D — name the WEAKEST present components with measured values and
     # config-derived targets (never a hardcoded threshold in the string).
     # Only GENUINELY weak components (score < 1/3) may be named — a
@@ -1094,7 +1104,12 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
       (b) the name is over its projected obligation-inclusive tier cap
           (position_tiers.projected_name_concentration, 1 new contract);
       (c) ``closing_today`` (contract idents from the composed action list)
-          recommends closing that same/near-strike contract.
+          recommends closing that same/near-strike contract;
+      (d) the canonical entry algorithm returns a day-color or same-theme
+          stacking WAIT (rule #49, the WDC card — "make that change so
+          that the briefing is not telling me to do it today. It's
+          misleading."): wrong-day entries and theme-stacked CSPs demote
+          to the visible ⏸ exclusions, never an ENTER slot.
     Exclusions land in ``excluded_csp`` for the renderer and are absent
     from ``csp`` — so the redeploy-path A/B pool never sees them either.
 
@@ -1400,12 +1415,29 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
                     annualized_pct=e.get("annualized_pct"))
             except Exception:
                 continue    # evaluator failure never drops a slot (rule #19)
-            if dec.blocked:
+            # Rule #49 (George 2026-08-14, the WDC "Enter per plan" card
+            # on a green day: "make that change so that the briefing is
+            # not telling me to do it today. It's misleading."): a
+            # day-color or same-theme-stacking WAIT is an entry-TIMING
+            # rejection — the spotlight demotes it out of the ENTER list
+            # into the visible ⏸ exclusions (rule #24), never a slot.
+            # Other WAITs (capacity, floors) keep their existing tagged
+            # presentation.
+            _timing_wait = None
+            if not dec.blocked:
+                for _f in dec.ordered_reasons:
+                    if _f.get("status") == "wait" and _f.get("check") in (
+                            "day_color_wait", "theme_stacking"):
+                        _timing_wait = _f
+                        break
+            if dec.blocked or _timing_wait is not None:
                 pool_x = excluded if e["side"] == "csp" else excluded_cc
                 x_entry = {
                     "side": e["side"], "ticker": e["ticker"],
                     "letter": e["letter"], "score": e["score"],
-                    "ticket": e["ticket"], "reason": dec.primary_detail,
+                    "ticket": e["ticket"],
+                    "reason": (dec.primary_detail if dec.blocked
+                               else str(_timing_wait.get("detail") or "")),
                 }
                 prev_x = pool_x.get(e["ticker"])
                 if prev_x is None or x_entry["score"] > prev_x["score"]:

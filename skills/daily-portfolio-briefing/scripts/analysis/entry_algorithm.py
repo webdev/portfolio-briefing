@@ -23,7 +23,10 @@ decision is auditable end to end):
                             honored); earnings inside the contract
                             (earnings_guard, unknown date → WARN per
                             earnings_unknown); held-put 5% strike overlap
-                            (put_overlap_check, rule #40); projected
+                            (put_overlap_check, rule #40); same-theme
+                            held-put stacking (theme_stacking, rule #49 —
+                            the SNDK/WDC gap; config
+                            entry_algorithm.theme_stacking); projected
                             obligation-inclusive name concentration vs the
                             tier cap (position_tiers, rule #16 math);
                             LT-verdict broken-trend gate (lt_verdict_gate,
@@ -32,6 +35,15 @@ decision is auditable end to end):
                             new-open tenor cap (roll.max_action_tenor_days,
                             core ×3 — rule #45); contract being closed by
                             today's action list (rule #43, the SNDK case).
+  STEP 2½ — DAY COLOR      rule #44 made BINDING on the entry verdict
+                            (rule #49, the WDC card): a new CSP on a
+                            measured GREEN day / a new CC on a measured
+                            RED day → hard WAIT with the measured move.
+                            Day color = the vintage guard's live/broker
+                            drift reference vs the technicals close (the
+                            same rule-#47 resolution); no reference → no
+                            fabricated color (fail-open). Config
+                            entry_algorithm.day_color (±0.3% neutral band).
   STEP 3 — PAYMENT FLOORS   delivered yield ≥ playbook_min_annualized_yield
                             (12%) and premium ≥ 0.5% of collateral (rule
                             #44); iv_honesty gap-inflated-rank note; the
@@ -97,6 +109,22 @@ CORE_TENOR_MULTIPLIER = 3
 # rotation_playbook config block; these are its in-code defaults.
 _DEFAULT_MIN_ANN_YIELD = 0.12
 _DEFAULT_MIN_PREM_PCT = 0.005
+
+# Rule #49 (George 2026-08-14, the WDC card: "make that change so that the
+# briefing is not telling me to do it today. It's misleading.") — the
+# day-color hard-wait and the same-theme stacking gate. OFF in code →
+# byte-identical legacy behavior; briefing.yaml's entry_algorithm block
+# turns them on (the setup_grade enablement pattern).
+_DEFAULT_DAY_COLOR_GREEN_MIN_PCT = 0.3     # up-move ≥ this % = green day
+_DEFAULT_DAY_COLOR_RED_MIN_PCT = -0.3      # down-move ≤ this % = red day
+
+
+def _ea_block(config: dict | None, key: str) -> dict:
+    """entry_algorithm.<key> config sub-block ({} when absent)."""
+    ea = (config or {}).get("entry_algorithm")
+    ea = ea if isinstance(ea, dict) else {}
+    block = ea.get(key)
+    return block if isinstance(block, dict) else {}
 
 _STEP_NAMES = {
     1: "data_freshness",
@@ -465,6 +493,36 @@ def evaluate_entry(
         reasons.append(_find(2, "held_put_overlap", "n/a",
                              "CC side / no strike — overlap not applicable"))
 
+    # 2c½ — same-theme held-put stacking (rule #49, the SNDK/WDC gap;
+    #       CSP only — CC writes are share-backed and exempt). A new CSP
+    #       sharing ANY scout theme with an underlying where a short put
+    #       is already held stacks correlated assignment risk — WAIT
+    #       (config mode) with the held contract + shared theme named.
+    ts_cfg = _ea_block(config, "theme_stacking")
+    if s != SIDE_CSP:
+        reasons.append(_find(2, "theme_stacking", "n/a",
+                             "CC side — share-backed writes exempt"))
+    elif not ts_cfg.get("enabled", False):
+        reasons.append(_find(2, "theme_stacking", "n/a",
+                             "theme-stacking gate off (config)"))
+    else:
+        hit = None
+        try:
+            from analysis.theme_stacking import check_theme_stacking
+            hit = check_theme_stacking(
+                tk, _sg_mod._held_short_put_strikes(positions))
+        except Exception:
+            hit = None      # fail-open (rule #19)
+        if hit:
+            ts_status = ("block" if str(ts_cfg.get("mode") or "wait")
+                         .lower() == "block" else "wait")
+            reasons.append(_find(2, "theme_stacking", ts_status,
+                                 hit["detail"]))
+        else:
+            reasons.append(_find(
+                2, "theme_stacking", "pass",
+                "no same-theme short put held (unmapped names fail open)"))
+
     # 2d — projected obligation-inclusive name concentration (rule #16 math;
     #      CSP only — CC writes are share-backed).
     if s == SIDE_CSP and strike_f is not None:
@@ -580,6 +638,53 @@ def evaluate_entry(
         reasons.append(_find(2, "closing_today",
                              "pass" if not closing else "n/a",
                              "no close-list conflict"))
+
+    # ── STEP 2½ — DAY-COLOR WAIT (rule #44 made binding — rule #49) ──────
+    # George (2026-08-14), on the WDC "Enter per plan" card rendered on a
+    # green day: "make that change so that the briefing is not telling me
+    # to do it today. It's misleading." CSPs are sold into WEAKNESS, CCs
+    # into STRENGTH — the WRONG day color is a hard WAIT, never ENTER.
+    # Day color = the vintage guard's live/broker drift reference vs the
+    # technicals close (the same rule-#47 resolution STEP 1 used); no
+    # reference → no fabricated color (fail-open, rule #19). Moves inside
+    # the ±neutral band count as neither color.
+    dc_cfg = _ea_block(config, "day_color")
+    if not dc_cfg.get("enabled", False):
+        reasons.append(_find(2, "day_color_wait", "n/a",
+                             "day-color gate off (config)"))
+    else:
+        dc_move = res.get("move_pct") if isinstance(res, dict) else None
+        if not isinstance(dc_move, (int, float)):
+            reasons.append(_find(
+                2, "day_color_wait", "n/a",
+                "no live/broker drift reference this cycle — day color "
+                "unmeasured (fail-open, rule #19)"))
+        else:
+            try:
+                green_min = float(dc_cfg.get(
+                    "green_min_pct", _DEFAULT_DAY_COLOR_GREEN_MIN_PCT))
+            except (TypeError, ValueError):
+                green_min = _DEFAULT_DAY_COLOR_GREEN_MIN_PCT
+            try:
+                red_min = float(dc_cfg.get(
+                    "red_min_pct", _DEFAULT_DAY_COLOR_RED_MIN_PCT))
+            except (TypeError, ValueError):
+                red_min = _DEFAULT_DAY_COLOR_RED_MIN_PCT
+            if s == SIDE_CSP and dc_move >= green_min:
+                reasons.append(_find(
+                    2, "day_color_wait", "wait",
+                    f"🟥 wait for a red day — {tk} {dc_move:+.1f}% today; "
+                    f"sell puts into weakness (card rule)"))
+            elif s == SIDE_CC and dc_move <= red_min:
+                reasons.append(_find(
+                    2, "day_color_wait", "wait",
+                    f"🟩 wait for a green day — {tk} {dc_move:+.1f}% today; "
+                    f"sell calls into strength (card rule)"))
+            else:
+                reasons.append(_find(
+                    2, "day_color_wait", "pass",
+                    f"day color OK for the side "
+                    f"({tk} {dc_move:+.1f}% today)"))
 
     # ── STEP 3 — PAYMENT FLOORS (rule #44) ────────────────────────────────
     rp = (config or {}).get("rotation_playbook") \

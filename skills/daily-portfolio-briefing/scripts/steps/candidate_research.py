@@ -958,6 +958,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     thin_premium: list[tuple[str, dict, dict]] = []  # rule #44 yield floor (bug 3)
     below_floor: list[tuple[str, dict, str]] = []    # B floor (George 2026-08-12)
     algo_blocked: list[tuple[str, dict, object]] = []  # rule #48 entry algorithm
+    algo_wait: list[tuple[str, dict, object, dict]] = []  # rule #49 timing WAITs
     oversize: list[tuple[str, dict, str]] = []       # projected concentration
     # over the tier cap (2026-08-13 SNDK gap) — planning only, never green-lit
     seen: set[str] = set()
@@ -1087,8 +1088,27 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                             below_floor.append((tname, r, _fl_n))
                         else:
                             _dec = _entry_algo_decision(r)
+                            # Rule #49 (George 2026-08-14, the WDC card:
+                            # "make that change so that the briefing is
+                            # not telling me to do it today. It's
+                            # misleading."): a day-color / same-theme
+                            # stacking WAIT demotes the card out of the
+                            # green-lit 🎯 slots into a visible ⏸ bucket.
+                            # Other WAITs (capacity, floors) keep their
+                            # existing tagged presentation.
+                            _tw = None
+                            if _dec is not None and not _dec.blocked:
+                                for _f in _dec.ordered_reasons:
+                                    if _f.get("status") == "wait" and \
+                                            _f.get("check") in (
+                                                "day_color_wait",
+                                                "theme_stacking"):
+                                        _tw = _f
+                                        break
                             if _dec is not None and _dec.blocked:
                                 algo_blocked.append((tname, r, _dec))
+                            elif _tw is not None:
+                                algo_wait.append((tname, r, _dec, _tw))
                             else:
                                 cands.append((tname, r))
             elif status == "held_rsi":
@@ -1314,6 +1334,33 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 f"- **`{tk}`** ({tname}) — SELL ${q.get('strike', 0):g}P → "
                 f"**BLOCKED** (step {_p.get('step')}: {_p.get('check')}) — "
                 f"{_dec.primary_detail}"
+            )
+        lines.append("")
+
+    if algo_wait:
+        # Rule #49 — the canonical evaluator says the TIMING is wrong
+        # today (green-day CSP / red-day CC / same-theme stacked put).
+        # The George rule (2026-08-14, the WDC card): "make that change
+        # so that the briefing is not telling me to do it today. It's
+        # misleading." Visible with the measured reason (rule #24), never
+        # a green-lit 🎯 slot; re-activates when the day color / book
+        # changes.
+        lines.append(f"{_h_sub} ⏸ Held back by the entry algorithm — "
+                     f"wait ({len(algo_wait)})")
+        lines.append("_Timing WAITs from the canonical six-step evaluator "
+                     "(rule #49): sell puts into weakness, calls into "
+                     "strength, and never stack same-theme assignment "
+                     "risk. The measured reason is shown; nothing "
+                     "hidden._")
+        lines.append("")
+        for tname, r, _dec, _tw in sorted(
+                algo_wait, key=lambda x: (x[0], x[1].get("ticker", ""))):
+            tk = (r.get("ticker") or "").upper()
+            q = r.get("csp_entry") or {}
+            lines.append(
+                f"- **`{tk}`** ({tname}) — SELL ${q.get('strike', 0):g}P → "
+                f"**WAIT** (step {_tw.get('step')}: {_tw.get('check')}) — "
+                f"{_tw.get('detail')}"
             )
         lines.append("")
 

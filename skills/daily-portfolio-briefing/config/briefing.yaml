@@ -863,6 +863,33 @@ setup_grade:
     enabled: true
     min_score: 65              # the B letter floor — A/B pass, C/D demote
 
+# 2026-08-14 — THE ENTRY ALGORITHM surface gates (rule #49; George, on the
+# WDC "A- (80) … Enter per plan" card rendered on a green day while he held
+# the SNDK $1230P — same Memory & Storage theme: "make that change so that
+# the briefing is not telling me to do it today. It's misleading.").
+# Both gates run inside analysis/entry_algorithm.py::evaluate_entry (the
+# rule-#48 conductor) so candidate cards, Best Setups, and the conformance
+# panel all inherit. enabled: false → byte-identical legacy per flag.
+entry_algorithm:
+  # Rule #44 made BINDING on the entry verdict: a new CSP on a measured
+  # GREEN day / a new CC on a measured RED day → hard WAIT, never ENTER.
+  # Day color = the vintage guard's live/broker drift reference vs the
+  # technicals close (the same rule-#47 resolution); no reference → no
+  # fabricated color (fail-open, unchanged behavior).
+  day_color:
+    enabled: true
+    green_min_pct: 0.3         # up-move ≥ this % = green day (CSPs wait)
+    red_min_pct: -0.3          # down-move ≤ this % = red day (CCs wait)
+    # moves inside ±0.3% count as neutral — neither side waits
+  # The SNDK/WDC gap: a NEW CSP whose ticker shares ANY scout theme
+  # (thematic-scout theme_universes.yaml anchors) with an underlying where
+  # a short put is already HELD stacks correlated assignment risk → WAIT
+  # with the held contract + shared theme named. Names in no mapped theme
+  # → no check (fail-open). CC writes exempt (share-backed).
+  theme_stacking:
+    enabled: true
+    mode: wait                 # wait | block — verdict for stacked CSPs
+
 # 2026-08-12 — Redeployability-aware take-profit (George 2026-08-10: "I'm
 # happy to exit options and close it if we have a path to redeployment. If
 # we don't have a path to redeployment, then it doesn't make sense to close
