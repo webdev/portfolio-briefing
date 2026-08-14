@@ -143,3 +143,126 @@ def render_panel(offenders: list[dict],
         )
     lines.append("")
     return lines
+
+
+# ── RSI one-voice sweep (rule #43, 2026-08-14 SNDK) ─────────────────────────
+#
+# Origin: the SAME briefing rendered SNDK with THREE RSI values — the Best
+# Setups spotlight said "RSI 48 late-band" (stale scout-cache close), the
+# action-list close card said "RSI 56" (snapshot technicals), and live
+# intraday reality was ~76 after SNDK moved $1,367 → $1,625 (+19%) in ~2
+# sessions. George: "RSI on SNDK is 76 now... What kind of recommendation is
+# this? ... What kind of weakness are we talking about here?"
+#
+# A name must speak with ONE RSI voice per render. Mirrors the spot sweep
+# above: conservative extraction, context tracked only from high-confidence
+# ticker markers (backtick ticker, option ident, "### TK — " header).
+# Vintage-tagged reads (pre-gap / unverified / stale / recomputed) already
+# disclaim their value and are exempt; so are italic footers, table rows and
+# fenced blocks. Band thresholds like "RSI 35-45" never match (lookahead).
+
+DEFAULT_RSI_TOLERANCE_PTS = 1.0
+
+_RSI_VALUE_RE = re.compile(
+    r"\bRSI[ :]+(\d{1,3}(?:\.\d+)?)(?!\s*[-–]\s*\d)\b")
+
+_RSI_CONTEXT_RES = [
+    re.compile(r"`([A-Z][A-Z0-9.]{0,6})`"),
+    re.compile(r"\b([A-Z][A-Z0-9.]{0,5})_(?:PUT|CALL)(?=_|\b)"),
+    re.compile(r"^#{2,4}\s+([A-Z][A-Z0-9.]{0,6})\s+—"),
+]
+
+# Lowercased tokens marking a read that explicitly disclaims its own
+# freshness (the vintage guard's annotations) — exempt from the sweep.
+_RSI_EXEMPT_TOKENS = ("pre-gap", "unverified", "stale", "recomputed",
+                      "pre-move", "snapshot rsi")
+
+
+def rsi_mentions(md: str) -> dict[str, list[tuple[float, str]]]:
+    """{TICKER: [(rsi_value, line), ...]} for every RSI read attributable to
+    a high-confidence ticker context."""
+    out: dict[str, list[tuple[float, str]]] = {}
+    context: str | None = None
+    in_fence = False
+    for line in (md or "").split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        tk_on_line = None
+        for rx in _RSI_CONTEXT_RES:
+            m = rx.search(line)
+            if m:
+                tk_on_line = m.group(1).upper()
+                break
+        if stripped.startswith("#"):
+            context = tk_on_line     # a heading sets or clears the context
+            continue
+        if tk_on_line:
+            context = tk_on_line
+        if stripped.startswith("_") or stripped.startswith("|"):
+            continue                 # transparency footers / table rows
+        if not context:
+            continue
+        low = line.lower()
+        if any(t in low for t in _RSI_EXEMPT_TOKENS):
+            continue                 # the read disclaims itself already
+        for m in _RSI_VALUE_RE.finditer(line):
+            try:
+                val = float(m.group(1))
+            except (TypeError, ValueError):
+                continue
+            if 0.0 < val <= 100.0:
+                out.setdefault(context, []).append((val, stripped))
+    return out
+
+
+def rsi_disagreements(
+        md: str,
+        tolerance_pts: float = DEFAULT_RSI_TOLERANCE_PTS) -> list[dict]:
+    """Tickers whose rendered RSI reads disagree by more than a rounding
+    point (default 1.0) in the same render. Single-mention tickers never
+    flag. Returns [{ticker, min, max, spread_pts, lines}] sorted by spread
+    descending."""
+    offenders: list[dict] = []
+    for tk, mentions in rsi_mentions(md).items():
+        vals = [v for v, _l in mentions]
+        if len(vals) < 2:
+            continue
+        lo, hi = min(vals), max(vals)
+        if hi - lo > tolerance_pts:
+            offenders.append({
+                "ticker": tk,
+                "min": lo,
+                "max": hi,
+                "spread_pts": hi - lo,
+                "lines": [line for _v, line in mentions],
+            })
+    offenders.sort(key=lambda o: o["spread_pts"], reverse=True)
+    return offenders
+
+
+def render_rsi_panel(
+        offenders: list[dict],
+        tolerance_pts: float = DEFAULT_RSI_TOLERANCE_PTS) -> list[str]:
+    """Markdown warning panel for RSI disagreements. Empty when clean."""
+    if not offenders:
+        return []
+    lines = [
+        "## 📉 RSI Consistency Check",
+        "",
+        (f"_{len(offenders)} ticker(s) render RSI values that disagree by "
+         f"more than {tolerance_pts:.0f} point(s) in this render — one RSI "
+         f"voice per name per cycle (rule #43, the 2026-08-14 SNDK 48/56 "
+         f"case): at least one surface graded on a stale RSI; trust the "
+         f"live/vintage-resolved value and re-verify before acting:_"),
+    ]
+    for o in offenders[:10]:
+        lines.append(
+            f"- **{o['ticker']}** — RSI {o['min']:g} vs RSI {o['max']:g} "
+            f"({o['spread_pts']:.0f} pts apart) across "
+            f"{len(o['lines'])} line(s)")
+    lines.append("")
+    return lines

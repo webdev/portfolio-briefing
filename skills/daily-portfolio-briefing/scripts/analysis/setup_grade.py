@@ -790,6 +790,88 @@ def _held_short_put_strikes(positions) -> dict:
 _CLOSE_IDENT_RE = re.compile(
     r"^([A-Z.]{1,6})_(?:PUT|CALL)_(\d+(?:\.\d+)?)(?:_\d{6,8})?$")
 
+# Rule #46, spotlight edition (George 2026-08-14: "RSI on SNDK is 76 now...
+# What kind of recommendation is this?"). The note every capped entry carries.
+UNVERIFIED_RSI_NOTE = "RSI unverified this cycle"
+
+
+def _cap_unverified_grade(grade: dict, config: dict | None) -> dict:
+    """No A/B on an unverified RSI vintage (rule #46's no-favourable-badge,
+    applied to the grade). The letter caps at C, the score caps just under
+    the configured B floor (so a capped entry can never outrank a genuinely
+    verified B or pass the actionable floor), and the note rides as the
+    FIRST driver so it survives the spotlight's 2-driver cut."""
+    g = dict(grade or {})
+    letters = load_setup_grade_config(config)["letters"]
+    try:
+        b_floor = float(letters["b"])
+    except (TypeError, ValueError):
+        b_floor = 65.0
+    if g.get("letter") in ("A", "A-", "B"):
+        g["letter"] = "C"
+    try:
+        if g.get("score") is not None and float(g["score"]) >= b_floor:
+            g["score"] = round(b_floor - 1.0, 1)
+    except (TypeError, ValueError):
+        pass
+    note = f"⚠ {UNVERIFIED_RSI_NOTE}"
+    g["drivers"] = [note] + [d for d in (g.get("drivers") or []) if d != note]
+    msg = str(g.get("message") or "")
+    if UNVERIFIED_RSI_NOTE not in msg:
+        g["message"] = (f"{msg} — {note}" if msg else note)
+    g["rsi_unverified"] = True
+    return g
+
+
+def _vintage_adjusted_grade(side, ticker, grade, strike, res,
+                            snapshot_data, config):
+    """Apply the rule-#46 vintage resolution to a spotlight candidate.
+
+    ``res`` is a ``vintage_guard.resolve_new_open_rsi`` result. Returns
+    ``(grade, exclusion_reason)``:
+
+      fresh / no res      → unchanged, no reason (fail-open — rule #19).
+      live (recomputed)   → re-graded on the LIVE RSI via
+                            ``grade_for_new_open(rsi=...)``; the live hard
+                            block voids the stale grade → exclusion with the
+                            measured live value + move (rule #24 visible).
+      stale + CSP up-move → exclusion (rule #44 fail-safe: drift up with the
+                            live RSI uncomputable — plausibly past the block).
+      stale (other) /
+      unverified          → grade caps via :func:`_cap_unverified_grade`
+                            ("RSI unverified this cycle", never A/B).
+    """
+    if not isinstance(res, dict) or res.get("status") in (None, "fresh"):
+        return grade, None
+    status = res.get("status")
+    move = res.get("move_pct")
+    move_s = f"{move:+.1f}%" if isinstance(move, (int, float)) else "n/a"
+    if status == "live":
+        regraded = grade_for_new_open(
+            ticker, side, snapshot_data=snapshot_data or {},
+            strike=strike, spot=res.get("live_spot"), rsi=res.get("rsi"),
+            config=config)
+        if regraded is None:
+            return grade, None          # nothing measurable — fail-open
+        if regraded.get("letter") == "—" or regraded.get("hard_blocked"):
+            prev = res.get("snapshot_rsi")
+            prev_s = f"{float(prev):.0f}" if prev is not None else "n/a"
+            return regraded, (
+                f"live RSI {float(res['rsi']):.0f} hard block "
+                f"(spot {move_s} since the technicals close; pre-move "
+                f"RSI {prev_s} is void)")
+        return regraded, None
+    if status == "stale":
+        if side in (_SIDE_CSP, "put") and isinstance(move, (int, float)) \
+                and move > 0:
+            return grade, (
+                f"stale RSI on a {move_s} up-move — live RSI not "
+                f"computable; new puts excluded (rule #44 fail-safe)")
+        return _cap_unverified_grade(grade, config), None
+    if status == "unverified":
+        return _cap_unverified_grade(grade, config), None
+    return grade, None
+
 
 def closing_today_from_action_lines(action_list_lines) -> set:
     """Contract idents the composed action list recommends CLOSING today.
@@ -828,12 +910,44 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
       (c) ``closing_today`` (contract idents from the composed action list)
           recommends closing that same/near-strike contract.
     Exclusions land in ``excluded_csp`` for the renderer and are absent
-    from ``csp`` — so the redeploy-path A/B pool never sees them either."""
+    from ``csp`` — so the redeploy-path A/B pool never sees them either.
+
+    RSI vintage resolution (rule #46, 2026-08-14 SNDK: "RSI on SNDK is 76
+    now... What kind of recommendation is this?" — the spotlight rendered
+    "B (66) SNDK — SELL 1× $1230P … RSI 48 late-band" off the stale
+    scout-cache close after SNDK moved $1,367 → $1,625 in ~2 sessions):
+    every candidate's RSI resolves through
+    ``vintage_guard.resolve_new_open_rsi`` BEFORE its grade may occupy a
+    slot. Drift past the threshold → re-graded on the recomputed LIVE RSI
+    (hard block → excluded with a visible reason, per side); drift with the
+    live RSI uncomputable on an up-move → CSP excluded (rule #44
+    fail-safe); unverifiable vintage → the grade caps at C with the
+    "RSI unverified this cycle" note (never A/B on unverified RSI)."""
     cfg = load_setup_grade_config(config)
     top_n = int((cfg.get("spotlight") or {}).get("top_n", 3) or 3)
     floor_pct = _yield_floor_pct(config)
     pools: dict[str, dict] = {}   # (side, ticker) → best entry
     excluded: dict[str, dict] = {}  # ticker → best excluded CSP entry
+    excluded_cc: dict[str, dict] = {}  # ticker → best excluded CC entry
+
+    _snapshot = snapshot_data or {}
+    _vintage_cache: dict[str, dict | None] = {}
+
+    def _vintage(ticker) -> dict | None:
+        """Memoized rule-#46 vintage resolution for a candidate ticker."""
+        tk = (ticker or "").upper()
+        if tk not in _vintage_cache:
+            res = None
+            try:
+                from analysis.vintage_guard import resolve_new_open_rsi
+                res = resolve_new_open_rsi(
+                    tk, _snapshot.get("technicals") or {},
+                    _snapshot.get("quotes") or {},
+                    _snapshot.get("positions") or [], config)
+            except Exception:
+                res = None      # guard failure → fail-open (rule #19)
+            _vintage_cache[tk] = res
+        return _vintage_cache[tk]
 
     _positions = (snapshot_data or {}).get("positions") or []
     _held_puts = _held_short_put_strikes(_positions)
@@ -887,6 +1001,32 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         if not grade or grade.get("letter") in ("—", "n/a", None):
             return
         if grade.get("score") is None:
+            return
+        # Rule #46 (2026-08-14 SNDK): resolve the RSI vintage BEFORE this
+        # grade may occupy a slot — a +19% mover kept its pre-move "RSI 48"
+        # and earned a B while the live RSI was ~76 (hard block).
+        _res = _vintage(ticker)
+        grade, _v_reason = _vintage_adjusted_grade(
+            side, ticker, grade, strike, _res, _snapshot, config)
+        if _v_reason:
+            # Visible exclusion (rule #24) — never a green-lit slot.
+            _tk = (ticker or "").upper()
+            try:
+                _v_score = float((grade or {}).get("score") or 0.0)
+            except (TypeError, ValueError):
+                _v_score = 0.0
+            _v_entry = {
+                "side": side, "ticker": _tk,
+                "letter": (grade or {}).get("letter") or "—",
+                "score": _v_score, "ticket": ticket, "reason": _v_reason,
+            }
+            _v_pool = excluded if side == "csp" else excluded_cc
+            _v_prev = _v_pool.get(_tk)
+            if _v_prev is None or _v_entry["score"] > _v_prev["score"]:
+                _v_pool[_tk] = _v_entry
+            return
+        if not grade or grade.get("letter") in ("—", "n/a", None) \
+                or grade.get("score") is None:
             return
         # Actionable floor (George 2026-08-12): a spotlit ticket must never
         # carry the floor demotion elsewhere — one voice. Below-floor
@@ -1002,7 +1142,8 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
             # drivers ride inside the composed line; keep it short
             grade["drivers"] = []
         _consider("cc", up.get("underlying"), grade, ticket,
-                  up.get("est_annualized_pct"), False, "covered call")
+                  up.get("est_annualized_pct"), False, "covered call",
+                  strike=strike)
 
     # 4) Scout candidates with a live CSP ticket — graded here.
     for r in scout_results or []:
@@ -1034,10 +1175,13 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
     return {
         "csp": [e for e in ranked if e["side"] == "csp"][:top_n],
         "cc": [e for e in ranked if e["side"] == "cc"][:top_n],
-        # Position/concentration-aware exclusions — rendered as visible
-        # ⏸ lines (rule #24), never silently dropped, never in the pool.
+        # Position/concentration/vintage-aware exclusions — rendered as
+        # visible ⏸ lines (rule #24), never silently dropped, never in the
+        # pool (so the redeploy-path A/B pool never sees them either).
         "excluded_csp": sorted(excluded.values(),
                                key=lambda e: -float(e["score"])),
+        "excluded_cc": sorted(excluded_cc.values(),
+                              key=lambda e: -float(e["score"])),
         "yield_floor_pct": floor_pct,
         "top_n": top_n,
     }
@@ -1092,7 +1236,8 @@ def render_best_setups(best: dict | None, config: dict | None = None) -> list[st
 
     _emit("**Sell puts into weakness (CSP):**", csp,
           best.get("excluded_csp") or [])
-    _emit("**Sell covered calls into strength (CC):**", cc)
+    _emit("**Sell covered calls into strength (CC):**", cc,
+          best.get("excluded_cc") or [])
     return lines
 
 

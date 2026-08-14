@@ -1189,6 +1189,22 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] price-consistency sweep failed: {_e}", file=_sys.stderr)
 
+    # RSI one-voice sweep (rule #43, 2026-08-14 SNDK bug): the Best Setups
+    # spotlight said "RSI 48 late-band" while the SNDK close card said
+    # "RSI 56" — and the live intraday RSI was ~76 after a +19% two-session
+    # move. A name must not speak with two RSI voices in one render; this
+    # panel flags any ticker whose rendered RSI reads disagree by more than
+    # a rounding point. Vintage-tagged reads (pre-gap / unverified / stale)
+    # are exempt — they already disclaim their own value.
+    try:
+        from analysis import price_consistency as _pc_rsi
+        _rsi_offenders = _pc_rsi.rsi_disagreements("\n".join(lines))
+        lines.extend(_pc_rsi.render_rsi_panel(_rsi_offenders))
+    except Exception as _e:
+        import sys as _sys
+        print(f"[aggregate] rsi-consistency sweep failed: {_e}",
+              file=_sys.stderr)
+
     lines.extend(render_inconsistencies(flagged_inconsistencies))
 
     # Task #40 fix 9 / task #43 fix 1: detect user-executed rolls from the
