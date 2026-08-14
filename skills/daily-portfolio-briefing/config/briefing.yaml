@@ -201,6 +201,20 @@ thematic_scout:
   parallel: true
   max_workers: 8
 
+# Scout cache freshness (George 2026-08-14 — "I don't think we can afford
+# 24 hours"). cache_ttl_hours: refresh the scout when state/briefing_snapshots/
+# scout_cache.json is older than this many hours (code default = legacy 24h
+# when this key is absent). force_refresh_morning: a cache generated on a
+# PREVIOUS local date is refreshed regardless of TTL, so every morning run
+# gets a same-day scout (the stale-scout SNDK RSI bug, rule #47). Refresh
+# failures fail OPEN to the stale cache with a "⚠ scout cache Xh old —
+# refresh failed" provenance note. Optional pre-warm: launchd/
+# com.trade-analysis.scout-prewarm.plist runs scripts/run_scout_prewarm.sh
+# weekdays at 6:30 AM so the 8:00 briefing starts hot.
+scout:
+  cache_ttl_hours: 6
+  force_refresh_morning: true
+
 # Deep technical analysis — the "🎯 Technical Read" section (per-ticker
 # BB(20,2) / MACD(12,26,9) / ATR(14) / SMA slopes / golden-death cross /
 # 52w range / ATH drawdown / returns + short-term (1-4wk) and long-term

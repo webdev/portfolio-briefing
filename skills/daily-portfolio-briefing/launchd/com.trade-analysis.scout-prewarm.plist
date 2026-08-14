@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Thematic Scout cache pre-warm — runs Mon-Fri at 6:30 AM local time.
+
+  OPTIONAL: the briefing pipeline self-refreshes the scout cache whenever it
+  is older than briefing.yaml `scout.cache_ttl_hours` (6h) or predates today
+  (`scout.force_refresh_morning`). This job only pre-warms the cache so the
+  8:00 AM briefing run starts hot. If it never fires, nothing breaks.
+
+  IMPORTANT: launchd's StartCalendarInterval uses LOCAL machine time. TZ is
+  pinned to America/New_York in EnvironmentVariables below, matching the
+  daily-briefing plist.
+
+  Install:
+    cp launchd/com.trade-analysis.scout-prewarm.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.trade-analysis.scout-prewarm.plist
+    launchctl enable gui/$UID/com.trade-analysis.scout-prewarm
+
+  Uninstall:
+    launchctl bootout gui/$UID/com.trade-analysis.scout-prewarm
+    rm ~/Library/LaunchAgents/com.trade-analysis.scout-prewarm.plist
+
+  Run on demand (without waiting for the schedule):
+    launchctl kickstart -k gui/$UID/com.trade-analysis.scout-prewarm
+
+  Logs land in ~/Documents/briefings/logs/scout_prewarm_YYYY-MM-DD.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trade-analysis.scout-prewarm</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/gblazer/workspace/portfolio-briefing/skills/daily-portfolio-briefing/scripts/run_scout_prewarm.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/gblazer/workspace/portfolio-briefing/skills/daily-portfolio-briefing</string>
+
+    <!-- Mon-Fri at 06:30 local time. Sat=7, Sun=1 are excluded by listing
+         only Mon (2) through Fri (6). -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>2</integer>
+            <key>Hour</key>
+            <integer>6</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>6</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>4</integer>
+            <key>Hour</key>
+            <integer>6</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>6</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>6</integer>
+            <key>Hour</key>
+            <integer>6</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+
+    <!-- Pre-warm is best-effort: don't fire on load/mount, don't relaunch. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StartOnMount</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Hard cap so a hung yfinance call cannot linger into the 8am run. -->
+    <key>ExitTimeOut</key>
+    <integer>600</integer>
+
+    <!-- Emergency stdout/stderr — the wrapper redirects too, but in case the
+         wrapper itself dies before redirection, these catch it. -->
+    <key>StandardOutPath</key>
+    <string>/Users/gblazer/Documents/briefings/logs/launchd.scout-prewarm.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gblazer/Documents/briefings/logs/launchd.scout-prewarm.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/gblazer</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>TZ</key>
+        <string>America/New_York</string>
+        <key>PORTFOLIO_BRIEFING_REPO</key>
+        <string>/Users/gblazer/workspace/portfolio-briefing</string>
+        <key>PORTFOLIO_BRIEFING_DELIVERY_DIR</key>
+        <string>/Users/gblazer/Documents/briefings</string>
+    </dict>
+</dict>
+</plist>

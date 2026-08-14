@@ -578,9 +578,15 @@ def render_candidate_report(scout_payload: dict | None, *, fv_by_ticker: dict | 
         # Capacity banner — mandatory first line (12-entry-pipeline-spec §1).
         lines.append(gate_state.banner)
         lines.append("")
+    # Staleness transparency (rule #19): measured scout-data age in the header.
+    _age_line = _tr.scout_age_line(scout_payload)
     lines += [
         f"# Candidate Research — {generated_at}",
         "",
+    ]
+    if _age_line:
+        lines += [f"_{_age_line}._", ""]
+    lines += [
         "_Per-company research across every Scout theme. Each company gets a card "
         "(RSI · trend · IV rank · drawdown · 5-day · valuation · verdict); a concrete "
         "entry is attached only when the setup qualifies AND passes the RSI gate. "
@@ -1058,6 +1064,10 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
         _h_top,
         "",
     ]
+    # Staleness transparency (rule #19): measured scout-data age in the header.
+    _age_line = _tr.scout_age_line(scout_payload)
+    if _age_line:
+        lines += [f"_{_age_line}._", ""]
     if gate_state is not None:
         # Capacity banner (06-wheel-parameters.md §7A) — when CLOSED, no
         # concrete entry tickets render in the cards below.

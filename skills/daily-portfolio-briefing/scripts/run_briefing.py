@@ -104,7 +104,8 @@ def main():
     parser.add_argument(
         "--refresh-scout",
         action="store_true",
-        help="Force a fresh thematic-scout research run (default uses 24h cache)",
+        help="Force a fresh thematic-scout research run (default uses the "
+             "cache within briefing.yaml scout.cache_ttl_hours)",
     )
 
     args = parser.parse_args()
@@ -352,8 +353,14 @@ def main():
         )
         print(f"  Surfaced {len(long_term_ops)} long-term opportunity signal(s)")
 
-        # Step 6.6: Thematic scout (cached 24h to keep the daily briefing fast)
-        print("[Step 6.6] Running thematic scout (cached 24h)...")
+        # Step 6.6: Thematic scout. Cache TTL is config-driven (George
+        # 2026-08-14 — "I don't think we can afford 24 hours"): briefing.yaml
+        # `scout.cache_ttl_hours` (6h default in config; legacy 24h in code
+        # when the key is absent) + `scout.force_refresh_morning` so a cache
+        # from a previous local date is refreshed regardless of TTL.
+        _scout_cfg = config.get("scout") or {}
+        _scout_ttl_h = float(_scout_cfg.get("cache_ttl_hours", 24))
+        print(f"[Step 6.6] Running thematic scout (cache TTL {_scout_ttl_h:g}h)...")
         recs_map = {}
         held_weights = {}
         existing_short_puts: dict = {}
@@ -407,7 +414,10 @@ def main():
             held_weights=held_weights,
             existing_short_puts=existing_short_puts,
             refresh=args.refresh_scout,
-            ttl_hours=24,
+            ttl_hours=_scout_ttl_h,
+            force_refresh_morning=bool(
+                _scout_cfg.get("force_refresh_morning", False)
+            ),
             parallel=bool(_ts_cfg.get("parallel", True)),
             max_workers=int(_ts_cfg.get("max_workers", 8)),
             # Expiration policy (2026-08-10): prefer standard monthly

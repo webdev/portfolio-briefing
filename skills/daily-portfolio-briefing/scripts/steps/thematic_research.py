@@ -3,8 +3,21 @@ Step 6.6: Thematic research (Wave 26)
 
 Runs the thematic-scout skill across all configured themes and embeds the
 top picks (BUY / CSP ENTRY) into the daily briefing. Caches the full result
-to state/scout_cache.json so we don't repeat the 30-60s research every
-morning — by default the cache is valid for 24 hours.
+to state/scout_cache.json.
+
+Cache freshness (George 2026-08-14 — "I don't think we can afford 24 hours"):
+- TTL is config-driven: briefing.yaml `scout.cache_ttl_hours` (pipeline
+  default 6h via config; the CODE default stays the legacy 24h so callers
+  without config are unchanged).
+- `scout.force_refresh_morning: true` → a cache generated on a PREVIOUS
+  local date is refreshed regardless of TTL, so every morning run gets a
+  same-day scout (the stale-scout SNDK "RSI 48 while live 76" bug, rule #47).
+- Refresh failures fail OPEN: the stale cache is served with a loud
+  provenance note ("⚠ scout cache Xh old — refresh failed") rather than
+  dying — a stale scout read that SAYS it's stale beats no scout at all.
+- Every payload carries `_scout_meta` {fresh, age_hours, refresh_failed}
+  (attached at return time, never persisted to the cache file) so renderers
+  can state the MEASURED data age (rule #19).
 
 Pass --refresh-scout to run_briefing.py to force a fresh fetch.
 """
@@ -55,15 +68,70 @@ def _cache_path(snapshot_dir: Path) -> Path:
     return snapshot_dir.parent / "scout_cache.json"
 
 
-def _is_cache_fresh(cache_file: Path, ttl_hours: int = 24) -> bool:
+def _cache_generated_at(cache_file: Path) -> datetime | None:
+    """Parse the cache's generation timestamp; None when missing/unreadable."""
     if not cache_file.exists():
-        return False
+        return None
     try:
         data = json.loads(cache_file.read_text())
-        ts = datetime.fromisoformat(data.get("generated_at_iso", ""))
-        return (datetime.now() - ts) < timedelta(hours=ttl_hours)
+        return datetime.fromisoformat(data.get("generated_at_iso", ""))
     except Exception:
+        return None
+
+
+def _cache_age_hours(cache_file: Path) -> float | None:
+    """Measured cache age in hours (rule #19); None when unmeasurable."""
+    ts = _cache_generated_at(cache_file)
+    if ts is None:
+        return None
+    return (datetime.now() - ts).total_seconds() / 3600.0
+
+
+def _cache_predates_today(cache_file: Path) -> bool:
+    """True when the cache was generated on a PREVIOUS local date.
+
+    Drives `scout.force_refresh_morning`: a 10h-old cache from yesterday
+    evening may pass a large TTL yet still carry pre-move RSI into a morning
+    run (the SNDK bug, rule #47). An unreadable cache counts as predating —
+    it will be refreshed anyway.
+    """
+    ts = _cache_generated_at(cache_file)
+    if ts is None:
+        return True
+    return ts.date() < datetime.now().date()
+
+
+def _is_cache_fresh(cache_file: Path, ttl_hours: float = 24) -> bool:
+    age = _cache_age_hours(cache_file)
+    if age is None:
         return False
+    return age < float(ttl_hours)
+
+
+def scout_age_line(payload: dict | None) -> str:
+    """Measured scout-data age for section headers (rule #19 — never a guess).
+
+    Reads `_scout_meta` when present (attached by run_thematic_research);
+    legacy payloads without meta fall back to measuring from
+    `generated_at_iso`. Returns "" only when there is no payload at all.
+    """
+    if not payload:
+        return ""
+    meta = payload.get("_scout_meta") or {}
+    age = meta.get("age_hours")
+    if meta.get("refresh_failed"):
+        age_s = f"{age:.1f}h" if age is not None else "unknown age"
+        return f"⚠ scout cache {age_s} old — refresh failed"
+    if meta.get("fresh"):
+        return "scout data: fresh this run"
+    if age is None:
+        # Legacy payload (no meta) — measure from the generation timestamp.
+        try:
+            ts = datetime.fromisoformat(payload.get("generated_at_iso", ""))
+            age = (datetime.now() - ts).total_seconds() / 3600.0
+        except Exception:
+            return "scout data: age unknown"
+    return f"scout data: {age:.1f}h old (cache)"
 
 
 def run_thematic_research(
@@ -72,12 +140,20 @@ def run_thematic_research(
     held_weights: dict | None = None,
     existing_short_puts: dict | None = None,
     refresh: bool = False,
-    ttl_hours: int = 24,
+    ttl_hours: float = 24,
+    force_refresh_morning: bool = False,
     parallel: bool = True,
     max_workers: int = 8,
     prefer_monthly: bool = False,
 ) -> dict | None:
     """Run the scout and return the results dict. Cache to disk for ttl_hours.
+
+    ``ttl_hours`` defaults to the legacy 24h; the pipeline passes
+    briefing.yaml `scout.cache_ttl_hours` (6h). ``force_refresh_morning``
+    refreshes any cache generated on a previous local date regardless of TTL.
+    A failed refresh fails OPEN to the stale cache (with
+    `_scout_meta.refresh_failed=True`) rather than returning None when a
+    cache exists.
 
     Returns:
         {
@@ -85,16 +161,75 @@ def run_thematic_research(
           "themes": dict[str, dict],     # theme metadata
           "results_by_theme": dict[str, list[dict]],
           "summary": {"buys": int, "csps": int, "avoids": int, "total": int},
+          "_scout_meta": {"fresh": bool, "age_hours": float|None,
+                          "refresh_failed": bool},   # never persisted
         }
     """
     cache_file = _cache_path(snapshot_dir)
+    age_h = _cache_age_hours(cache_file)
 
-    if not refresh and _is_cache_fresh(cache_file, ttl_hours=ttl_hours):
+    stale_by_date = force_refresh_morning and _cache_predates_today(cache_file)
+    if not refresh and not stale_by_date and _is_cache_fresh(cache_file, ttl_hours=ttl_hours):
         try:
-            return json.loads(cache_file.read_text())
+            payload = json.loads(cache_file.read_text())
+            payload["_scout_meta"] = {
+                "fresh": False, "age_hours": age_h, "refresh_failed": False,
+            }
+            return payload
         except Exception:
             pass
 
+    try:
+        payload = _refresh_scout(
+            cache_file,
+            recs_map=recs_map,
+            held_weights=held_weights,
+            existing_short_puts=existing_short_puts,
+            parallel=parallel,
+            max_workers=max_workers,
+            prefer_monthly=prefer_monthly,
+        )
+    except Exception as e:  # fail OPEN below — a refresh crash must not kill the run
+        print(f"  [warn] scout refresh raised: {e}", file=sys.stderr)
+        payload = None
+
+    if payload is None:
+        # Fail OPEN: serve the stale cache with a loud provenance flag rather
+        # than dropping the scout section entirely (George 2026-08-14).
+        try:
+            if cache_file.exists():
+                stale = json.loads(cache_file.read_text())
+                stale["_scout_meta"] = {
+                    "fresh": False, "age_hours": age_h, "refresh_failed": True,
+                }
+                age_s = f"{age_h:.1f}h" if age_h is not None else "unknown-age"
+                print(
+                    f"  [warn] scout refresh failed — failing open to "
+                    f"{age_s}-old cache",
+                    file=sys.stderr,
+                )
+                return stale
+        except Exception:
+            pass
+        return None
+
+    payload["_scout_meta"] = {
+        "fresh": True, "age_hours": 0.0, "refresh_failed": False,
+    }
+    return payload
+
+
+def _refresh_scout(
+    cache_file: Path,
+    *,
+    recs_map: dict | None,
+    held_weights: dict | None,
+    existing_short_puts: dict | None,
+    parallel: bool,
+    max_workers: int,
+    prefer_monthly: bool,
+) -> dict | None:
+    """Run the actual scout research and write the cache. None on failure."""
     scout = _load_scout_module()
     if scout is None:
         print("  [warn] thematic-scout module not loadable; skipping", file=sys.stderr)
@@ -563,6 +698,11 @@ def render_scout_section(payload: dict | None, max_per_theme: int = 4,
         when = datetime.fromisoformat(gen).strftime("%a %b %d %H:%M")
     except Exception:
         when = gen
+    # Staleness transparency (rule #19): state the MEASURED scout-data age —
+    # "fresh this run" vs "X.Xh old (cache)" vs the refresh-failed warning.
+    _age = scout_age_line(payload)
+    if _age:
+        lines.append(f"_{_age}._")
     lines.append(
         f"_Refreshed {when}. "
         f"{summary.get('buys', 0)} BUY · "
