@@ -576,6 +576,15 @@ def render_risk_alerts(
                 f"{_truncate_at_word(str(_demotion_note), 120)}"
             )
         elif rec in ("CLOSE", "CLOSE_FOR_PROFIT") \
+                and rev.get("_momentum_ride"):
+            # Momentum-hold overlay (George 2026-08-17): the action list is
+            # RIDING this winner — the alert must not contradict it with a
+            # bare CLOSE_FOR_PROFIT scream (the AVGO two-surfaces lesson).
+            alerts.append(
+                f"{_vc_prefix}🏇 {contract} → **RIDING MOMENTUM**: "
+                f"{_truncate_at_word(str(rev.get('_momentum_ride')), 120)}"
+            )
+        elif rec in ("CLOSE", "CLOSE_FOR_PROFIT") \
                 and rev.get("_redeploy_hold_demotion"):
             # Redeploy-aware TP (George 2026-08-10): the action list held
             # this winner for more — the alert must not contradict it with
@@ -1396,6 +1405,32 @@ def _days_to_earnings_snapshot(underlying: str, snapshot_data: dict | None,
         return None
 
 
+def _momentum_ride_lines(n: int, contract: str, rev: dict, ride_reason: str,
+                         capture_pct: float) -> list[str]:
+    """Render the 🏇 RIDE — momentum hold item (George 2026-08-17: "If
+    something is ripping and it didn't get out to RSI, say, to 70 or
+    something. Do I really need to close? ... let's make sure we squeeze as
+    much as possible out of these options."). A HOLD-class action-list item
+    (rule #24 — visible, never hidden) carrying the measured momentum read,
+    the would-have-closed capture, and the explicit measured EXIT TRIGGER
+    (first red day / RSI stall / capture ceiling — all inside
+    ``ride_reason``, every number measured this cycle)."""
+    qty = abs(rev.get("qty", 0) or 0)
+    entry = float(rev.get("entry_price") or 0)
+    mid = float(rev.get("current_mid") or 0)
+    pl = (entry - mid) * 100 * qty if entry else 0.0
+    out = [
+        f"{n}. 🏇 **RIDE — momentum hold** {contract} — {ride_reason}",
+        f"   - **Why:** yield-motivated close deferred — the underlying is "
+        f"ripping and the stall trigger hasn't fired. Would have closed at "
+        f"+{capture_pct:.0f}% (${pl:+,.0f}, buy-to-close mid ${mid:.2f}); "
+        f"the exit trigger above is measured — next briefing where the "
+        f"underlying prints red or RSI reaches the stall, the close "
+        f"returns with \"(momentum stalled — take it)\".",
+    ]
+    return out
+
+
 def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
                                  capture_pct: float,
                                  snapshot_data: dict | None,
@@ -1476,6 +1511,58 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
         _d2e_tp is not None and 0 <= _d2e_tp <= _gtc_min_d2e
         and (_dte_tp is None or _d2e_tp <= _dte_tp))
     if _earnings_blocks_gtc:
+        # ── Willing-owner earnings cushion (George 2026-08-17, the IREN
+        # case: "It feels like IREN is ripping... Do I really need to
+        # close?"): when the assignment-basis cushion (spot vs basis =
+        # strike − entry premium) is ≥ momentum_hold.
+        # earnings_hold_min_cushion_pct (default 25%), the single voice
+        # becomes HOLD THROUGH EARNINGS — a -25% print still assigns above
+        # basis (mathematically backed: spot × (1 − thr) ≥ basis ⟺ cushion
+        # ≥ thr). The close-the-binary counter-case renders as subordinate
+        # context. Cushion below threshold / unmeasurable / config off →
+        # close-before-earnings exactly as today. Measured numbers only
+        # (rule #19). Source: analysis/momentum_hold.py::earnings_hold.
+        _eh = None
+        try:
+            from analysis import momentum_hold as _mh_eh
+            _eh = _mh_eh.earnings_hold(rev, snapshot_data, _cfg_tp)
+        except Exception:
+            _eh = None
+        if _eh:
+            _eh_thr = _eh["threshold_pct"]
+            _eh_remaining = mid * 100 * qty
+            _eh_extr = float(getattr(anatomy, "extrinsic_total", 0) or 0)
+            _eh_stays = (f"Extrinsic ${_eh_extr:,.0f}" if _eh_extr > 0
+                         else f"Remaining premium ${_eh_remaining:,.0f}")
+            out.append(
+                f"{n}. **HOLD THROUGH EARNINGS — willing owner** {contract} "
+                f"— basis ${_eh['basis']:.2f} is {_eh['cushion_pct']:.0f}% "
+                f"below spot ${_eh['spot']:.2f}; a -{_eh_thr:g}% print "
+                f"still assigns above basis"
+            )
+            out.append(
+                f"   - **Why:** willing-owner fortress — assignment basis "
+                f"${_eh['basis']:.2f} (strike ${cur_strike:g} − "
+                f"${entry:.2f} premium) sits {_eh['cushion_pct']:.0f}% "
+                f"below spot; even a -{_eh_thr:g}% print on {und} in "
+                f"{_d2e_tp}d still assigns above basis. {_eh_stays} stays "
+                f"yours if held; place NO GTC through the print."
+            )
+            out.append(
+                f"   - **Counter-case (subordinate):** protect "
+                f"+{capture_pct:.0f}% (${pl:+,.0f}) by closing at mid "
+                f"${mid:.2f} before the print — take it only if you are "
+                f"NOT a willing owner at basis ${_eh['basis']:.2f}."
+            )
+            out.extend(_exit_cost_lines(
+                rev, snapshot_data, equity_reviews, date_str,
+                include_near_money=True,
+                verdict_context=(
+                    f"resolved to HOLD THROUGH EARNINGS — willing owner: "
+                    f"basis cushion {_eh['cushion_pct']:.0f}% ≥ "
+                    f"{_eh_thr:g}% threshold; the fortress holds through "
+                    f"the {und} print in {_d2e_tp}d")))
+            return out
         gtc_target = entry * 0.5 if entry > 0 else 0.0
         out.append(
             f"{n}. **CLOSE BEFORE EARNINGS** {contract} — "
@@ -2420,6 +2507,64 @@ def render_action_list(
                         )
                         seen_contracts.add(contract)
                         continue
+                # ── Momentum-hold overlay (George 2026-08-17: "If
+                # something is ripping and it didn't get out to RSI, say,
+                # to 70 or something. Do I really need to close? ... let's
+                # make sure we squeeze as much as possible out of these
+                # options.") — a yield-motivated winner close on a SHORT
+                # PUT defers to 🏇 RIDE while the measured trend is UP
+                # (day ≥ 0 AND 3-session > 0), vintage-resolved RSI <
+                # stall, OTM cushion ≥ floor, capture < ceiling. Risk-
+                # driven closes always override (over-cap concentration,
+                # loss stops, urgent verdicts, earnings inside window,
+                # gamma escape, hard ceiling — momentum_hold.risk_exempt
+                # reuses the existing exemption lists). Fail-open FALSE on
+                # unmeasurable momentum. When a riding-class position
+                # stalls (red day / RSI ≥ stall), the returning CLOSE
+                # carries "(momentum stalled — take it)". Config-gated
+                # (momentum_hold.enabled). Source: analysis/momentum_hold.py.
+                _mh_stall = ""
+                try:
+                    from analysis import momentum_hold as _mh
+                    _mh_cfg = (snapshot_data or {}).get("_config", {}) or {}
+                    _mh_on = (_mh.enabled(_mh_cfg)
+                              and (rev.get("type") or "").upper() == "PUT")
+                except Exception:
+                    _mh_on = False
+                if _mh_on:
+                    try:
+                        if not _ov_anatomy_computed:
+                            try:
+                                _ov_anatomy, _ov_status = _exit_cost_anatomy(
+                                    rev, snapshot_data, equity_reviews,
+                                    date_str, include_near_money=True)
+                                _ov_anatomy_computed = True
+                            except Exception:
+                                pass
+                        _mh_risk = _mh.risk_exempt(
+                            rev, snapshot_data, _mh_cfg,
+                            capture_pct=capture_pct,
+                            days_to_earnings=_d2e_close,
+                            dte=(int(dte) if dte is not None else None),
+                            anatomy_verdict=getattr(_ov_anatomy, "verdict",
+                                                    None),
+                            gamma_escape=_gamma_escape)
+                        if _mh_risk is None:
+                            _mh_ride, _mh_why = _mh.momentum_ride(
+                                rev, snapshot_data, _mh_cfg)
+                        else:
+                            _mh_ride, _mh_why = False, ""
+                    except Exception:
+                        _mh_ride, _mh_why = False, ""
+                    if _mh_ride:
+                        rev["_momentum_ride"] = _mh_why
+                        items.extend(_momentum_ride_lines(
+                            n, contract, rev, _mh_why, capture_pct))
+                        seen_contracts.add(contract)
+                        n += 1
+                        continue
+                    if _mh_why.startswith("stalled"):
+                        _mh_stall = " (momentum stalled — take it)"
                 # ── Redeployability-aware take-profit (George 2026-08-10:
                 # "I'm happy to exit options and close it if we have a path
                 # to redeployment. If we don't have a path to redeployment,
@@ -2546,7 +2691,7 @@ def render_action_list(
 
                 items.append(
                     f"{n}. **CLOSE** {contract} — +{capture_pct:.0f}% (${pl_dollars:+,.0f}); "
-                    f"buy-to-close limit ${limit:.2f}"
+                    f"buy-to-close limit ${limit:.2f}{_mh_stall}"
                 )
                 if yield_res:
                     items.append(f"   - {format_yield_line(yield_res)}")
@@ -3971,6 +4116,45 @@ def render_action_list(
                 seen_contracts.add(contract)
                 continue
 
+            # ── Momentum-hold overlay (George 2026-08-17) — the block-#4
+            # twin of the CLOSE WINNERS ride gate: a yield-motivated
+            # CLOSE_FOR_PROFIT on a SHORT PUT defers to 🏇 RIDE while the
+            # measured trend is up and the stall trigger hasn't fired.
+            # Risk-driven cells / over-cap / earnings window always close
+            # (momentum_hold.risk_exempt — same exemption lists). A stalled
+            # rider's returning close carries "(momentum stalled — take
+            # it)". Fail-open everywhere. Source: analysis/momentum_hold.py.
+            _mh4_stall = ""
+            if rec == "CLOSE_FOR_PROFIT":
+                try:
+                    from analysis import momentum_hold as _mh4
+                    _mh4_cfg = (snapshot_data or {}).get("_config", {}) or {}
+                    if _mh4.enabled(_mh4_cfg) \
+                            and (rev.get("type") or "").upper() == "PUT":
+                        _mh4_risk = _mh4.risk_exempt(
+                            rev, snapshot_data, _mh4_cfg,
+                            capture_pct=profit_pct,
+                            days_to_earnings=_days_to_earnings(
+                                rev.get("underlying")
+                                or contract.split("_")[0]),
+                            dte=(int(rev.get("days_to_expiry"))
+                                 if rev.get("days_to_expiry") is not None
+                                 else None))
+                        if _mh4_risk is None:
+                            _mh4_ride, _mh4_why = _mh4.momentum_ride(
+                                rev, snapshot_data, _mh4_cfg)
+                            if _mh4_ride:
+                                rev["_momentum_ride"] = _mh4_why
+                                items.extend(_momentum_ride_lines(
+                                    n, contract, rev, _mh4_why, profit_pct))
+                                seen_contracts.add(contract)
+                                n += 1
+                                continue
+                            if _mh4_why.startswith("stalled"):
+                                _mh4_stall = " (momentum stalled — take it)"
+                except Exception:
+                    _mh4_stall = ""  # advisory — never break the list
+
             # ── Redeployability-aware take-profit (George 2026-08-10) — the
             # block-#4 twin of the CLOSE WINNERS gate: a yield-motivated
             # CLOSE_FOR_PROFIT (matrix 50-65% floors, GUARDRAIL_TIME_ADJUSTED
@@ -4023,7 +4207,8 @@ def render_action_list(
                     + (f" (+{profit_pct:.0f}% captured, ${profit_dollars:+,.0f})" if entry_price else "")
                 )
 
-            items.append(f"{n}. **{rec}** {contract} — {rationale}{ticket_suffix}")
+            items.append(f"{n}. **{rec}** {contract} — {rationale}"
+                         f"{ticket_suffix}{_mh4_stall}")
             items.append(
                 f"   - **Why:** Decision matrix triggered `{rev.get('matrix_cell_id', '?')}` "
                 f"based on regime + DTE + moneyness + capture conditions."

@@ -475,6 +475,14 @@ def build_money_plan(
         r for r in (options_reviews or [])
         if isinstance(r, dict) and r.get("_redeploy_hold_demotion")
     ]
+    # Momentum-hold overlay (George 2026-08-17: "let's make sure we squeeze
+    # as much as possible out of these options.") — winners the action list
+    # is RIDING are not banked closes; Blocked money counts them so the
+    # plan explains why the bank line is smaller.
+    riding = [
+        r for r in (options_reviews or [])
+        if isinstance(r, dict) and r.get("_momentum_ride")
+    ]
     try:
         _rd_target = float(((config or {}).get("redeploy_aware_tp") or {})
                            .get("hold_target_pct", 0.75))
@@ -482,7 +490,7 @@ def build_money_plan(
         _rd_target = 0.75
 
     if not (banks or deploys or gated or hedge_nag or mtd or held_for_more
-            or below_floor_n):
+            or riding or below_floor_n):
         return [], {}
 
     # ── Render (≤6 lines) ────────────────────────────────────────────────
@@ -596,6 +604,11 @@ def build_money_plan(
             f"{len(held_for_more)} winner"
             f"{'' if len(held_for_more) == 1 else 's'} held for "
             f"{_rd_target * 100:.0f}%+ (no redeploy path: {_hl})")
+    if riding:
+        _rl = ", ".join(_contract_label(r) for r in riding[:4])
+        blocked_bits.append(
+            f"{len(riding)} winner"
+            f"{'' if len(riding) == 1 else 's'} riding momentum ({_rl})")
     if below_floor_n:
         blocked_bits.append(
             f"{below_floor_n} rec(s) below setup floor")
@@ -638,6 +651,12 @@ def build_money_plan(
             {"label": _contract_label(r),
              "note": r.get("_redeploy_hold_demotion")}
             for r in held_for_more
+        ],
+        # Momentum-hold overlay: winners the action list is riding (not
+        # banked closes; the stall trigger is their exit).
+        "riding_momentum": [
+            {"label": _contract_label(r), "note": r.get("_momentum_ride")}
+            for r in riding
         ],
         # Task #42 — spread-mode BP rollup for gated entries (informational).
         "spread_reference": spread_reference,

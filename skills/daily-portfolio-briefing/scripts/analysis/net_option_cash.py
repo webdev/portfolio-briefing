@@ -97,7 +97,8 @@ def gtc_hold_idents(action_list_lines: list) -> set:
 # whose close was pulled OUT of the action list (redeploy-aware hold,
 # dollar-floor convenience close). Rule #43 (2026-08-17): the 08-14 NOK
 # lesson generalized — ANY demotion path, not just HOLD/GTC verbs.
-_DEMOTION_FLAGS = ("_redeploy_hold_demotion", "_close_floor_demotion")
+_DEMOTION_FLAGS = ("_redeploy_hold_demotion", "_close_floor_demotion",
+                   "_momentum_ride")
 
 
 def demoted_close_idents(options_reviews: list | None) -> set:

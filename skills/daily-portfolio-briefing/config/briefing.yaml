@@ -947,6 +947,31 @@ redeploy_aware_tp:
   hold_target_pct: 0.75   # hold healthy winners toward this capture when no path exists
   hard_ceiling_pct: 0.85  # ≥ this capture always closes (matches the smart-TP ceiling)
 
+# 2026-08-17 — 🏇 Momentum-hold overlay (George: "If something is ripping
+# and it didn't get out to RSI, say, to 70 or something. Do I really need
+# to close? Validate it, and let's make sure we squeeze as much as
+# possible out of these options." Evidence: Friday's briefing said close
+# SNDK at +33%; held through the rip, Monday +62% — +$1,280 in 3
+# sessions). A yield-motivated close/TP on a SHORT PUT defers to
+# "🏇 RIDE — momentum hold" when ALL: trend UP (day ≥ 0 AND 3-session > 0,
+# measured live — unmeasurable fails open to NO ride), vintage-resolved
+# RSI < rsi_stall, OTM cushion ≥ min_otm_pct, capture < hard_ceiling_pct.
+# Risk-driven closes ALWAYS override (over-cap concentration, loss stops,
+# urgent verdicts, earnings inside window, gamma escape, tail risk). The
+# stall trigger IS the exit: first red day / RSI ≥ stall / capture
+# ceiling — the returning close carries "(momentum stalled — take it)".
+# earnings_hold_min_cushion_pct: in the CLOSE BEFORE EARNINGS path, an
+# assignment-basis cushion ≥ this % flips the single voice to HOLD
+# THROUGH EARNINGS — willing owner (a -25% print still assigns above
+# basis). Source: scripts/analysis/momentum_hold.py. enabled: false →
+# byte-identical legacy.
+momentum_hold:
+  enabled: true
+  rsi_stall: 65                     # RSI at/above which the ride stalls
+  min_otm_pct: 0.10                 # gamma-safety OTM cushion floor
+  hard_ceiling_pct: 0.85            # ≥ this capture always closes
+  earnings_hold_min_cushion_pct: 25 # willing-owner fortress threshold
+
 # 2026-08-12 — 🎓 Entry Scorecard (George: "can we incorporate these
 # learnings in the daily briefing? i want to make sure we have a running
 # score of our entries."). Persistent ledger
