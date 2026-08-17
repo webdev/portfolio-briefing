@@ -509,8 +509,11 @@ def evaluate_entry(
         hit = None
         try:
             from analysis.theme_stacking import check_theme_stacking
+            # config resolves the held-side mega-cap/index exemption
+            # (2026-08-17: a held AMZN put must not block a CGNX CSP).
             hit = check_theme_stacking(
-                tk, _sg_mod._held_short_put_strikes(positions))
+                tk, _sg_mod._held_short_put_strikes(positions),
+                config=config)
         except Exception:
             hit = None      # fail-open (rule #19)
         if hit:

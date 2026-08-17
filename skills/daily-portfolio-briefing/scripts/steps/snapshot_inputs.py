@@ -335,6 +335,15 @@ def _full_technicals(ticker: str) -> dict | None:
             # analysis/iv_honesty.detect_recent_gap flag an earnings gap that
             # inflates the realized-vol IV-rank proxy (rule #43). No extra fetch.
             "recent_closes": [round(float(c), 4) for c in closes.tail(6).tolist()],
+            # Last ~60 closes (chronological), same OHLC pull — threads the
+            # close series the vintage guard needs to RECOMPUTE Wilder's RSI
+            # live (rules #46/#47). 6 closes can never seed a 14-period RSI,
+            # so the 2026-08-17 briefing excluded WDC/SNDK/MU with "stale RSI
+            # on a +9.4% up-move — live RSI not computable" even though the
+            # snapshot RSI was computed from these very closes. 60 bars give
+            # the Wilder smoothing enough warm-up to converge (<0.5 pt vs
+            # the full series). No extra fetch, no extra network.
+            "rsi_closes": [round(float(c), 4) for c in closes.tail(60).tolist()],
         }
     except Exception as e:
         print(f"    [warn] technicals fetch for {ticker}: {e}", file=sys.stderr)

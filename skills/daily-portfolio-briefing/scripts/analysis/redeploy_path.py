@@ -247,6 +247,59 @@ def redeployment_path(analytics=None, best_setups: dict | None = None,
     return False, (f"gates closed {ratio:.2f}×; no A/B setups above floor")
 
 
+def over_cap_risk_exemption(rev: dict | None, snapshot_data: dict | None,
+                            config: dict | None) -> str | None:
+    """RISK-EXEMPTION for the no-redeploy-path hold (rule #43, 2026-08-17).
+
+    Observed on the real 2026-08-17 briefing: SNDK $1230P (+62%, $123K
+    obligation → 11.0% of NLV) and SOXX $520P (equity 6.5% + $52K put
+    obligation → 11.1% of NLV) were demoted to "2 winners held for 75%+
+    (no redeploy path)" while red flags #9/#10 explicitly instructed
+    "Close or roll down the SNDK/SOXX put(s) to bring obligation-inclusive
+    exposure under 8%." A close that REDUCES an over-cap concentration is
+    risk-driven — same class as loss stops / earnings exits / the hard
+    ceiling — and must never be trapped by the yield-motivated hold.
+
+    Returns the visible risk tag when the underlying's CURRENT
+    obligation-inclusive concentration (position_tiers.
+    projected_name_concentration with ZERO new contracts — the red-flags 4c
+    math, reused not duplicated) is over its tier cap; None otherwise.
+    Fail direction: any missing input → None (no exemption is ever
+    fabricated from missing data — rule #19; the hold logic keeps its own
+    fail-open behavior).
+    """
+    if not isinstance(rev, dict) or not isinstance(snapshot_data, dict):
+        return None
+    if (rev.get("type") or "").upper() != "PUT":
+        return None  # the hold gate is put-side only; calls never reach here
+    ticker = (rev.get("underlying")
+              or str(rev.get("contract", "")).split("_")[0] or "").upper()
+    if not ticker:
+        return None
+    try:
+        from analysis.position_tiers import projected_name_concentration
+    except ImportError:  # pragma: no cover — standalone/test path fallback
+        try:
+            from position_tiers import projected_name_concentration
+        except ImportError:
+            return None
+    balance = snapshot_data.get("balance") or {}
+    try:
+        nlv = float(balance.get("accountValue") or 0)
+        strike = float(rev.get("strike") or 0)
+    except (TypeError, ValueError):
+        return None
+    if nlv <= 0 or strike <= 0:
+        return None
+    res = projected_name_concentration(
+        ticker, strike, 0, nlv, snapshot_data.get("positions"), config)
+    if res is None or not res.over:
+        return None
+    return (f"risk: {ticker} at {res.pct:.1f}% of NLV over the "
+            f"{res.cap_pct:g}% Tier {res.tier} cap — close restores "
+            f"compliance")
+
+
 def hold_note(capture_pct: float, reason: str, target_pct: float) -> str:
     """The visible hold-for-more line (rule #24 — never silently
     suppressed). Every number is measured this cycle."""

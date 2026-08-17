@@ -74,8 +74,63 @@ def _to_date(exp) -> date | None:
         return None
 
 
+def _good_friday(year: int) -> date:
+    """Good Friday (Easter − 2 days), Anonymous Gregorian computus."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    g = (8 * b + 13) // 25
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    ll = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ll) // 451
+    month, day = divmod(h + ll - 7 * m + 114, 31)
+    return date(year, month, day + 1) - timedelta(days=2)
+
+
+def _is_market_holiday_friday(d: date) -> bool:
+    """True when Friday ``d`` is a US market closure.
+
+    The ONLY market holidays that can land on a 3rd Friday (day 15-21):
+      - Good Friday (varies; e.g. Fri Apr 19 '30);
+      - Juneteenth — Jun 19 itself when it falls on the Friday, or the
+        observed Fri Jun 18 when Jun 19 is a Saturday (e.g. Fri Jun 18
+        '27, which shifts the June 2027 monthly to Thu Jun 17 '27).
+    July 4/Christmas/New Year never fall in the 15-21 window; the Monday
+    and Thursday holidays never fall on a Friday."""
+    if d == _good_friday(d.year):
+        return True
+    if d.month == 6 and (
+            d.day == 19
+            or (d.day == 18 and date(d.year, 6, 19).weekday() == 5)):
+        return True
+    return False
+
+
+def is_holiday_shifted_monthly(exp) -> bool:
+    """True iff ``exp`` is the Thursday immediately before a 3rd Friday
+    that is a US market holiday — the holiday-shifted standard monthly.
+
+    When the 3rd Friday is a market closure (Juneteenth-observed or Good
+    Friday — see :func:`_is_market_holiday_friday`), the exchanges list
+    that month's monthly on the preceding Thursday. Observed bug
+    (2026-08-17 briefing): "Sell-to-Open 1× $180P Thu Jun 17 '27 (weekly)"
+    — Fri Jun 18 '27 is the Juneteenth closure, so Thu Jun 17 '27 IS the
+    June 2027 monthly, never a weekly. A Thursday before a NON-holiday
+    3rd Friday stays a weekly (no such listing exists on real chains, but
+    synthetic dates must not be misclassified)."""
+    d = _to_date(exp)
+    if d is None or d.weekday() != 3:  # Thursday = weekday 3
+        return False
+    friday = d + timedelta(days=1)
+    return (friday == third_friday(d.year, d.month)
+            and _is_market_holiday_friday(friday))
+
+
 def is_monthly(exp) -> bool:
-    """True iff ``exp`` is a standard equity/ETF monthly (3rd-Friday) expiration.
+    """True iff ``exp`` is a standard equity/ETF monthly (3rd-Friday)
+    expiration — including the holiday-shifted Thursday variant (see
+    :func:`is_holiday_shifted_monthly`).
 
     Note: only equity/ETF standard monthlies are classified — products with
     different monthly conventions (VIX Wednesdays etc.) are out of scope;
@@ -84,14 +139,18 @@ def is_monthly(exp) -> bool:
     d = _to_date(exp)
     if d is None:
         return False
-    return d == third_friday(d.year, d.month)
+    return d == third_friday(d.year, d.month) or is_holiday_shifted_monthly(d)
 
 
 def expiration_kind(exp) -> str | None:
-    """"monthly" / "weekly" for a parseable expiration, None otherwise."""
+    """"monthly" / "monthly, holiday-shifted" / "weekly" for a parseable
+    expiration, None otherwise. A holiday-shifted monthly must NEVER label
+    "weekly" (rule #19 — the label is computed from the real date)."""
     d = _to_date(exp)
     if d is None:
         return None
+    if is_holiday_shifted_monthly(d):
+        return "monthly, holiday-shifted"
     return "monthly" if is_monthly(d) else "weekly"
 
 
@@ -201,7 +260,9 @@ def prefer_monthly_expiration(
 
     monthly_pick = min(monthlies, key=_distance)
     if monthly_pick == legacy:
-        return ExpirationChoice(expiration=monthly_pick, kind="monthly")
+        return ExpirationChoice(
+            expiration=monthly_pick,
+            kind=expiration_kind(monthly_pick) or "monthly")
 
     # (b) measured-spread override: keep the weekly only when BOTH spreads
     # are measured and the weekly is materially tighter.
@@ -223,7 +284,9 @@ def prefer_monthly_expiration(
             changed=False,
         )
 
-    return ExpirationChoice(expiration=monthly_pick, kind="monthly", changed=True)
+    return ExpirationChoice(
+        expiration=monthly_pick,
+        kind=expiration_kind(monthly_pick) or "monthly", changed=True)
 
 
 # ---------------------------------------------------------------------------

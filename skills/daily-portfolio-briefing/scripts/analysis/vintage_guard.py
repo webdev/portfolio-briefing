@@ -307,7 +307,15 @@ def resolve_new_open_rsi(
         return out
 
     prev = f"{float(snapshot_rsi):.0f}" if snapshot_rsi is not None else "n/a"
-    live_rsi = wilder_rsi_live(tech.get("recent_closes"), live)
+    # Prefer the threaded ~60-close series (snapshot ``rsi_closes``) — the
+    # legacy ``recent_closes`` carries only ~6 closes, which can never seed
+    # a 14-period Wilder RSI, so the live recompute failed exactly when it
+    # was needed (2026-08-17 briefing: WDC/SNDK/MU excluded with "stale RSI
+    # on a +9.4% up-move — live RSI not computable"). Fall back to
+    # recent_closes for older snapshots; absent both → the legacy stale
+    # fail-safe below (rule #19 — never fabricated).
+    _closes = tech.get("rsi_closes") or tech.get("recent_closes")
+    live_rsi = wilder_rsi_live(_closes, live)
     if live_rsi is not None:
         out.update({
             "rsi": round(float(live_rsi), 1), "status": "live", "verified": True,

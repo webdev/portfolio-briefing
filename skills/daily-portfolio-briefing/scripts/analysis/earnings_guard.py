@@ -263,9 +263,14 @@ def format_earnings_badge(check_result: dict) -> str:
     level = check_result.get("level")
     msg = check_result.get("message", "")
 
+    # The Case-4 "contract spans earnings" message already embeds its own
+    # "⚠️" — don't double-prefix (observed 2026-08-17 QCOM card:
+    # "**Earnings check:** ⚠️ ⚠️ Earnings 73d away — prints 231d BEFORE
+    # expiry — contract spans earnings"). One emoji, from whichever side
+    # already carries it.
     if level == "block":
-        return f"🔴 {msg}"
+        return msg if msg.startswith("🔴") else f"🔴 {msg}"
     elif level == "warn":
-        return f"⚠️ {msg}"
+        return msg if msg.startswith("⚠️") else f"⚠️ {msg}"
     else:
         return ""

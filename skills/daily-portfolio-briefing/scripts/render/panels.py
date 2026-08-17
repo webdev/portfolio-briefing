@@ -2462,9 +2462,18 @@ def render_action_list(
                         _rd_urgent = (_ov_anatomy is not None
                                       and getattr(_ov_anatomy, "verdict", None)
                                       == "CLOSE_URGENT")
-                        if not (_rd_pre_print or _gamma_escape or _rd_risk_cell
-                                or _rd_ceiling or _rd_urgent
-                                or capture_pct >= _rd_target * 100.0):
+                        # Over-cap concentration exemption (rule #43,
+                        # 2026-08-17 SNDK/SOXX): a close that reduces an
+                        # over-cap obligation-inclusive name concentration
+                        # is RISK-driven — never held for yield.
+                        _rd_overcap = _rdp.over_cap_risk_exemption(
+                            rev, snapshot_data, _rd_cfg_all)
+                        if _rd_overcap:
+                            _rd_reason = _rd_overcap
+                        elif not (_rd_pre_print or _gamma_escape
+                                  or _rd_risk_cell
+                                  or _rd_ceiling or _rd_urgent
+                                  or capture_pct >= _rd_target * 100.0):
                             _rd_ok, _rd_why = _rdp.redeployment_path(
                                 analytics,
                                 (snapshot_data or {}).get(
@@ -2575,7 +2584,10 @@ def render_action_list(
                 # exists, the rec line carries the MEASURED path reason
                 # (George 2026-08-10 — the close is justified BY the path).
                 if _rd_reason:
-                    items.append(f"   - **Redeploy path:** {_rd_reason}")
+                    _rd_lbl = ("Risk-driven close"
+                               if _rd_reason.startswith("risk:")
+                               else "Redeploy path")
+                    items.append(f"   - **{_rd_lbl}:** {_rd_reason}")
                 # Exit-cost anatomy footer — NEVER silent (2026-08-05 defect
                 # 2): full anatomy when computable (incl. near-money), a
                 # fail-closed "verify at broker" warning with yesterday's
@@ -2594,6 +2606,40 @@ def render_action_list(
     # ---- 3. EXECUTE ROLL — use tax-aware ranker (core mode for core_positions) ----
     ROLL_CREDIT_THRESHOLD = 1000.0
     config_local = (snapshot_data or {}).get("_config", {}) if snapshot_data else {}
+    # Cluster-aware roll selection (2026-08-17 QCOM bug: action #2 rolled
+    # the $180P INTO Thu Jun 17 '27 — the exact $257K / 22.9%-NLV bucket
+    # red flag #5 said "Don't: roll multiple positions INTO this date").
+    # The ranker deprioritizes candidates landing on ≥warning buckets; when
+    # the chosen best STILL lands on one, the ticket renders the measured
+    # cluster warning line. Fail-open: no analytics / import failure → the
+    # legacy ranking, no warning fabricated (rule #19).
+    _put_buckets_al = (analytics or {}).get("put_buckets") or []
+    try:
+        _nlv_al = float((analytics or {}).get("nlv") or 0) or None
+    except (TypeError, ValueError):
+        _nlv_al = None
+    try:
+        _bucket_warning_pct = float(
+            (config_local.get("expiration_bucket") or {}).get(
+                "warning_pct", 0.20))
+    except (TypeError, ValueError):
+        _bucket_warning_pct = 0.20
+    _roll_cfg_top = (config_local.get("roll") or {})
+    try:
+        _cluster_credit_tol = float(_roll_cfg_top.get(
+            "cluster_avoidance_credit_tolerance", 0.20))
+    except (TypeError, ValueError):
+        _cluster_credit_tol = 0.20
+    _bucket_map_al: dict = {}
+    try:
+        from analysis.expiration_ladder import (
+            bucket_pct_by_exp as _bucket_pct_by_exp_fn,
+            roll_into_cluster_warning as _roll_cluster_warning_fn,
+        )
+        _bucket_map_al = _bucket_pct_by_exp_fn(_put_buckets_al)
+    except Exception:
+        _bucket_map_al = {}
+        _roll_cluster_warning_fn = None
     # 2026-08-04 (PLTR): "core" = core_positions ∪ Tier A — a Tier A name
     # gets the same roll tenor allowance / tax-aware core ranking.
     core_tickers_set = _core_union_safe(config_local)
@@ -2846,16 +2892,32 @@ def render_action_list(
                 if _credit_cands:
                     candidates_for_rank = _credit_cands
 
-        best, _scores = rank_candidates(
-            candidates_for_rank, spot=underlying_spot or cur_strike_for_rank,
-            is_core=is_core, embedded_tax_dollars=embedded_tax,
-            min_credit_threshold=ROLL_CREDIT_THRESHOLD,
-            max_tenor_days=_max_tenor_for_pos,
-            # Side-aware ranking (CLAUDE.md #42): defensive short-PUT rolls
-            # rank by strike reduction, never max credit — a put roll-up is
-            # deeper ITM, not "more upside".
-            option_type=_opt_type_gate or "CALL",
-        )
+        try:
+            best, _scores = rank_candidates(
+                candidates_for_rank, spot=underlying_spot or cur_strike_for_rank,
+                is_core=is_core, embedded_tax_dollars=embedded_tax,
+                min_credit_threshold=ROLL_CREDIT_THRESHOLD,
+                max_tenor_days=_max_tenor_for_pos,
+                # Side-aware ranking (CLAUDE.md #42): defensive short-PUT rolls
+                # rank by strike reduction, never max credit — a put roll-up is
+                # deeper ITM, not "more upside".
+                option_type=_opt_type_gate or "CALL",
+                # Cluster-aware selection (2026-08-17 QCOM/Jun-17-'27 bug):
+                # deprioritize STO legs landing on ≥warning put buckets when
+                # a non-clustered alternative is within the credit tolerance.
+                bucket_pct_by_exp=_bucket_map_al,
+                bucket_warning_pct=_bucket_warning_pct,
+                cluster_credit_tolerance=_cluster_credit_tol,
+            )
+        except TypeError:
+            # Older ranker without the cluster kwargs — legacy call.
+            best, _scores = rank_candidates(
+                candidates_for_rank, spot=underlying_spot or cur_strike_for_rank,
+                is_core=is_core, embedded_tax_dollars=embedded_tax,
+                min_credit_threshold=ROLL_CREDIT_THRESHOLD,
+                max_tenor_days=_max_tenor_for_pos,
+                option_type=_opt_type_gate or "CALL",
+            )
         if best:
             # ── Task #37 fix 2: earnings guard runs BEFORE the ticket is
             # composed. A 🔴 BLOCK on the STO leg (it would span an imminent
@@ -3248,6 +3310,18 @@ def render_action_list(
                 f"Sell-to-Open {int(qty)}× ${new_strike:g}{opt_type[:1]} "
                 f"{new_exp_pretty} (current bid ${new_bid:.2f} / mid ${new_mid:.2f} / ask ${new_ask:.2f})."
             )
+            # Cluster warning — the chosen STO leg still lands on a
+            # warning/critical put bucket (it was the only viable roll):
+            # render the MEASURED bucket math, never hide (rule #24).
+            if opt_type == "PUT" and _roll_cluster_warning_fn is not None:
+                try:
+                    _cl_line = _roll_cluster_warning_fn(
+                        new_exp_raw, new_strike, qty, _put_buckets_al,
+                        _nlv_al, warning_pct=_bucket_warning_pct)
+                except Exception:
+                    _cl_line = None
+                if _cl_line:
+                    items.append(f"   - {_cl_line}")
             # Format limit text: "credit" if positive, "debit" if negative
             def _fmt_per_share(s: float) -> str:
                 if s >= 0:
@@ -3843,6 +3917,19 @@ def render_action_list(
                     f" ({sto_dte}d{_delta_s}). Net: {_net_s}. Do NOT place the BTC alone."
                 )
                 items.append(f"   - **Source:** Live E*TRADE chain")
+                # Cluster warning (block #4 parity with block #3): a PUT
+                # STO leg landing on a warning/critical bucket renders the
+                # measured cluster math (2026-08-17 QCOM/Jun-17-'27 bug).
+                if (_otype or "").upper() == "PUT" \
+                        and _roll_cluster_warning_fn is not None:
+                    try:
+                        _cl_line_b4 = _roll_cluster_warning_fn(
+                            _exp_iso, sto_strike, qty, _put_buckets_al,
+                            _nlv_al, warning_pct=_bucket_warning_pct)
+                    except Exception:
+                        _cl_line_b4 = None
+                    if _cl_line_b4:
+                        items.append(f"   - {_cl_line_b4}")
             else:
                 items.append(
                     f"   - **Order (two legs):** Buy-to-Close {int(qty)}× {contract} (current mid "
@@ -3904,7 +3991,13 @@ def render_action_list(
                             "LOSS_STOP", "HARD_CEILING", "GAMMA_ESCAPE",
                             "EARNINGS_IMMINENT", "CRASH_STOP", "TAIL_RISK"))
                         _tgt4 = _rdp4.hold_target_pct(_cfg4)
-                        if not _risk4 and profit_pct < _tgt4 * 100.0 \
+                        # Over-cap concentration exemption (rule #43,
+                        # 2026-08-17 SNDK/SOXX) — risk-driven, never held.
+                        _overcap4 = _rdp4.over_cap_risk_exemption(
+                            rev, snapshot_data, _cfg4)
+                        if _overcap4:
+                            _rd4_reason = _overcap4
+                        elif not _risk4 and profit_pct < _tgt4 * 100.0 \
                                 and profit_pct < (_rdp4.hard_ceiling_pct(
                                     _cfg4) * 100.0):
                             _ok4, _why4 = _rdp4.redeployment_path(
@@ -3958,7 +4051,10 @@ def render_action_list(
                 f"   - **Gain:** Following the matrix improves expectancy versus discretionary holds. {gain_text}"
             )
             if _rd4_reason:
-                items.append(f"   - **Redeploy path:** {_rd4_reason}")
+                _rd4_lbl = ("Risk-driven close"
+                            if _rd4_reason.startswith("risk:")
+                            else "Redeploy path")
+                items.append(f"   - **{_rd4_lbl}:** {_rd4_reason}")
             seen_contracts.add(contract)
             n += 1
 

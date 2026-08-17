@@ -51,6 +51,13 @@ _DEPLOY_KINDS = {"NEW_CSP", "PULLBACK_CSP", "NEW_WEEKLY"}
 _TICKET_NET_RE = re.compile(
     r"[Nn]et:?\s*[+−–-]?\$([\d,]+(?:\.\d+)?)\s*(?:net\s+)?(credit|debit)")
 
+# "+$470 net credit" — amount BEFORE the word "net" (the URGENT — EXECUTE
+# ROLL headline form, 2026-08-17 QCOM $180P). "net" between $ and the
+# credit/debit word keeps it from matching per-share limit prose like
+# "Start at $6.30 credit/share".
+_TICKET_NET_ALT_RE = re.compile(
+    r"[+−–-]?\$([\d,]+(?:\.\d+)?)\s+net\s+(credit|debit)")
+
 _HEDGE_COST_RE = re.compile(r"cost\s*\*{0,2}~?\$([\d,]+(?:\.\d+)?)")
 
 
@@ -84,6 +91,42 @@ def gtc_hold_idents(action_list_lines: list) -> set:
     contract the briefing says to HOLD can never be counted as a close."""
     return {b["ident"] for b in actionable_blocks(action_list_lines or [])
             if _is_hold_kind(b["kind"])}
+
+
+# Render-time demotion flags set by render/panels.py on an options review
+# whose close was pulled OUT of the action list (redeploy-aware hold,
+# dollar-floor convenience close). Rule #43 (2026-08-17): the 08-14 NOK
+# lesson generalized — ANY demotion path, not just HOLD/GTC verbs.
+_DEMOTION_FLAGS = ("_redeploy_hold_demotion", "_close_floor_demotion")
+
+
+def demoted_close_idents(options_reviews: list | None) -> set:
+    """Contract idents whose review carries a render-time close DEMOTION.
+
+    Observed on the real 2026-08-17 briefing: the Money Plan said
+    "Bank today: 4 close(s) → $+4,637 realized (SMH $710C, SNDK $1230P,
+    SOXX $520P, IREN $47P)" while the SAME block's Blocked money said
+    "2 winners held for 75%+ (no redeploy path: SNDK $1230P, SOXX $520P)"
+    — the playbook fold-in banked SNDK/SOXX although the redeploy-aware
+    hold had demoted both out of the action list. The bank/buyback lines
+    must key on the FINAL rendered action set: a hold-demoted winner is
+    NEVER banked."""
+    out: set = set()
+    for r in (options_reviews or []):
+        if not isinstance(r, dict) or not r.get("contract"):
+            continue
+        if any(r.get(k) for k in _DEMOTION_FLAGS):
+            out.add(r["contract"])
+    return out
+
+
+def held_back_idents(action_list_lines: list,
+                     options_reviews: list | None = None) -> set:
+    """HOLD/GTC verbs ∪ render-time demotions — every contract the FINAL
+    action set decided NOT to close today. Single source for every surface
+    that folds in playbook closes (one voice, rule #43)."""
+    return gtc_hold_idents(action_list_lines) \
+        | demoted_close_idents(options_reviews)
 
 
 def _is_roll_kind(kind: str) -> bool:
@@ -169,7 +212,7 @@ def compute_net_option_cash(
         # Two-leg ticket net (rolls, and TAKE PROFIT via roll-down): the
         # rendered "Net: ±$X debit/credit" IS the block's cash — both legs
         # already netted from chain mids.
-        m = _TICKET_NET_RE.search(text)
+        m = _TICKET_NET_RE.search(text) or _TICKET_NET_ALT_RE.search(text)
         if m and (_is_roll_kind(kind)
                   or (_is_close_kind(kind) and "roll" in text.lower())):
             amt = _f(m.group(1).replace(",", ""))
@@ -223,8 +266,10 @@ def compute_net_option_cash(
 
     # ── Playbook composition (when the caller has it) ────────────────────
     # A playbook close whose contract the action list resolved to HOLD/GTC
-    # is dropped — the briefing's own verdict wins (one voice, rule #43).
-    hold_idents = gtc_hold_idents(action_list_lines)
+    # OR demoted at render time (redeploy hold, dollar floor) is dropped —
+    # the briefing's own FINAL verdict wins (one voice, rule #43; the
+    # 2026-08-17 SNDK/SOXX bank-while-held contradiction).
+    hold_idents = held_back_idents(action_list_lines, options_reviews)
     pb = playbook if isinstance(playbook, dict) else {}
     for c in pb.get("closes") or []:
         if not isinstance(c, dict) or c.get("contract") in counted_close_idents:

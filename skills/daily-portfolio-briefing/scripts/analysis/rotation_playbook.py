@@ -695,9 +695,10 @@ def _quote_price(q) -> float | None:
 def _wilder_rsi_live(recent_closes, live_price, period: int = 14) -> float | None:
     """Wilder's RSI on the daily close series with today's LIVE price
     appended as the current bar. Returns None when the series is too short
-    (< period+1 prices) — never fabricated (rule #19). In production
-    ``recent_closes`` carries ~6 closes, so this is usually uncomputable and
-    the fail-safe exclusion path applies instead."""
+    (< period+1 prices) — never fabricated (rule #19). Callers should pass
+    the snapshot's ``rsi_closes`` (~60 closes) when present; the legacy
+    ``recent_closes`` (~6 closes) can never seed a 14-period RSI and falls
+    through to the fail-safe exclusion path."""
     if not isinstance(recent_closes, (list, tuple)) or live_price is None:
         return None
     try:
@@ -851,7 +852,11 @@ def _phase2_gate_battery(
         cand.rsi_verified = True
     if move is not None and abs(move) > thr:
         # Snapshot RSI is pre-gap — untrusted for qualifying purposes.
-        live_rsi = _wilder_rsi_live(tech.get("recent_closes"), live)
+        # Prefer the threaded ~60-close series (rsi_closes) — recent_closes
+        # carries only ~6 closes, which can never seed a 14-period RSI
+        # (the 2026-08-17 "live RSI not computable" bug class).
+        live_rsi = _wilder_rsi_live(
+            tech.get("rsi_closes") or tech.get("recent_closes"), live)
         prev = f"{cand.rsi:.0f}" if cand.rsi is not None else "n/a"
         if live_rsi is not None:
             cand.warnings.append(

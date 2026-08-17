@@ -189,13 +189,17 @@ def test_no_theme_name_unaffected():
 
 def test_multi_theme_overlap_detected_pure_helper():
     """A ticker sitting in MULTIPLE themes matches on ANY shared theme;
-    all shared theme names ride in the reason (never just the first)."""
+    all shared theme names ride in the reason (never just the first).
+    (``exempt_held=set()`` disables the 2026-08-17 mega-cap held-side
+    exemption — NVDA is on the default exempt list; this test pins the
+    multi-theme MATCH mechanics, not the exemption.)"""
     tm = {"WDC": {"Memory & Storage", "Semis"},
           "SNDK": {"Memory & Storage"},
           "NVDA": {"Semis"},
           "KO": set()}
     hit = ts.check_theme_stacking(
-        "WDC", {"SNDK": [1230.0], "NVDA": [200.0]}, theme_map=tm)
+        "WDC", {"SNDK": [1230.0], "NVDA": [200.0]}, theme_map=tm,
+        exempt_held=set())
     assert hit is not None
     matched = {m["ticker"] for m in hit["matches"]}
     assert matched == {"NVDA", "SNDK"}

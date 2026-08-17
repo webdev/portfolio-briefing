@@ -46,6 +46,43 @@ def _cap_buffer_pct(new_strike: float, spot: float) -> float:
     return (new_strike - spot) / spot * 100
 
 
+def _candidate_exp_iso(c: dict) -> str:
+    """ISO expiration of a candidate's STO leg ('' when absent)."""
+    return str(((c.get("instruction") or {}).get("sell_expiration")) or "")[:10]
+
+
+def _is_monthlyish(iso: str) -> bool:
+    """True for a standard 3rd-Friday monthly OR the Thursday immediately
+    before it (the holiday-shifted monthly, e.g. Thu Jun 17 '27 when Fri
+    Jun 18 '27 is the Juneteenth closure). Local date math only — this
+    skill must not import the briefing's expiration_policy. Used ONLY as a
+    tie-break preference among non-clustered alternatives, so the general
+    Thursday-before rule (no holiday table) is safe: real chains never
+    list such Thursdays except via a holiday shift."""
+    from datetime import date, timedelta
+    try:
+        y, m, d = str(iso)[:10].split("-")
+        dt = date(int(y), int(m), int(d))
+    except (ValueError, TypeError):
+        return False
+    first = date(dt.year, dt.month, 1)
+    third_fri = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+    return dt == third_fri or (dt.weekday() == 3
+                               and dt + timedelta(days=1) == third_fri)
+
+
+def _normalize_bucket_map(bucket_pct_by_exp) -> dict[str, float]:
+    """Normalize {expiration: pct_of_nlv} keys to ISO strings; skip junk."""
+    out: dict[str, float] = {}
+    for k, v in (bucket_pct_by_exp or {}).items():
+        try:
+            iso = k.isoformat() if hasattr(k, "isoformat") else str(k)[:10]
+            out[iso] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def rank_candidates(
     candidates: list[dict],
     spot: float,
@@ -55,6 +92,9 @@ def rank_candidates(
     max_tenor_days: Optional[int] = None,
     rollup_bonus_per_pct: float = 250.0,
     option_type: str = "CALL",
+    bucket_pct_by_exp: Optional[dict] = None,
+    bucket_warning_pct: float = 0.20,
+    cluster_credit_tolerance: float = 0.20,
 ) -> tuple[Optional[dict], list[CandidateScore]]:
     """
     Rank roll candidates and return the best non-HOLD pick.
@@ -88,12 +128,28 @@ def rank_candidates(
                      deeper ITM = more assignment risk (the 2026-07-29
                      NVDA/VRT/MU max-credit roll-up bug). Max-credit ranking
                      is only valid for call-side income rolls.
+        bucket_pct_by_exp: optional {ISO expiration: existing short-put
+                     obligation as a fraction of NLV} (the briefing's
+                     analyze_put_buckets read). A candidate whose STO leg
+                     lands on a bucket ≥ ``bucket_warning_pct`` is
+                     deprioritized: when a non-clustered alternative exists
+                     whose net credit is within ``cluster_credit_tolerance``
+                     of the clustered best (default: accept up to 20% less
+                     credit), the alternative wins — monthly (incl.
+                     holiday-shifted Thursday) expirations preferred among
+                     the alternatives. Origin: the 2026-08-17 QCOM roll
+                     whose STO leg landed on the exact Thu Jun 17 '27
+                     cluster red flag #5 said not to roll INTO. When the
+                     clustered candidate is the ONLY viable one it is still
+                     returned — the caller renders the measured cluster
+                     warning (rule #24: demote/annotate, never hide).
 
     Returns:
         (best_candidate_dict, [CandidateScore for each non-HOLD candidate])
         best_candidate_dict is None if no candidate beats HOLD.
     """
     scored: list[CandidateScore] = []
+    eligible: list[tuple[dict, float]] = []  # (candidate, composite) survivors
     best = None
     best_score = -float("inf")
     is_put = (option_type or "CALL").upper() == "PUT"
@@ -213,10 +269,37 @@ def rank_candidates(
             rank_explanation=explanation,
         )
         scored.append(cs)
+        eligible.append((c, composite))
 
         if composite > best_score:
             best_score = composite
             best = c
+
+    # ── Cluster-aware deprioritization (2026-08-17 QCOM/Jun-17-'27 bug) ──
+    # A roll INTO an already-concentrated expiration bucket amplifies the
+    # exact single-Friday assignment risk the red flag warns about. When
+    # the credit-optimal pick lands on a ≥warning bucket and a non-hot
+    # alternative exists within the credit tolerance, prefer the
+    # alternative (monthly/holiday-shifted-monthly expirations first).
+    _buckets = _normalize_bucket_map(bucket_pct_by_exp)
+    if best is not None and _buckets:
+        def _bucket_hot(c: dict) -> bool:
+            return _buckets.get(_candidate_exp_iso(c), 0.0) >= bucket_warning_pct
+
+        if _bucket_hot(best):
+            best_net = float(best.get("netDollars") or 0)
+            floor_net = best_net - cluster_credit_tolerance * abs(best_net)
+            alts = [
+                (c, comp) for c, comp in eligible
+                if c is not best and not _bucket_hot(c)
+                and float(c.get("netDollars") or 0) >= floor_net
+            ]
+            if alts:
+                alts.sort(key=lambda t: (
+                    not _is_monthlyish(_candidate_exp_iso(t[0])), -t[1]))
+                best = alts[0][0]
+            # else: the clustered candidate is the only viable roll — keep
+            # it; the CALLER must render the measured cluster warning line.
 
     # Final sanity gate: even in core mode, if best candidate has no real benefit
     # (no buffer gain AND no credit AND no time), recommend HOLD.

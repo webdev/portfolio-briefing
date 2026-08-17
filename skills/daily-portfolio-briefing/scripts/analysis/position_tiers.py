@@ -776,8 +776,11 @@ def projected_name_concentration_components(
         contracts_i = int(contracts or 0)
     except (TypeError, ValueError):
         return None
+    # contracts == 0 is a legitimate query — "the book as it stands, zero
+    # NEW contracts" (the redeploy-path risk exemption measures whether an
+    # EXISTING name is already over its obligation-inclusive tier cap).
     t = (ticker or "").upper().strip()
-    if not t or nlv_f <= 0 or strike_f <= 0 or contracts_i <= 0:
+    if not t or nlv_f <= 0 or strike_f <= 0 or contracts_i < 0:
         return None
     eq = max(float(equity_mv or 0), 0.0)
     ob = max(float(existing_put_obligation or 0), 0.0)

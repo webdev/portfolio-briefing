@@ -24,7 +24,16 @@ themes). Fail directions (rule #19):
     by the rule-#40 5% overlap check and the stacking annotation, not by
     the theme guard;
   - CC writes are exempt (share-backed) — the exemption lives in the
-    ``evaluate_entry`` wiring, not here (this module is pure).
+    ``evaluate_entry`` wiring, not here (this module is pure);
+  - HELD puts on diversified mega-cap / index names never trigger the
+    check (2026-08-17 CGNX bug: "⏸ CGNX B (70) — excluded: ⛔ same-theme
+    put already held — AMZN $245P (Robotics & Autonomy)" — AMZN is a
+    mega-cap anchor sitting in MANY scout themes; an AMZN put is not a
+    robotics bet and must not block a robotics pure-play). The exempt set
+    is ``entry_algorithm.theme_stacking.exempt_held_tickers`` when
+    configured, else the Tier A core union (position_tiers) + the index
+    names SPY/VOO/QQQ. The exemption applies ONLY to the HELD side — a
+    mega-cap CANDIDATE is still checked against held pure-play puts.
 """
 
 from __future__ import annotations
@@ -35,6 +44,17 @@ from pathlib import Path
 DEFAULT_THEME_FILE = (Path(__file__).resolve().parents[3]
                       / "thematic-scout" / "references"
                       / "theme_universes.yaml")
+
+# Broad index/mega-index names — a held index put hedges the book, it is
+# never a single-theme bet.
+_INDEX_EXEMPT = frozenset({"SPY", "VOO", "QQQ"})
+
+# Fallback diversified mega-cap set — used ONLY when no Tier A core list is
+# resolvable from config (mirrors the documented briefing.yaml core list;
+# these names anchor many scout themes at once, so a held put on them says
+# nothing about any single theme).
+_MEGA_CAP_FALLBACK = frozenset(
+    {"GOOG", "GOOGL", "NVDA", "MSFT", "VRT", "ADBE", "AMZN", "META"})
 
 # Per-path parse cache (the YAML is static within a run).
 _CACHE: dict[str, dict | None] = {}
@@ -79,8 +99,40 @@ def themes_for(ticker, theme_map: dict | None = None) -> set:
     return set(tm.get(str(ticker or "").upper()) or set())
 
 
+def exempt_held_tickers(config: dict | None = None) -> set:
+    """The HELD-side exemption set for the theme-stacking check.
+
+    Precedence:
+      1. ``entry_algorithm.theme_stacking.exempt_held_tickers`` (explicit
+         config list — used exactly as given, uppercased);
+      2. the Tier A core union from ``position_tiers.core_union`` ∪ the
+         index names (SPY/VOO/QQQ);
+      3. when no core list is resolvable, the documented mega-cap fallback
+         ∪ the index names.
+
+    A held put on one of these diversified names never triggers the
+    same-theme WAIT (the 2026-08-17 AMZN-blocks-CGNX bug); pure-play held
+    names (SNDK, MU, WDC, …) still do."""
+    ts = (((config or {}).get("entry_algorithm") or {})
+          .get("theme_stacking") or {})
+    raw = ts.get("exempt_held_tickers")
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        return {str(t).upper().strip() for t in raw if str(t or "").strip()}
+    out: set = set(_INDEX_EXEMPT)
+    try:
+        from analysis.position_tiers import core_union
+        out |= core_union(config)
+    except Exception:
+        pass                # fail toward the fallback below
+    if out <= _INDEX_EXEMPT:
+        out |= _MEGA_CAP_FALLBACK
+    return out
+
+
 def check_theme_stacking(ticker, held_puts_by_ticker,
-                         theme_map: dict | None = None) -> dict | None:
+                         theme_map: dict | None = None,
+                         config: dict | None = None,
+                         exempt_held: set | None = None) -> dict | None:
     """Cross-name same-theme check for one proposed NEW CSP.
 
     Args:
@@ -89,6 +141,10 @@ def check_theme_stacking(ticker, held_puts_by_ticker,
             puts (``setup_grade._held_short_put_strikes`` shape).
         theme_map: override mapping for tests; default loads the scout's
             theme_universes.yaml.
+        config: briefing config — resolves the held-side exemption set via
+            :func:`exempt_held_tickers` (diversified mega-caps / index
+            names never trigger the check from the HELD side).
+        exempt_held: explicit override of the exemption set (tests).
 
     Returns None when there is no overlap (or the ticker is unmapped /
     the map is unavailable — fail-open, rule #19). Otherwise::
@@ -98,7 +154,9 @@ def check_theme_stacking(ticker, held_puts_by_ticker,
                    "(Memory & Storage); stacking correlated assignment "
                    "risk"}
 
-    Same-ticker held puts never match here (rule #40 territory)."""
+    Same-ticker held puts never match here (rule #40 territory). The
+    exemption applies ONLY to the held side — a mega-cap CANDIDATE is
+    still checked against held pure-play puts."""
     tk = str(ticker or "").upper()
     tm = theme_map if theme_map is not None else load_theme_map()
     if not tk or not tm:
@@ -106,11 +164,18 @@ def check_theme_stacking(ticker, held_puts_by_ticker,
     mine = set(tm.get(tk) or set())
     if not mine:
         return None         # not in any mapped theme → no check
+    exempt = (exempt_held if exempt_held is not None
+              else exempt_held_tickers(config))
+    exempt = {str(t).upper() for t in (exempt or set())}
     matches: list[dict] = []
     for held_tk in sorted(held_puts_by_ticker or {}):
         h = str(held_tk or "").upper()
         if not h or h == tk:
             continue        # same-name risk is rule #40's, not the theme's
+        if h in exempt:
+            # Diversified mega-cap / index held put — appears in many
+            # themes at once; not a bet on THIS theme (2026-08-17 CGNX).
+            continue
         shared = mine & set(tm.get(h) or set())
         if not shared:
             continue

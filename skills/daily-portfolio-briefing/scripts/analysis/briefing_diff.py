@@ -36,7 +36,12 @@ def _signature_for_action(item_text: str) -> str:
 
     # Action TYPE = first bold token after the number ("CLOSE", "EXECUTE ROLL",
     # "ROLL_OUT_AND_UP", "HEDGE", "DEFENSIVE ROLL (core override)", ...).
-    m_type = re.match(r"^\s*\d+\.\s+\*\*([^*]+)\*\*", first)
+    # The optional non-word run before ** absorbs urgency glyphs — the
+    # renderer emits "2. 🚨 **URGENT — EXECUTE ROLL** QCOM_PUT_180_20270219"
+    # (2026-08-17). Without it the signature fell back to first[:80]
+    # (volatile, price included) AND the block dropped out of every
+    # actionable_blocks consumer (Total Impact, Money Plan, capital plan).
+    m_type = re.match(r"^\s*\d+\.\s+[^\w*]*\*\*([^*]+)\*\*", first)
     if not m_type:
         return first[:80]
     kind = m_type.group(1).strip()

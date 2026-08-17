@@ -46,9 +46,13 @@ from pathlib import Path
 
 # Action kinds that BANK money today (close/lock a winner). URGENT/loss-stop
 # closes realize losses and are risk actions, not money-plan banks.
+# CLOSE_BEFORE_EARNINGS (2026-08-17 IREN $47P, +39% captured) is a winner
+# close taken ahead of a print — it banks from the action list directly
+# rather than depending on a playbook fold-in. The realized<=0 guard below
+# keeps loss closes out regardless of kind.
 _BANK_KIND_RE = re.compile(
     r"^(CLOSE|CLOSE_FOR_PROFIT|CLOSE_WINNER|CLOSE_INTO_RECOVERY"
-    r"|TAKE_PROFIT.*)$")
+    r"|CLOSE_BEFORE_EARNINGS|TAKE_PROFIT.*)$")
 _DEPLOY_KINDS = {"NEW_CSP", "PULLBACK_CSP", "NEW_WEEKLY"}
 
 # A block containing any of these markers is NOT actionable today.
@@ -344,9 +348,16 @@ def build_money_plan(
     # know the render-time verdict, so its close for that contract is
     # dropped here (NOK $11P rendered in "Bank today: 4 close(s)" and
     # inflated buybacks to −$7,100 while Total Impact said −$5,320).
+    # Generalized (rule #43, 2026-08-17): ANY render-time demotion — not
+    # just GTC verbs — keeps a contract out of the bank/buyback fold-in.
+    # The redeploy-aware hold demoted SNDK $1230P / SOXX $520P out of the
+    # action list, yet the playbook fold-in banked both ("Bank today: 4
+    # close(s) → $+4,637 realized (… SNDK $1230P, SOXX $520P …)") while
+    # Blocked money simultaneously said "2 winners held for 75%+". One
+    # voice: the FINAL rendered action set decides what banks.
     try:
-        from analysis.net_option_cash import gtc_hold_idents
-        _hold_idents = gtc_hold_idents(action_list_lines)
+        from analysis.net_option_cash import held_back_idents
+        _hold_idents = held_back_idents(action_list_lines, options_reviews)
     except Exception:
         _hold_idents = set()
     pb = playbook if isinstance(playbook, dict) else {}

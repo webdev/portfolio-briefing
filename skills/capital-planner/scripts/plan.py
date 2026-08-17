@@ -616,8 +616,12 @@ def _parse_yield_or_cost(text: str) -> tuple[float, float]:
 import re as _re
 
 
+# The optional non-word run between the number and the bold verb absorbs
+# urgency glyphs — the renderer emits "2. 🚨 **URGENT — EXECUTE ROLL** …"
+# (2026-08-17 QCOM $180P) and without it the whole block fell out of the
+# capital plan (Tier 1 showed no roll, "Collateral freed: $0").
 _ACTION_LINE_RE = _re.compile(
-    r"^\s*(?P<n>\d+)\.\s+\*\*(?P<kind>[A-Z][A-Z _—-]+)\*\*\s+(?P<rest>.+)",
+    r"^\s*(?P<n>\d+)\.\s+[^\w*]*\*\*(?P<kind>[A-Z][A-Z _—-]+)\*\*\s+(?P<rest>.+)",
     _re.IGNORECASE,
 )
 
@@ -629,6 +633,30 @@ _KIND_ALIASES = {
     "CSP_—_PAID-TO-WAIT": "PULLBACK_CSP",
     "CSP_-_PAID-TO-WAIT": "PULLBACK_CSP",
 }
+
+# CLOSE-family kinds (CLOSE_BEFORE_EARNINGS, CLOSE_INTO_RECOVERY,
+# CLOSE_WINNER, CLOSE_FOR_PROFIT, …) all route through the CLOSE branch —
+# the 2026-08-17 briefing's "3. **CLOSE BEFORE EARNINGS** IREN_PUT_47_20261218
+# — +39% captured ($+722); buy-to-close at mid $11.40" matched nothing and
+# the plan showed "Collateral freed: $0" while the action list freed $4,700.
+_ROLL_KINDS = ("EXECUTE_ROLL", "ROLL", "DEFENSIVE_ROLL")
+
+# Contract ident like IREN_PUT_47_20261218 — the strike is REAL data carried
+# by the symbol itself; used to derive PUT collateral when the block carries
+# no "frees $X" line (never a guess — rule #19).
+_CONTRACT_IDENT_RE = _re.compile(
+    r"\b([A-Z.]{1,6})_(PUT|CALL)_([\d.]+)_\d{8}\b")
+
+
+def _normalize_kind_raw(kind_raw: str) -> str:
+    """Strip the URGENT prefix and em-dash separators from a rendered verb:
+    'URGENT_—_EXECUTE_ROLL' → 'EXECUTE_ROLL'."""
+    k = _re.sub(r"^URGENT[_—–-]+", "", kind_raw)
+    return _KIND_ALIASES.get(k, k)
+
+
+def _is_close_family(kind_raw: str) -> bool:
+    return kind_raw == "CLOSE" or kind_raw.startswith("CLOSE_")
 
 
 def _money(s: str) -> float:
@@ -646,7 +674,8 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
     if not m:
         return None
     kind_raw = m.group("kind").strip().upper().replace(" ", "_")
-    kind_raw = _KIND_ALIASES.get(kind_raw, kind_raw)
+    is_urgent = kind_raw.startswith("URGENT") or "🚨" in head
+    kind_raw = _normalize_kind_raw(kind_raw)
     rest = m.group("rest").strip()
     # First word/group of capitals after kind that looks like a ticker
     ticker_m = _re.search(r"\b([A-Z]{1,6})(?:_PUT|_CALL|\b)", rest)
@@ -662,15 +691,18 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
     weight_pct = 0.0
     cost_amount = 0.0
 
-    # CLOSE patterns
-    if kind_raw == "CLOSE":
-        # "+31% ($+107)" — locked profit
-        pm = _re.search(r"\+(\d+)%\s+\(\$\+([\d,]+)\)", combined)
+    # CLOSE patterns (whole CLOSE family — CLOSE, CLOSE_BEFORE_EARNINGS,
+    # CLOSE_INTO_RECOVERY, CLOSE_WINNER, CLOSE_FOR_PROFIT, …)
+    if _is_close_family(kind_raw):
+        # "+31% ($+107)" or "+39% captured ($+722)" — locked profit
+        pm = _re.search(r"\+(\d+)%(?:\s+\w+)?\s+\(\$\+([\d,]+)\)", combined)
         if pm:
             profit_pct = int(pm.group(1)) / 100.0
             profit_dollars = _money(pm.group(2))
-        # "buy-to-close limit $36.84" — per-share BTC cost; need contracts to scale
-        bm = _re.search(r"buy-to-close limit \$([\d,.]+)", combined, _re.IGNORECASE)
+        # "buy-to-close limit $36.84" / "buy-to-close at mid $11.40" —
+        # per-share BTC cost; need contracts to scale
+        bm = _re.search(r"buy-to-close (?:limit|at mid)\s+\$([\d,.]+)",
+                        combined, _re.IGNORECASE)
         contracts = 1
         cm = _re.search(r"(\d+)\s+contracts?", combined, _re.IGNORECASE)
         if cm:
@@ -681,12 +713,20 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
         fm = _re.search(r"frees\s+\$([\d,]+)", combined, _re.IGNORECASE)
         if fm:
             collateral_freed = _money(fm.group(1))
-        # "unlocks 100×6 shares" — covered call frees shares not cash
-        if "unlocks" in combined.lower():
-            pass  # cash_in stays 0
+        elif "unlocks" not in combined.lower():
+            # No "frees $X" line rendered (e.g. CLOSE BEFORE EARNINGS) —
+            # derive PUT collateral from the contract ident's own strike
+            # (strike × 100 × contracts; real symbol data, not a guess).
+            # Covered calls ("unlocks … shares") free no cash — stays 0.
+            im = _CONTRACT_IDENT_RE.search(combined)
+            if im and im.group(2) == "PUT":
+                try:
+                    collateral_freed = float(im.group(3)) * 100 * contracts
+                except ValueError:
+                    collateral_freed = 0.0
 
     # ROLL patterns
-    elif kind_raw in ("EXECUTE_ROLL", "ROLL", "DEFENSIVE_ROLL"):
+    elif kind_raw in _ROLL_KINDS:
         # "−$2,360 net debit" or "+$1,128 net credit"
         dm = _re.search(r"[−-]\$([\d,]+)\s+net\s+debit", combined, _re.IGNORECASE)
         cm = _re.search(r"\+\$([\d,]+)\s+net\s+credit", combined, _re.IGNORECASE)
@@ -728,10 +768,16 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
             collateral_freed = _money(sm.group(1))
 
     # Build CapitalAction
-    if kind_raw == "CLOSE":
+    if _is_close_family(kind_raw):
         cfg = (rules.get("actions") or {}).get("CLOSE", {})
         threshold = cfg.get("promote_to_critical_if_capture_pct_at_or_above", 0.30)
         tier = 1 if profit_pct >= threshold else int(cfg.get("base_tier", 2))
+        tier_reason = (f"≥{threshold*100:.0f}% capture" if profit_pct >= threshold
+                       else "winner-close discipline")
+        if kind_raw == "CLOSE_BEFORE_EARNINGS":
+            # Event-risk close — do-first regardless of capture level.
+            tier = 1
+            tier_reason = "close before earnings (event risk)"
         return CapitalAction(
             kind="CLOSE",
             ticker=ticker,
@@ -739,9 +785,9 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
             cash_in=collateral_freed,
             cash_out=btc_cost,
             tier=tier,
-            tier_reason=(f"≥{threshold*100:.0f}% capture" if profit_pct >= threshold else "winner-close discipline"),
+            tier_reason=tier_reason,
         )
-    if kind_raw in ("EXECUTE_ROLL", "ROLL", "DEFENSIVE_ROLL"):
+    if kind_raw in _ROLL_KINDS:
         cfg = (rules.get("actions") or {}).get("ROLL", {})
         tier = int(cfg.get("base_tier", 3))
         skip_reason: str | None = None
@@ -753,6 +799,9 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
         if is_imminent and em:
             tier = 4
             skip_reason = f"earnings in {em.group(1)}d — defer until after print"
+        elif is_urgent:
+            # 🚨 URGENT — EXECUTE ROLL (strike tested) — do-first.
+            tier = 1
         elif cfg.get("promote_to_important_if_credit_received") and credit > debit:
             tier = 2
 
@@ -760,6 +809,9 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
         net_out = debit
         desc = f"ROLL {ticker} — net "
         desc += f"+${credit - debit:,.0f} credit" if credit > debit else f"−${debit - credit:,.0f} debit"
+        tier_reason = skip_reason or ("credit roll" if credit > debit else "debit roll")
+        if tier == 1 and is_urgent and not skip_reason:
+            tier_reason = "urgent (🚨 strike tested) — " + tier_reason
         return CapitalAction(
             kind="ROLL",
             ticker=ticker,
@@ -767,7 +819,7 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
             cash_in=net_in,
             cash_out=net_out,
             tier=tier,
-            tier_reason=(skip_reason or ("credit roll" if credit > debit else "debit roll")),
+            tier_reason=tier_reason,
             skip_reason=skip_reason,
         )
     if kind_raw == "HEDGE":

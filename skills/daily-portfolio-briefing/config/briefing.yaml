@@ -340,6 +340,15 @@ roll:
   # Watch note (IREN: $652 debit on $3,700 collateral = 18%); the exit-cost
   # verdict proposes the alternative (close / take assignment).
   max_debit_pct_of_collateral: 0.08
+  # 2026-08-17 QCOM bug: the roll's STO leg landed on the exact Jun 17 '27
+  # expiration cluster red flag #5 forbade rolling INTO. Roll candidate
+  # ranking now deprioritizes STO legs on buckets ≥ expiration_bucket
+  # warning_pct: a non-clustered alternative wins when its net credit gives
+  # up no more than this fraction of the clustered best's credit (0.20 =
+  # accept up to 20% less credit to avoid a warning bucket). When only the
+  # clustered candidate is viable, the ticket renders the measured
+  # "⚠ rolls INTO the … cluster" warning instead.
+  cluster_avoidance_credit_tolerance: 0.20
 
 # Task #43 defect 3 (2026-07-31, AMD $420P): standing hold directives whose
 # release conditions predate an earnings print are PAUSED (not deleted) when
