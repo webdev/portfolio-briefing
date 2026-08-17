@@ -428,7 +428,9 @@ def test_grade_of_reads_pydantic_strategy_upgrade():
     side, letter, raw = setup_grade_ui.grade_of(su)
     assert (side, letter) == ("cc", "D")
     assert raw.get("setup_grade_drivers") == ["RSI 44 weak for CC"]
-    assert setup_grade_ui.grade_tokens(su) == "cc_d"
+    # Tokens: side-aware slug + the plain per-letter pill token (George
+    # 2026-08-17 per-letter filter pills).
+    assert set(setup_grade_ui.grade_tokens(su).split()) == {"cc_d", "d"}
     badge = setup_grade_ui.grade_badge(su)
     assert badge is not None and "CC setup D" in badge["label"]
     # Ungraded model → fail closed, no fabricated grade (rule #19).

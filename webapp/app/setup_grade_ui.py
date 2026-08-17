@@ -59,6 +59,30 @@ def _letter_slug(letter: str) -> str:
     }.get(letter, "other")
 
 
+# Plain per-letter pill tokens (George 2026-08-17: "I need to have a filter
+# little pill that I can click on so I can see A, B, C, D"). A- groups into
+# the A pill; the hard-block '—' and ungraded 'n/a' get their own buckets.
+_PLAIN_GROUP = {
+    "A": "a", "A-": "a", "B": "b", "C": "c", "D": "d",
+    "—": "blocked", "n/a": "none",
+}
+
+
+def _letter_tokens(side: str, letter: str, prime: bool = False) -> list[str]:
+    """Full token set for a graded card: side-aware slug (existing
+    grammar), the plain per-letter pill token (A- → 'a'), '{side}_good'
+    for A/A-/B, and 'prime' when the pipeline flags 💎 PRIME."""
+    tokens = [f"{side}_{_letter_slug(letter)}"]
+    plain = _PLAIN_GROUP.get(letter)
+    if plain and plain not in tokens:
+        tokens.append(plain)
+    if letter in GOOD_LETTERS:
+        tokens.append(f"{side}_good")
+    if prime:
+        tokens.append("prime")
+    return tokens
+
+
 def _grade_of(base: Any) -> tuple[str | None, str | None, dict]:
     """(side, letter, raw) from a merged-idea or strategy-upgrade dict.
 
@@ -115,15 +139,15 @@ def grade_of(base: Any) -> tuple[str | None, str | None, dict]:
 
 def grade_tokens(base: Any) -> str:
     """Space-separated tokens for the data-setup-grades attribute:
-    '{side}_{letter-slug}' plus '{side}_good' when the letter is A/A-/B.
-    Ungraded → 'none'."""
-    side, letter, _raw = _grade_of(base)
+    '{side}_{letter-slug}', the plain per-letter pill token ('a'/'b'/'c'/
+    'd'/'blocked' — A- groups into 'a'), '{side}_good' when the letter is
+    A/A-/B, and 'prime' when the pipeline flags 💎 PRIME. Ungraded →
+    'none'."""
+    side, letter, raw = _grade_of(base)
     if not side or not letter:
         return "none"
-    tokens = [f"{side}_{_letter_slug(letter)}"]
-    if letter in GOOD_LETTERS:
-        tokens.append(f"{side}_good")
-    return " ".join(tokens)
+    return " ".join(_letter_tokens(side, letter,
+                                   prime=bool(raw.get("setup_grade_prime"))))
 
 
 def grade_badge(base: Any) -> dict[str, str] | None:
@@ -167,23 +191,108 @@ def grade_badge(base: Any) -> dict[str, str] | None:
 
 
 def grade_filter_chips() -> list[dict[str, str]]:
-    """Chip definitions for the setup-grade filter bar (All first). The
-    titles carry the config-derived B floor so the UI never hardcodes
-    letter thresholds."""
-    b_floor = letters().get("b", 65.0)
+    """Per-letter pill definitions for the setup-grade filter bar (George
+    2026-08-17: "I need to have a filter little pill that I can click on
+    so I can see A, B, C, D. Without it, it's really hard to know which
+    one is a good one, which one is not."). All first, then 💎 Prime, the
+    letters A→D (A groups A and A-), ⛔ Blocked, Ungraded. Titles carry
+    the config-derived letter floors (pipeline config bridge) plus the
+    reading guide 'A/B = enter quality · C/D = wait' — never hardcoded
+    thresholds."""
+    lt = letters()
+    a_minus_floor = lt.get("a_minus", 78.0)
+    b_floor = lt.get("b", 65.0)
+    c_floor = lt.get("c", 50.0)
     return [
         {"grade": "all", "label": "All",
          "title": "Show every card (including ungraded)"},
-        {"grade": "csp_good", "label": "🎯 CSP setup A/B",
-         "title": (f"Put-side entry timing graded A/A-/B "
-                   f"(score ≥ {b_floor:.0f}/100) — favored CSP setups")},
-        {"grade": "cc_good", "label": "📞 CC setup A/B",
-         "title": (f"Covered-call entry timing graded A/A-/B "
-                   f"(score ≥ {b_floor:.0f}/100) — favored CC writes")},
+        {"grade": "prime", "label": "💎 Prime",
+         "title": ("💎 PRIME — card-strict: every graded component in its "
+                   "prime band. The best entries by the algorithm.")},
+        {"grade": "a", "label": "A",
+         "title": (f"A / A- setups (score ≥ {a_minus_floor:.0f}/100) — "
+                   "A/B = enter quality · C/D = wait")},
+        {"grade": "b", "label": "B",
+         "title": (f"B setups (score ≥ {b_floor:.0f}/100) — "
+                   "A/B = enter quality · C/D = wait")},
+        {"grade": "c", "label": "C",
+         "title": (f"C setups (score ≥ {c_floor:.0f}/100) — "
+                   "A/B = enter quality · C/D = wait")},
+        {"grade": "d", "label": "D",
+         "title": (f"D setups (score < {c_floor:.0f}/100) — "
+                   "A/B = enter quality · C/D = wait")},
+        {"grade": "blocked", "label": "⛔ Blocked",
+         "title": ("Hard-blocked entries (Setup Grade — e.g. RSI hard "
+                   "block) — no entry today")},
+        {"grade": "none", "label": "Ungraded",
+         "title": "Cards without a Setup Grade this cycle"},
     ]
+
+
+# ─── Parsed report cards (candidates / when-to-enter / setups) ────────
+# George (2026-08-17): "Setups I have to have a grade so I can know
+# whether it's an A entry or B or D." The report markdown carries the
+# grade lines (report_parser extracts them into setup_grade* fields);
+# these helpers turn those fields into the data attribute + a prominent
+# letter chip. Report surfaces are put-side (CSP entries) → side 'csp'.
+
+
+def report_card_tokens(card: Any) -> str:
+    """data-setup-grades for a parsed rep-card: side-aware slug + plain
+    per-letter pill token + 'csp_good' + 'prime'. Ungraded (or letter
+    'n/a') → 'none' — never a fabricated grade (rule #19)."""
+    if not isinstance(card, dict):
+        return "none"
+    letter = card.get("setup_grade")
+    if not letter or str(letter) == "n/a":
+        return "none"
+    return " ".join(_letter_tokens("csp", str(letter),
+                                   prime=bool(card.get("setup_grade_prime"))))
+
+
+def report_card_badge(card: Any) -> dict[str, str] | None:
+    """Prominent letter chip for a rep-card header: {label, tone,
+    rep_tone, title}. Label leads with the letter ('🏁 B', '🏁 A 💎',
+    '⛔ blocked'); the tooltip carries the full measured grade note plus
+    the reading guide. None when ungraded — no chip, never fabricated
+    (rule #19)."""
+    if not isinstance(card, dict):
+        return None
+    letter = card.get("setup_grade")
+    if not letter or str(letter) == "n/a":
+        return None
+    letter = str(letter)
+    if letter in GOOD_LETTERS:
+        tone, rep_tone = "green", "green"
+    elif letter == "C":
+        tone, rep_tone = "neutral", "muted"
+    elif letter == "D":
+        tone, rep_tone = "orange", "amber"
+    else:  # '—' hard block
+        tone, rep_tone = "red", "red"
+    if letter == "—":
+        label = "⛔ blocked"
+    else:
+        label = f"🏁 {letter}"
+        score = card.get("setup_grade_score")
+        if isinstance(score, (int, float)):
+            label += f" ({score:.0f})"
+    if card.get("setup_grade_prime"):
+        label += " 💎"
+    title = str(card.get("setup_grade_note") or "").strip()
+    if card.get("setup_grade_below_floor"):
+        prefix = "⏸ Below the actionable B floor — planning only."
+        title = f"{prefix} {title}" if title else prefix
+    guide = "A/B = enter quality · C/D = wait."
+    title = f"{title} — {guide}" if title else (
+        f"Entry-timing Setup Grade (WHEN, not WHAT). {guide}")
+    return {"label": label, "tone": tone, "rep_tone": rep_tone,
+            "title": title}
 
 
 def register_jinja_globals(env) -> None:
     env.globals["setup_grade_filter_chips"] = grade_filter_chips
     env.globals["setup_grade_tokens"] = grade_tokens
     env.globals["setup_grade_badge"] = grade_badge
+    env.globals["setup_grade_report_tokens"] = report_card_tokens
+    env.globals["setup_grade_report_badge"] = report_card_badge

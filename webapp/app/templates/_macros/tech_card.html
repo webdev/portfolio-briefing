@@ -14,7 +14,7 @@
    data-rsi-zones attribute is UNCHANGED either way — filter bars key on
    data, not on the visual chip. #}
 {% macro tech_card(t, demote_zone=false) %}
-<article class="tech-card{% if not t.available %} tech-card-unavailable{% endif %}" data-ticker="{{ t.ticker }}" data-rsi-zones="{{ t.rsi_zones or 'unknown' }}">
+<article class="tech-card{% if not t.available %} tech-card-unavailable{% endif %}" data-ticker="{{ t.ticker }}" data-rsi-zones="{{ t.rsi_zones or 'unknown' }}"{% if t.setup_grades %} data-setup-grades="{{ t.setup_grades }}"{% endif %}>
     <header class="tc-head">
         <div class="tc-head-l">
             <a class="tc-tk no-popover" href="/positions/{{ t.ticker }}">{{ t.ticker }}</a>

@@ -542,6 +542,39 @@ def _wire_routes(app: FastAPI) -> None:
             except Exception:
                 tech_by_ticker = {}
 
+            # Grade stamping on Technical Read cards (George 2026-08-17:
+            # "Setups I have to have a grade") — tech cards are research,
+            # not recs, so they carry data-setup-grades ONLY when a grade
+            # for that ticker exists in the briefing JSON pools (ideas /
+            # strategy upgrades). No grade → no attribute, never
+            # fabricated (rule #19). Fail-open like tech_by_ticker.
+            try:
+                grade_toks_by_tk: dict[str, set[str]] = {}
+                for kind_name, seq in (("idea", merged_ideas or []),
+                                       ("strategy", strategy_standalone or [])):
+                    for b in seq:
+                        toks = setup_grade_ui.grade_tokens(b)
+                        if toks == "none":
+                            continue
+                        tk = unified_card.resolve_ticker(b, kind_name)
+                        if tk:
+                            grade_toks_by_tk.setdefault(
+                                str(tk).upper(), set()).update(toks.split())
+                for tk, sus in (strategy_attached or {}).items():
+                    for su in sus:
+                        toks = setup_grade_ui.grade_tokens(su)
+                        if toks != "none":
+                            grade_toks_by_tk.setdefault(
+                                str(tk).upper(), set()).update(toks.split())
+                for group in (tech_read or {}).get("groups", []):
+                    for t in group.get("cards", []):
+                        toks_set = grade_toks_by_tk.get(
+                            str(t.get("ticker") or "").upper())
+                        if toks_set:
+                            t["setup_grades"] = " ".join(sorted(toks_set))
+            except Exception:
+                pass
+
             return _render(
                 request,
                 "briefing.html",
@@ -843,6 +876,10 @@ def _wire_routes(app: FastAPI) -> None:
         rendered_html = md_render.render(text) if total_cards == 0 else None
         if total_cards == 0:
             structured = None  # ensures template falls into the markdown branch
+        else:
+            # Sort assist (George 2026-08-17) — within each theme section,
+            # cards order grade-first (A→D → blocked → ungraded).
+            report_parser.sort_cards_grade_first(structured)
         return _render(
             request,
             "report_view.html",

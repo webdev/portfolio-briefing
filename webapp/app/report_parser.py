@@ -97,6 +97,27 @@ _BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 # Capacity banner on line 1
 _CAPACITY_RE = re.compile(r"^CAPACITY:\s*(.+?)\s*$")
 
+# ─── Setup Grade lines (George 2026-08-17: "Setups I have to have a grade
+# so I can know whether it's an A entry or B or D.") ───────────────────────
+# The pipeline's format_grade_note emits, as a card sub-bullet:
+#   **Setup Grade: B** (66/100) · RSI 47 late-band · … — 🏁 Entry: B — …
+#   **Setup Grade: A 💎 PRIME** (92/100) · … — 🏁 Entry: A — …
+#   **Setup Grade: —** · RSI 71 hard block ✗ — 🏁 Entry: — — blocked: …
+# and the B-floor demotion renders a separate bold bullet:
+#   **⏸ Below setup floor — D (44): a ≥2-touch support …**
+_GRADE_LINE_RE = re.compile(
+    r"\*\*Setup Grade:\s*(?P<letter>A-|A|B|C|D|—|n/a)"
+    r"\s*(?P<prime>💎\s*PRIME)?\s*\*\*"
+    r"(?:\s*\((?P<score>\d+(?:\.\d+)?)/100\))?"
+)
+_BELOW_FLOOR_RE = re.compile(
+    r"Below setup floor\s*—\s*(?P<letter>A-|A|B|C|D)"
+    r"\s*\((?P<score>\d+(?:\.\d+)?)\)"
+)
+
+# Display rank for grade-first ordering (A best → ungraded last).
+_GRADE_RANK = {"A": 0, "A-": 1, "B": 2, "C": 3, "D": 4, "—": 5, "n/a": 6}
+
 # Metric chip parser — pulls out RSI, IV rank, distance, drawdown, 5d move
 _METRIC_PATTERNS = [
     (re.compile(r"RSI\s+(\d+)\s*([🔴🟡🟢]?\s*\w*)?"), "RSI"),
@@ -203,9 +224,51 @@ def _strip_prefix(s: str, prefix: str) -> str:
     return s[len(prefix):].strip() if s.lower().startswith(prefix.lower()) else s
 
 
+def _apply_grade_line(card: dict, text: str) -> None:
+    """Extract the Setup Grade fields from a '**Setup Grade: …**' bullet.
+    Unparseable → verbatim extra (never a fabricated grade, rule #19)."""
+    m = _GRADE_LINE_RE.search(text)
+    if not m:
+        card["extras"].append(text)
+        return
+    card["setup_grade"] = m.group("letter")
+    card["setup_grade_prime"] = bool(m.group("prime"))
+    if m.group("score") is not None:
+        try:
+            card["setup_grade_score"] = float(m.group("score"))
+        except ValueError:
+            pass
+    # Full measured note (drivers + 🏁 Entry message) rides the chip
+    # tooltip — strip the markdown bold markers for plain-text display.
+    card["setup_grade_note"] = text.replace("**", "").strip()
+
+
+def _apply_floor_line(card: dict, text: str) -> None:
+    """'**⏸ Below setup floor — D (44): …**' — the B-floor demotion note.
+    Sets the below-floor flag (and the letter/score when no grade line
+    already supplied them); the note text stays visible in extras."""
+    m = _BELOW_FLOOR_RE.search(text)
+    if m:
+        card["setup_grade_below_floor"] = True
+        if not card.get("setup_grade"):
+            card["setup_grade"] = m.group("letter")
+            try:
+                card["setup_grade_score"] = float(m.group("score"))
+            except ValueError:
+                pass
+    card["extras"].append(text)
+
+
 def _classify_bullet(text: str) -> tuple[str, str]:
     """(field_name, cleaned_value). Field names match the dict keys above."""
     t = text.strip()
+
+    # Setup Grade lines FIRST — they carry '·'-joined drivers that could
+    # otherwise trip the generic matchers below.
+    if "Setup Grade:" in t:
+        return ("_setup_grade_line", t)
+    if "Below setup floor" in t:
+        return ("_setup_floor_line", t)
 
     # **Read:** … / **Trigger:** … (when_to_enter)
     m = re.match(r"^\*\*([A-Za-z][\w ]*):\*\*\s*(.+)$", t)
@@ -280,6 +343,14 @@ def _parse_cards(
             "trigger": None,
             "earnings": None,
             "deferred_note": None,
+            # Setup Grade (George 2026-08-17: "Setups I have to have a
+            # grade") — extracted from the report's own grade lines;
+            # None/False when the card is ungraded (rule #19).
+            "setup_grade": None,
+            "setup_grade_score": None,
+            "setup_grade_prime": False,
+            "setup_grade_below_floor": False,
+            "setup_grade_note": None,
             "extras": [],
         }
         i += 1
@@ -301,6 +372,10 @@ def _parse_cards(
             field, val = _classify_bullet(bm.group(1))
             if field == "_metrics_line":
                 card["metrics"] = _parse_metrics(val)
+            elif field == "_setup_grade_line":
+                _apply_grade_line(card, val)
+            elif field == "_setup_floor_line":
+                _apply_floor_line(card, val)
             elif field in card and card[field] is None:
                 card[field] = val
             elif field in card:
@@ -440,6 +515,28 @@ def parse_report(text: str, kind: ReportKind) -> dict[str, Any]:
 
 
 # ─── Summary helpers for the page header strip ────────────────────────────
+
+
+def grade_sort_rank(card: dict[str, Any]) -> int:
+    """Ordering rank for grade-first sorting: A → A- → B → C → D →
+    blocked (—) → ungraded last. Unknown letters sort with ungraded."""
+    letter = card.get("setup_grade") if isinstance(card, dict) else None
+    if letter is None:
+        return 7
+    return _GRADE_RANK.get(str(letter), 7)
+
+
+def sort_cards_grade_first(report: dict[str, Any]) -> dict[str, Any]:
+    """Sort assist (George 2026-08-17: "it's really hard to know which
+    one is a good one, which one is not") — within each section, cards
+    order grade-first (A→D, then blocked, then ungraded). Stable: the
+    report's own order (alphabetical by ticker) is the tiebreak. Theme
+    sections themselves keep their order."""
+    for sec in report.get("sections") or []:
+        cards = sec.get("cards")
+        if isinstance(cards, list) and len(cards) > 1:
+            cards.sort(key=grade_sort_rank)
+    return report
 
 
 def summary_counts(report: dict[str, Any]) -> dict[str, int]:

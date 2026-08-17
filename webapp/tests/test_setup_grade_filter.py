@@ -1,9 +1,10 @@
 """Setup Grade filter + badge — drift guard, tokens, route smoke, JS contract.
 
 George (2026-08-10): "We need a very clear message as to when I should get
-in on every transaction." The webapp surfaces the pipeline's side-aware
-Setup Grade as card badges plus 'CSP setup A/B' / 'CC setup A/B' filter
-chips next to the RSI zone bar. These tests pin: (a) the webapp NEVER
+in on every transaction." (2026-08-17: the grouped 'CSP setup A/B' chips
+became per-letter pills — see test_grade_letter_pills.py.) The webapp
+surfaces the pipeline's side-aware Setup Grade as card badges plus a
+filter bar next to the RSI zone bar. These tests pin: (a) the webapp NEVER
 redefines grading — letters come from the pipeline via the config bridge;
 (b) token/badge derivation from briefing-JSON shapes (new_ideas fields,
 strategy-upgrade fields, LTO trigger-reason notes); (c) the rendered pages
@@ -134,30 +135,40 @@ def test_badge_hard_block_is_red():
     assert "CC setup —" in b["label"]
 
 
-def test_filter_chips_humanized_no_raw_tokens():
+def test_filter_chips_are_per_letter_pills():
+    """George (2026-08-17): "I need to have a filter little pill that I
+    can click on so I can see A, B, C, D." The grouped 'CSP setup A/B'
+    chips are replaced by per-letter pills (All · 💎 Prime · A · B · C ·
+    D · ⛔ Blocked · Ungraded); the tooltips explain the reading guide
+    and carry the config-derived letter floors."""
     chips = setup_grade_ui.grade_filter_chips()
     grades = [c["grade"] for c in chips]
-    assert grades == ["all", "csp_good", "cc_good"]
+    assert grades == ["all", "prime", "a", "b", "c", "d", "blocked", "none"]
     labels = " ".join(c["label"] for c in chips)
-    assert "CSP setup A/B" in labels and "CC setup A/B" in labels
+    assert "💎 Prime" in labels and "⛔ Blocked" in labels
+    assert "Ungraded" in labels
     # titles carry the config-derived B floor, never a hardcoded number
     b_floor = setup_grade_ui.letters()["b"]
     assert any(f"{b_floor:.0f}/100" in c["title"] for c in chips)
+    # tooltips explain the guide: A/B = enter quality · C/D = wait
+    titles = " ".join(c["title"] for c in chips)
+    assert "A/B = enter quality" in titles and "C/D = wait" in titles
 
 
 # ── Route smoke — the briefing page renders the bar + attributes ─────────
 
 
 def test_briefing_page_renders_grade_filter_bar_with_counts(client):
+    """George (2026-08-17): per-letter pills [A] [B] [C] [D] replace the
+    grouped A/B chips on the briefing's Ideas + Strategy filter bars."""
     r = client.get(f"/briefing/{DATE}")
     assert r.status_code == 200
     body = r.text
     assert 'class="uc-sort grade-filter-bar"' in body
     assert 'data-grade-cards=".uc-card"' in body
-    assert 'data-grade="csp_good"' in body
-    assert 'data-grade="cc_good"' in body
+    for grade in ("prime", "a", "b", "c", "d", "blocked", "none"):
+        assert f'data-grade="{grade}"' in body, f"missing {grade} pill"
     assert '<span class="grade-count">' in body
-    assert "CSP setup A/B" in body
 
 
 def test_every_uc_card_carries_data_setup_grades(client):

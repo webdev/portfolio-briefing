@@ -2,6 +2,7 @@
 {% from "_macros/tech_card.html" import tech_card %}
 {% from "_macros/tech_legend.html" import tech_legend %}
 {% from "_macros/rsi_filter.html" import rsi_filter_bar %}
+{% from "_macros/setup_grade_filter.html" import setup_grade_filter_bar %}
 {% block title %}{{ report_title }} — {{ date }}{% endblock %}
 
 {% macro status_chip(status, tone, icon, label) %}
@@ -27,13 +28,21 @@
 {# RSI zone filter (George 2026-08-10): zones from the measured tech RSI
    first, else the card's own RSI metric chip; no RSI → 'unknown'. #}
 {% set rsi_badge = rsi_card_badge(tech, c) %}
-<article class="rep-card rep-card-{{ c.status_tone }}" id="card-{{ c.ticker }}" data-rsi-zones="{{ rsi_card_zones(tech, c) }}">
+{# Setup Grade (George 2026-08-17: "Setups I have to have a grade so I can
+   know whether it's an A entry or B or D") — letter chip from the report's
+   own grade lines; data-setup-grades feeds the per-letter pill filter.
+   Ungraded → no chip, token 'none' (rule #19). #}
+{% set sg_badge = setup_grade_report_badge(c) %}
+<article class="rep-card rep-card-{{ c.status_tone }}" id="card-{{ c.ticker }}" data-rsi-zones="{{ rsi_card_zones(tech, c) }}" data-setup-grades="{{ setup_grade_report_tokens(c) }}">
     <header class="rep-card-head">
         <div class="rep-card-head-left">
             {{ status_chip(c.status, c.status_tone, c.status_icon, c.status_label) }}
             <a class="rep-card-ticker no-popover" href="/positions/{{ c.ticker }}">{{ c.ticker }}</a>
             {% if c.is_etf %}<span class="rep-etf-pill">ETF</span>{% endif %}
             <span class="rep-card-price">{{ c.price }}</span>
+            {% if sg_badge %}
+                <span class="rep-badge rep-badge-{{ sg_badge.rep_tone }} rep-grade-chip" title="{{ sg_badge.title }}">{{ sg_badge.label }}</span>
+            {% endif %}
         </div>
         <div class="rep-card-head-right">
             {% if rsi_badge %}
@@ -249,6 +258,12 @@
        range ... at a glance." Chips + counts wired by app.js off the
        data-rsi-zones attribute on every rep-card. #}
     {{ rsi_filter_bar('report:' ~ (report_base_url | default('/report')), '.rep-card') }}
+
+    {# ─── Setup Grade per-letter pills (George 2026-08-17) ───
+       "I need to have a filter little pill that I can click on so I can
+       see A, B, C, D." Composes AND-wise with the RSI zone bar above
+       (class-based sg-hidden vs display toggling — app.js). #}
+    {{ setup_grade_filter_bar('report:' ~ (report_base_url | default('/report')), '.rep-card') }}
 
     {# ─── Actionable hero (Tier 1 UX simplification) ───
        Lead with actionable cards from ALL sections in a single row so

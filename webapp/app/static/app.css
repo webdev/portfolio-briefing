@@ -2943,6 +2943,16 @@ html[data-theme="solarized-light"] .tech-card {
 .sg-hidden { display: none !important; }
 .uc-grade-badge { border: 1px dashed currentColor; font-weight: 600; white-space: nowrap; }
 
+/* Prominent Setup Grade letter chip on rep-cards (George 2026-08-17:
+   "Setups I have to have a grade so I can know whether it's an A entry
+   or B or D"). Tones reuse the theme-token .rep-badge-* recipes
+   (WCAG-safe across themes) — this rule only adds weight/size. */
+.rep-grade-chip {
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
 /* ─── Card hierarchy v2 (George 2026-08-13) ───
    "unified cards are hard to read now. I don't even know what to pay
    attention to... It just doesn't feel very actionable."

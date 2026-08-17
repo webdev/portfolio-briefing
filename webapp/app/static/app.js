@@ -192,6 +192,18 @@
                 var show = active.some(function (g) { return gs.indexOf(g) !== -1; });
                 c.classList.toggle("sg-hidden", !show);
             });
+            // Report pages: hide sections/hero the grade filter emptied.
+            // Class-based (sg-hidden) so it never fights the RSI engine's
+            // style.display section toggle — the two compose AND-wise.
+            scope.querySelectorAll(".rep-section, .rep-actionable-hero").forEach(function (sec) {
+                var all = Array.prototype.slice.call(sec.querySelectorAll(".rep-card"));
+                if (!all.length) return;
+                var visible = all.filter(function (c) {
+                    return !c.classList.contains("sg-hidden")
+                        && (c.style.display || "") !== "none";
+                }).length;
+                sec.classList.toggle("sg-hidden", visible === 0);
+            });
             bar.querySelectorAll(".grade-filter-chip").forEach(function (btn) {
                 var grade = btn.getAttribute("data-grade");
                 var on = grade === "all" ? active.length === 0 : active.indexOf(grade) !== -1;

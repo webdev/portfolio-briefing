@@ -41,6 +41,16 @@ def _merge_cards(cand_card: dict, wte_card: dict | None) -> dict:
         if wte_card.get(field):
             merged[field] = wte_card[field]
 
+    # Setup Grade fields move as ONE block (letter + score + prime +
+    # below-floor + note stay consistent — never a candidates 💎 PRIME
+    # flag beside a WTE letter). Prefer WTE (the fresher entry-focused
+    # doc, same grader pipeline-side); a WTE card without a grade never
+    # erases the candidates grade (rule #19).
+    if wte_card.get("setup_grade"):
+        for field in ("setup_grade", "setup_grade_score", "setup_grade_prime",
+                      "setup_grade_below_floor", "setup_grade_note"):
+            merged[field] = wte_card.get(field)
+
     # Merge extras + badges
     merged["extras"] = (cand_card.get("extras") or []) + (wte_card.get("extras") or [])
     cand_flags = cand_card.get("flags") or {}
@@ -187,6 +197,9 @@ def build_setups(date: str) -> dict[str, Any]:
     # Capacity + summary — prefer the WTE side (it's the entry-focused doc)
     capacity = (wte.get("capacity") or cand.get("capacity"))
     summary = (wte.get("summary") or cand.get("summary"))
+
+    # Sort assist (George 2026-08-17) — grade-first within each section.
+    report_parser.sort_cards_grade_first({"sections": sections})
 
     return {
         "capacity": capacity,
