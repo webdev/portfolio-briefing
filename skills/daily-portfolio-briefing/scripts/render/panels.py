@@ -1709,12 +1709,15 @@ _NUMBERED_ITEM_RE = re.compile(r"^\s{0,3}\d+\.\s")
 # Capacity-gated planning-card marker (hard rule #41's tag) — a numbered
 # item whose block carries it is DEFERRED, not executable today.
 _DEFERRED_CAPACITY_RE = re.compile(r"⏸ Deferred \(capacity gated\)")
-# HOLD-class headlines (HOLD THROUGH EARNINGS / HOLD — GTC / 🏇 RIDE) — not
-# order tickets; they sort BELOW executable actions, ABOVE deferred cards
+# HOLD-class headlines (HOLD THROUGH EARNINGS / HOLD — GTC / 🏇 RIDE / 🔧
+# OPTIONAL willing-owner credit extension, rule #51) — not order tickets;
+# they sort BELOW executable actions, ABOVE deferred cards
 # (2026-08-18 bug: "1. HOLD THROUGH EARNINGS IREN … 3. 🚨 URGENT — EXECUTE
-# ROLL NOK" put the only executable item LAST).
+# ROLL NOK" put the only executable item LAST; same-day NOK follow-up:
+# "Why should I roll Nokia if it's in December?" — the downgraded 🔧
+# OPTIONAL roll is a no-action-required item and counts under "+N hold").
 _HOLD_CLASS_HEAD_RE = re.compile(
-    r"^\s{0,3}\d+\.\s+\S*\s*\*\*(?:HOLD\b|RIDE\b)")
+    r"^\s{0,3}\d+\.\s+\S*\s*\*\*(?:HOLD\b|RIDE\b|OPTIONAL\b)")
 # 🚨 URGENT executable items rank first within the executable group.
 _URGENT_HEAD_RE = re.compile(r"^\s{0,3}\d+\.\s+[^\n]*🚨")
 
@@ -3467,14 +3470,75 @@ def render_action_list(
 
             # Task #40 fix 8: strike-tested urgency carries its 🚨 branding
             # into the composed two-leg ticket.
-            _urgent_prefix = ("🚨 **URGENT — EXECUTE ROLL**"
-                              if rev.get("_urgent_strike_tested")
-                              else "**EXECUTE ROLL**")
+            # ── Willing-owner downgrade (rule #51 extension, NOK 2026-08-18:
+            # "Why should I roll Nokia if it's in December? It's kind of
+            # hard."). The strike-tested URGENT tier protects unwilling
+            # owners; for a WILLING owner (deep assignment-basis cushion, no
+            # near event, long DTE) a same-strike/down CREDIT roll is an
+            # optional income optimization, not urgent. Risk-driven cells
+            # (loss-stop / crash / tail-risk / earnings) never downgrade;
+            # the full combo ticket stays on the card (rule #24). Config
+            # roll.willing_owner_downgrade — code default OFF (legacy).
+            _wo = None
+            try:
+                from analysis.willing_owner import (
+                    OPTIONAL_PREFIX as _WO_PREFIX,
+                    assess_willing_owner_roll as _wo_assess,
+                    format_willing_owner_line as _wo_line,
+                )
+                _d2e_wo = rev.get("days_to_earnings")
+                if _d2e_wo is None:
+                    _d2e_wo = _days_to_earnings(
+                        rev.get("underlying") or contract.split("_")[0])
+                _wo = _wo_assess(
+                    option_type=opt_type,
+                    strike=cur_strike,
+                    entry_premium=entry,
+                    spot=underlying_spot,
+                    dte=rev.get("days_to_expiry"),
+                    days_to_earnings=_d2e_wo,
+                    matrix_cell_id=rev.get("matrix_cell_id"),
+                    credit_dollars=credit,
+                    new_strike=new_strike,
+                    config=config_local,
+                )
+            except Exception:
+                _wo = None
+            if _wo is not None:
+                _urgent_prefix = _WO_PREFIX
+            else:
+                _urgent_prefix = ("🚨 **URGENT — EXECUTE ROLL**"
+                                  if rev.get("_urgent_strike_tested")
+                                  else "**EXECUTE ROLL**")
             items.append(
                 f"{n}. {_urgent_prefix} {contract} — {roll_label}: {credit_label} "
                 f"({int(qty)} spreads @ ${spread_bid:.2f}/share)"
             )
-            if rev.get("_urgent_strike_tested"):
+            if _wo is not None:
+                # Honest willing-owner framing — measured numbers only
+                # (rule #19): basis, cushion, credit, extension, 50% GTC.
+                try:
+                    _wo_exp_month = datetime.strptime(
+                        str(cur_exp)[:10], "%Y-%m-%d").strftime("%b")
+                except (ValueError, TypeError):
+                    _wo_exp_month = None
+                items.append(
+                    "   - **Why (optional):** "
+                    + _wo_line(_wo, credit, dte_added,
+                               exp_month=_wo_exp_month))
+                # The credit-window state line stays — the honest "this
+                # offer expires" context on an otherwise-optional roll.
+                _cw_line_wo = None
+                try:
+                    from analysis.credit_windows import format_credit_window_line
+                    _cw_line_wo = format_credit_window_line(
+                        (((snapshot_data or {}).get("_credit_windows") or {})
+                         .get(contract)) or {})
+                except Exception:
+                    _cw_line_wo = None
+                if _cw_line_wo:
+                    items.append(f"   - {_cw_line_wo}")
+            elif rev.get("_urgent_strike_tested"):
                 # Condition-specific urgency rationale (task #40 fix 3):
                 # the strike-test trigger, verbatim from the guardrail —
                 # measured δ / capture / DTE — never the earnings template.
@@ -3984,6 +4048,10 @@ def render_action_list(
             _rec_label = (f"🚨 **URGENT — {rec}**"
                           if rev.get("_urgent_strike_tested")
                           else f"**{rec}**")
+            # Willing-owner downgrade (rule #51 extension) needs the REAL
+            # net credit, which is only measured after the live STO quote
+            # below — remember the headline index so it can be patched.
+            _wo4_head_idx = len(items)
             items.append(f"{n}. {_rec_label} {contract} — roll {direction}")
             if rev.get("_urgent_strike_tested"):
                 items.append(
@@ -4120,6 +4188,69 @@ def render_action_list(
                         _cl_line_b4 = None
                     if _cl_line_b4:
                         items.append(f"   - {_cl_line_b4}")
+                # ── Willing-owner downgrade (rule #51 extension, NOK
+                # 2026-08-18) — block #4 parity with block #3: with the
+                # REAL net measured from the live chain, a same-strike/
+                # down CREDIT roll on a willing-owner put (deep basis
+                # cushion, long DTE, no near earnings, non-risk cell)
+                # downgrades to 🔧 OPTIONAL. The full two-leg ticket stays
+                # (rule #24); roll-UPs and debit nets never downgrade.
+                _wo4 = None
+                if not up:
+                    try:
+                        from analysis.willing_owner import (
+                            OPTIONAL_PREFIX as _WO_PREFIX4,
+                            assess_willing_owner_roll as _wo_assess4,
+                            format_willing_owner_line as _wo_line4,
+                        )
+                        _d2e_wo4 = rev.get("days_to_earnings")
+                        if _d2e_wo4 is None:
+                            _d2e_wo4 = _days_to_earnings(_und_g)
+                        _wo4 = _wo_assess4(
+                            option_type=_otype,
+                            strike=_strike_g,
+                            entry_premium=rev.get("entry_price"),
+                            spot=_spot_g,
+                            dte=rev.get("days_to_expiry"),
+                            days_to_earnings=_d2e_wo4,
+                            matrix_cell_id=rev.get("matrix_cell_id"),
+                            credit_dollars=_net,
+                            new_strike=sto_strike,
+                            config=(snapshot_data or {}).get(
+                                "_config", {}) or {},
+                        )
+                    except Exception:
+                        _wo4 = None
+                if _wo4 is not None:
+                    _ext4 = None
+                    try:
+                        _cur_dte4 = int(rev.get("days_to_expiry") or 0)
+                        if sto_dte is not None and _cur_dte4 > 0 \
+                                and int(sto_dte) > _cur_dte4:
+                            _ext4 = int(sto_dte) - _cur_dte4
+                    except (TypeError, ValueError):
+                        _ext4 = None
+                    try:
+                        _wo4_month = datetime.strptime(
+                            str(rev.get("expiration") or "")[:10],
+                            "%Y-%m-%d").strftime("%b")
+                    except (ValueError, TypeError):
+                        _wo4_month = None
+                    items[_wo4_head_idx] = (
+                        f"{n}. {_WO_PREFIX4} {contract} — roll {direction}")
+                    # A downgraded card must not lead with urgency — the
+                    # strike-test rationale stays as context (one voice).
+                    for _j in range(_wo4_head_idx + 1, len(items)):
+                        if items[_j].startswith("   - **Why (urgent):**"):
+                            items[_j] = items[_j].replace(
+                                "**Why (urgent):**",
+                                "**Context (strike test):**", 1)
+                            break
+                    items.insert(
+                        _wo4_head_idx + 1,
+                        "   - **Why (optional):** "
+                        + _wo_line4(_wo4, _net, _ext4,
+                                    exp_month=_wo4_month))
             else:
                 items.append(
                     f"   - **Order (two legs):** Buy-to-Close {int(qty)}× {contract} (current mid "

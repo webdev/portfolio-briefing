@@ -349,6 +349,26 @@ roll:
   # clustered candidate is viable, the ticket renders the measured
   # "⚠ rolls INTO the … cluster" warning instead.
   cluster_avoidance_credit_tolerance: 0.20
+  # 2026-08-18 NOK (rule #51 extension). George, on the NOK 10-lot card
+  # "🚨 URGENT — EXECUTE ROLL NOK_PUT_11_20261218 — Calendar roll... +$115
+  # net credit" (122 DTE, assignment basis $8.44 vs spot $10.29): "Why
+  # should I roll Nokia if it's in December? It's kind of hard." The
+  # strike-tested URGENT roll tier protects UNWILLING owners; for a WILLING
+  # owner (deep basis cushion, no near event, long DTE) a same-strike/down
+  # CREDIT roll is an optional income optimization, not urgent — the
+  # headline downgrades to "🔧 OPTIONAL — credit extension (no action
+  # required)" with the full combo ticket retained (rule #24), sorted with
+  # the hold-class group and counted under "+N hold". Risk-driven rolls
+  # (loss-stop / crash / tail-risk / earnings-window / DEFENSIVE cells)
+  # are NEVER downgraded. min_cushion_pct is 15, not 20: the motivating
+  # NOK card measures (10.29 − 8.44) / 10.29 = 18.0% — a 20 floor would
+  # have left the very card that prompted the rule urgent. Code default
+  # OFF (legacy byte-identical); this config opts in.
+  willing_owner_downgrade:
+    enabled: true
+    min_cushion_pct: 15
+    min_dte: 60
+    earnings_clear_days: 21
 
 # Task #43 defect 3 (2026-07-31, AMD $420P): standing hold directives whose
 # release conditions predate an earnings print are PAUSED (not deleted) when
