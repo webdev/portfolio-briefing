@@ -392,7 +392,13 @@ def test_roll_sto_leg_prefers_monthly_within_cap():
     # Legacy same_next picks the immediate next listing (a weekly).
     assert legacy_next[0].instruction["sell_expiration"] == exps[1].isoformat()
 
-    monthly_iso = next(e for e in exps if mod._is_monthly_expiration(e.isoformat()))
+    # Skip the CURRENT expiration (exps[0]) when picking the expected snap
+    # target: when today+3 itself lands on a 3rd Friday (observed
+    # 2026-08-18 → current exp Aug 21 IS a monthly), the first monthly in
+    # the chain is the leg being closed, not the OUT-leg target — production
+    # correctly snapped to the NEXT monthly and the old picker flagged it.
+    monthly_iso = next(e for e in exps[1:]
+                       if mod._is_monthly_expiration(e.isoformat()))
     preferred = mod.enumerate_roll_candidates(
         position, chain,
         {"expiration_policy": {"prefer_monthly": True},
@@ -407,7 +413,10 @@ def test_roll_sto_monthly_snap_respects_tenor_cap():
     today = date.today()
     exps, chain = _roll_chain(today)
     mod = _wheel_roll_target()
-    monthly_iso = next(e for e in exps if mod._is_monthly_expiration(e.isoformat()))
+    # Same current-exp skip as above — on a date where exps[0] is itself a
+    # 3rd Friday the old picker made monthly_ext 0 and the cap negative.
+    monthly_iso = next(e for e in exps[1:]
+                       if mod._is_monthly_expiration(e.isoformat()))
     monthly_ext = (monthly_iso - today).days - 3  # extension over current DTE 3
     position = {
         "daysToExpiry": 3, "strikePrice": 100.0, "entryPrice": 2.0,

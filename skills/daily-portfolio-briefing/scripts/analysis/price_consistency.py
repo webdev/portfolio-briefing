@@ -170,12 +170,40 @@ _RSI_CONTEXT_RES = [
     re.compile(r"`([A-Z][A-Z0-9.]{0,6})`"),
     re.compile(r"\b([A-Z][A-Z0-9.]{0,5})_(?:PUT|CALL)(?=_|\b)"),
     re.compile(r"^#{2,4}\s+([A-Z][A-Z0-9.]{0,6})\s+—"),
+    # 2026-08-18 misattribution fix: the equity / market-overview rows
+    # ("- **META** $551.51 — RSI 38", "- **SOXX** @ $528.08 — … RSI 47")
+    # carry a BOLD ticker followed by a price — without this marker the
+    # context lingered on the previous name and the sweep attributed
+    # MSFT/NVDA/PLTR/SPY/VOO reads to META ("META — RSI 38 vs RSI 66").
+    re.compile(r"\*\*([A-Z][A-Z0-9.]{0,6})\*\*\s+@?\s*\$[\d,]"),
+    # New-open card headers carry a BARE ticker after the bold verb
+    # ("**CSP — PAID-TO-WAIT** VRT — sell $240P", "⏸ **CSP — PAID-TO-WAIT
+    # (wait)** PLTR — sell $150P") — without this marker the PLTR wait
+    # card's RSI 66 lines were attributed to the previous item's NOK
+    # ("NOK — RSI 37 vs RSI 66 (29 pts apart)").
+    re.compile(r"\*\*\s+([A-Z][A-Z0-9.]{0,6})\s+—\s+(?:sell|buy)\b"),
 ]
+
+# Bold-uppercase tokens that are verbs/labels, never tickers — guard the
+# bold-context patterns above against false positives.
+_RSI_CONTEXT_STOPWORDS = frozenset({
+    "CSP", "CC", "RSI", "PUT", "CALL", "HOLD", "CLOSE", "ROLL", "TRIM",
+    "SELL", "BUY", "EXIT", "WAIT", "WATCH", "URGENT", "GTC", "BTC", "STO",
+    "LEAP", "EV", "NLV", "OTM", "ITM", "ATM", "DTE", "IV", "IVR", "RVR",
+    "FV", "LB", "HB", "MV", "TOTAL", "CASH", "WHY", "ORDER",
+})
 
 # Lowercased tokens marking a read that explicitly disclaims its own
 # freshness (the vintage guard's annotations) — exempt from the sweep.
 _RSI_EXEMPT_TOKENS = ("pre-gap", "unverified", "stale", "recomputed",
                       "pre-move", "snapshot rsi")
+
+# Historical entry-grade annotation ("🎓 entry D (43, RSI 37 prime) · Aug 3")
+# — the parenthetical RSI is the ENTRY-time value (dated, historical by
+# design), not a second voice on today's read. The fragment is stripped
+# before value extraction so a legitimate current-RSI on the same line
+# ("… · RSI 42 · … · 🎓 entry D (25) · Aug 12") still sweeps.
+_RSI_ENTRY_GRADE_RE = re.compile(r"🎓 entry [A-F][+\-]?\s*\([^)]*\)")
 
 
 def rsi_mentions(md: str) -> dict[str, list[tuple[float, str]]]:
@@ -193,9 +221,12 @@ def rsi_mentions(md: str) -> dict[str, list[tuple[float, str]]]:
             continue
         tk_on_line = None
         for rx in _RSI_CONTEXT_RES:
-            m = rx.search(line)
-            if m:
-                tk_on_line = m.group(1).upper()
+            for tok in rx.findall(line):
+                tok = tok.upper()
+                if tok not in _RSI_CONTEXT_STOPWORDS:
+                    tk_on_line = tok
+                    break
+            if tk_on_line:
                 break
         if stripped.startswith("#"):
             context = tk_on_line     # a heading sets or clears the context
@@ -209,6 +240,9 @@ def rsi_mentions(md: str) -> dict[str, list[tuple[float, str]]]:
         low = line.lower()
         if any(t in low for t in _RSI_EXEMPT_TOKENS):
             continue                 # the read disclaims itself already
+        # Strip historical entry-grade fragments — their RSI is the dated
+        # ENTRY-time value, not today's read (never a second voice).
+        line = _RSI_ENTRY_GRADE_RE.sub("", line)
         for m in _RSI_VALUE_RE.finditer(line):
             try:
                 val = float(m.group(1))

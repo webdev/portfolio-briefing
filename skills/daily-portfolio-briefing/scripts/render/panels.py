@@ -1701,12 +1701,22 @@ def _one_voice_take_profit_lines(n: int, contract: str, rev: dict, anatomy,
 # rewrites the header line to match. Fail-open: any shape it doesn't
 # recognize leaves the markdown untouched.
 _ACTION_COUNT_RE = re.compile(
-    r"^(\*\*Action Items:\*\*)\s*\d+(?:\s*\(\+\d+ deferred\))?\s*$", re.M)
+    r"^(\*\*Action Items:\*\*)\s*\d+"
+    r"(?:\s*\((?:\+\d+ (?:hold|deferred))(?:,\s*\+\d+ (?:hold|deferred))*\))?"
+    r"\s*$", re.M)
 _ACTION_SECTION_HEAD_RE = re.compile(r"^##\s+Today's Action List", re.M)
 _NUMBERED_ITEM_RE = re.compile(r"^\s{0,3}\d+\.\s")
 # Capacity-gated planning-card marker (hard rule #41's tag) — a numbered
 # item whose block carries it is DEFERRED, not executable today.
 _DEFERRED_CAPACITY_RE = re.compile(r"⏸ Deferred \(capacity gated\)")
+# HOLD-class headlines (HOLD THROUGH EARNINGS / HOLD — GTC / 🏇 RIDE) — not
+# order tickets; they sort BELOW executable actions, ABOVE deferred cards
+# (2026-08-18 bug: "1. HOLD THROUGH EARNINGS IREN … 3. 🚨 URGENT — EXECUTE
+# ROLL NOK" put the only executable item LAST).
+_HOLD_CLASS_HEAD_RE = re.compile(
+    r"^\s{0,3}\d+\.\s+\S*\s*\*\*(?:HOLD\b|RIDE\b)")
+# 🚨 URGENT executable items rank first within the executable group.
+_URGENT_HEAD_RE = re.compile(r"^\s{0,3}\d+\.\s+[^\n]*🚨")
 
 
 def _split_action_section(markdown: str):
@@ -1740,7 +1750,19 @@ def _split_action_section(markdown: str):
             if cur is not None:
                 blocks.append(cur)
             cur = [ln]
-        elif cur is not None and ln.startswith("### "):
+        elif cur is not None and ln.strip() and not ln[:1].isspace():
+            # A non-blank COLUMN-0 line that isn't a numbered item ends the
+            # items region (numbered-card sub-lines are always indented).
+            # 2026-08-18 bug: the old parser only terminated at "### ", so
+            # the trailing un-numbered "⏸ CSPs — wait for a pullback"
+            # subsection (whose PLTR card carries the '⏸ Deferred (capacity
+            # gated)' tag) was absorbed into the LAST numbered block — the
+            # 🚨 URGENT NOK roll classified as deferred and sorted below a
+            # planning card, and the count read "1 (+2 deferred)".
+            # Trailing blank lines of the last card move to the tail so the
+            # card doesn't drag the separator along when reordered.
+            while cur and not cur[-1].strip():
+                tail.append(cur.pop())
             blocks.append(cur)
             cur = None
             in_tail = True
@@ -1754,13 +1776,28 @@ def _split_action_section(markdown: str):
     return before, preamble, blocks, tail, after
 
 
+def _classify_action_block(block: list[str]) -> str:
+    """Classify a numbered action-list block: "deferred" (carries the
+    rule-#41 capacity tag), "hold" (HOLD/RIDE headline — a conscious
+    non-action, not an order ticket), or "executable"."""
+    if _DEFERRED_CAPACITY_RE.search("\n".join(block)):
+        return "deferred"
+    if block and _HOLD_CLASS_HEAD_RE.match(block[0]):
+        return "hold"
+    return "executable"
+
+
 def sort_deferred_actions(markdown: str) -> str:
-    """Sort capacity-gated / deferred planning cards BELOW executable
-    actions in the Action List, renumbering (2026-08-10 bug 4: the digest's
-    action #1 was '**CSP — PAID-TO-WAIT** VRT … ⏸ Deferred (capacity
-    gated)' — a non-executable planning card ranked ABOVE the executable
-    CLOSE RDDT). Stable within each group; the deferred cards stay fully
-    visible (rule #24/#41). Fail-open on any unrecognized shape."""
+    """Sort the Action List: executable actions first (🚨 URGENT at the
+    top), then HOLD-class items (HOLD THROUGH EARNINGS / GTC holds / 🏇
+    rides), then capacity-gated deferred planning cards — renumbering
+    (2026-08-10 bug 4: the digest's action #1 was '**CSP — PAID-TO-WAIT**
+    VRT … ⏸ Deferred (capacity gated)' — a non-executable planning card
+    ranked ABOVE the executable CLOSE RDDT; 2026-08-18: '1. HOLD THROUGH
+    EARNINGS IREN, 2. ⏸ CSP PAID-TO-WAIT VRT, 3. 🚨 URGENT — EXECUTE ROLL
+    NOK' sorted the ONLY executable item LAST, below a deferred planning
+    card). Stable within each group; deferred cards stay fully visible
+    (rule #24/#41). Fail-open on any unrecognized shape."""
     try:
         parts = _split_action_section(markdown or "")
         if parts is None:
@@ -1769,12 +1806,17 @@ def sort_deferred_actions(markdown: str) -> str:
         if len(blocks) < 2:
             return markdown
         executable = [b for b in blocks
-                      if not _DEFERRED_CAPACITY_RE.search("\n".join(b))]
+                      if _classify_action_block(b) == "executable"]
+        hold = [b for b in blocks if _classify_action_block(b) == "hold"]
         deferred = [b for b in blocks
-                    if _DEFERRED_CAPACITY_RE.search("\n".join(b))]
-        if not deferred or len(executable) == len(blocks):
+                    if _classify_action_block(b) == "deferred"]
+        # 🚨 URGENT executables rank first (stable within urgent/non-urgent).
+        executable = ([b for b in executable if _URGENT_HEAD_RE.match(b[0])]
+                      + [b for b in executable
+                         if not _URGENT_HEAD_RE.match(b[0])])
+        reordered = executable + hold + deferred
+        if reordered == blocks:
             return markdown
-        reordered = executable + deferred
         out_blocks: list[str] = []
         for i, b in enumerate(reordered, 1):
             first = re.sub(r"^(\s{0,3})\d+\.", rf"\g<1>{i}.", b[0], count=1)
@@ -1808,11 +1850,14 @@ def sync_action_item_count(markdown: str) -> str:
         if parts is None:
             return markdown
         _, _, blocks, _, _ = parts
-        deferred = sum(1 for b in blocks
-                       if _DEFERRED_CAPACITY_RE.search("\n".join(b)))
-        executable = len(blocks) - deferred
-        label = (f"{executable} (+{deferred} deferred)" if deferred
-                 else f"{executable}")
+        kinds = [_classify_action_block(b) for b in blocks]
+        deferred = kinds.count("deferred")
+        hold = kinds.count("hold")
+        executable = kinds.count("executable")
+        segments = ([f"+{hold} hold"] if hold else []) \
+            + ([f"+{deferred} deferred"] if deferred else [])
+        label = f"{executable}" + (f" ({', '.join(segments)})" if segments
+                                   else "")
         return _ACTION_COUNT_RE.sub(rf"\1 {label}", markdown, count=1)
     except Exception:  # noqa: BLE001 — cosmetic sync must never break the ship
         return markdown
