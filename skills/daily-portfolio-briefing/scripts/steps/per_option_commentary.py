@@ -352,6 +352,29 @@ def render_watch_with_commentary(
             # 🚨-urgent check can inspect it).
             commentary = generate_commentary(review, snapshot_data, equity_reviews)
 
+            # Watch-menu trigger gate (George 2026-08-21: "Sometimes I see
+            # recommendations way early when I'm out of the money."). The
+            # priced ROLL ANALYSIS table renders only when the position's
+            # roll machinery is actually engaged (strike tested / live
+            # action / urgent item / advisor-recommended roll / closing
+            # credit window). Config roll.watch_menu_on_trigger_only —
+            # code default OFF = legacy byte-identical. Fail-open: any
+            # error → legacy (menu shown), never a hidden menu.
+            _menu_gate_on = False
+            _menu_trig = None
+            try:
+                from analysis import watch_menu_gate as _wmg
+                _menu_gate_on = _wmg.enabled(
+                    (snapshot_data or {}).get("_config") or {})
+                if _menu_gate_on:
+                    _menu_trig = _wmg.menu_trigger(
+                        review, commentary, snapshot_data)
+            except Exception:
+                _menu_gate_on, _menu_trig = False, None
+            _menu_untriggered = bool(
+                _menu_gate_on and _menu_trig is not None
+                and not _menu_trig.get("triggered"))
+
             # 🎓 Entry-grade token for this contract (George 2026-08-13).
             # One-liners carry the compact form only when a real grade
             # exists (no n/a clutter); full blocks always show the read,
@@ -492,6 +515,17 @@ def render_watch_with_commentary(
                             f"  • **⚖️ Verdict: HOLD_FOR_DECAY** — "
                             f"{_an.verdict_reason}"
                         )
+                    elif (_menu_untriggered and _an is not None
+                          and _an.verdict == "ROLL_DONT_CLOSE"):
+                        # One-voice (George 2026-08-21): a HOLD card with an
+                        # untested strike must not lead with "ROLL" — the
+                        # exit-cost read demotes to an informational note;
+                        # the ROLL-vs-close phrasing appears only when a
+                        # close/roll decision is actually live.
+                        from analysis.exit_cost import format_exit_cost_note
+                        _xc_note = format_exit_cost_note(_an)
+                        if _xc_note:
+                            lines.append(f"  • {_xc_note}")
                 except Exception:
                     pass
 
@@ -534,7 +568,25 @@ def render_watch_with_commentary(
 
             # NEW: Multi-candidate roll-analysis table from wheel-roll-advisor
             candidates = review.get("roll_candidates") or []
-            if candidates:
+            if candidates and _menu_untriggered:
+                # George 2026-08-21: "Sometimes I see recommendations way
+                # early when I'm out of the money." — the priced menu under
+                # an untriggered position reads like a recommendation.
+                # Replace it with ONE measured line that says exactly when
+                # the menu returns (rule #24 — nothing hidden; rule #19 —
+                # measured values only). menu_trigger fails OPEN on
+                # unmeasurable data, so this branch always has a measured
+                # moneyness or delta to show.
+                try:
+                    from analysis import watch_menu_gate as _wmg_nt
+                    _nt_line = _wmg_nt.not_triggered_line(
+                        review, snapshot_data)
+                except Exception:
+                    _nt_line = None
+                if _nt_line:
+                    lines.append("")
+                    lines.append(f"  {_nt_line}")
+            elif candidates:
                 rec_id = review.get("recommended_candidate_id")
                 if_anyway = review.get("if_rolling_anyway_candidate_id")
                 lines.append("")

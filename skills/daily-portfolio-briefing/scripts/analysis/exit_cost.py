@@ -492,6 +492,32 @@ def analyze_exit_cost(
     )
 
 
+def format_exit_cost_note(anatomy: ExitCostAnatomy) -> str | None:
+    """Demoted, no-action exit-cost read for an UNTRIGGERED HOLD card
+    (George 2026-08-21: "Sometimes I see recommendations way early when
+    I'm out of the money.").
+
+    On a position whose headline is plain HOLD with an untested strike,
+    a full-strength "⚖️ Verdict: ROLL, don't close" sentence reads like a
+    recommendation — one card, two voices. This note keeps the measured
+    exit-cost information (rule #19) without leading with ROLL: the
+    ROLL-vs-close phrasing appears only when a close/roll decision is
+    actually live. Returns None when the extrinsic is unmeasurable
+    (never a fabricated number)."""
+    try:
+        ext_total = float(anatomy.extrinsic_total)
+        mid = float(anatomy.btc_mid or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if mid <= 0:
+        return None
+    ext_pct = anatomy.extrinsic_per_share / mid * 100.0
+    return (
+        f"⚖️ exit-cost note: closing today would pay ${ext_total:,.0f} of "
+        f"extrinsic ({ext_pct:.0f}%); no action triggered"
+    )
+
+
 def spread_guidance(anatomy: ExitCostAnatomy, config: dict | None = None) -> str | None:
     """Wide-spread execution guidance, or None when the spread is fine."""
     c = _cfg(config)

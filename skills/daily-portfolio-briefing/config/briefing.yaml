@@ -369,6 +369,23 @@ roll:
     min_cushion_pct: 15
     min_dte: 60
     earnings_clear_days: 21
+  # George 2026-08-21: "Sometimes I see recommendations way early when I'm
+  # out of the money." The Watch panel used to render the full priced ROLL
+  # ANALYSIS candidate table under EVERY option position — including
+  # deep-OTM HOLDs whose own headline said "strike not genuinely tested
+  # (|δ| < 0.40) → HOLD" — which reads like a roll recommendation. With
+  # this flag the table renders ONLY when the position's roll machinery is
+  # actually engaged: strike tested (within 3% / measured |δ| ≥ 0.40), a
+  # live non-demoted advisor action, an 🚨 urgent item this cycle, the
+  # advisor's own table recommending a real roll, or a 🟡 CLOSING /
+  # debit-only credit window. Untriggered positions replace the table with
+  # ONE measured italic line saying exactly when the menu returns (rule
+  # #24 — nothing hidden). A "ROLL, don't close" exit-cost verdict on an
+  # untriggered HOLD demotes to "⚖️ exit-cost note: … no action triggered"
+  # (one card, one voice). Code default OFF (legacy byte-identical); this
+  # config opts in. Source: analysis/watch_menu_gate.py.
+  watch_menu_on_trigger_only:
+    enabled: true
 
 # Task #43 defect 3 (2026-07-31, AMD $420P): standing hold directives whose
 # release conditions predate an earnings print are PAUSED (not deleted) when

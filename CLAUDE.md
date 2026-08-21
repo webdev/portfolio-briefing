@@ -118,8 +118,33 @@ surfaces a roll ONLY when there's a genuine credit-positive roll-**UP** (higher
 strike). A same-strike calendar or "no good roll" case defers to HOLD — never
 render a same-strike re-cap labeled as up-and-out (the SMH/SOXX bug), and never
 surface EXECUTE ROLL when the advisor's `recommendedCandidateId` is `A`=HOLD (the
-SPY bug). Genuine ITM (spot at/through strike) still surfaces the roll. The Watch
-ROLL ANALYSIS table always shows the full candidate menu regardless.
+SPY bug). Genuine ITM (spot at/through strike) still surfaces the roll.
+
+**Watch ROLL ANALYSIS menu is trigger-gated (George 2026-08-21: "Sometimes I
+see recommendations way early when I'm out of the money.").** The old design
+("the Watch ROLL ANALYSIS table always shows the full candidate menu
+regardless") misled: a full priced roll menu under a deep-OTM HOLD whose own
+headline says "strike not genuinely tested (|δ| < 0.40) → HOLD" reads like an
+early roll recommendation. With `roll.watch_menu_on_trigger_only.enabled`
+(set in briefing.yaml; CODE default OFF = legacy always-show), the Watch
+panel renders the priced candidate table ONLY when the position's roll
+machinery is actually engaged: strike tested (moneyness within 3% / measured
+|δ| ≥ 0.40), a live non-demoted advisor action (URGENT / DEFENSIVE / EXECUTE
+ROLL / CLOSE — a rule-#3-gate- or churn-guard-demoted roll is NOT engaged),
+an 🚨 urgent item this cycle, the advisor's own table recommending a real
+roll (`recommendedCandidateId` ≠ A), or a 🟡 CLOSING / debit-only credit
+window. Untriggered positions replace the table with ONE measured italic
+line — e.g. "_roll menu: not triggered — spot 6.2% above strike, δ 0.29; the
+priced menu appears when the strike is tested (within 3% / δ ≥ 0.40)_" — so
+nothing is hidden (rule #24) and every number is the position's own measured
+data (rule #19; δ n/a when unmeasured). One-voice companion: a "ROLL, don't
+close" exit-cost verdict on an untriggered HOLD demotes to "⚖️ exit-cost
+note: closing today would pay $X of extrinsic (Y%); no action triggered" —
+the ROLL-vs-close phrasing appears only when a close/roll decision is
+actually live. Unmeasurable strike test (no spot AND no delta) fails OPEN:
+the menu is kept. Source: `analysis/watch_menu_gate.py` (single source of
+truth), wired in `steps/per_option_commentary.py`. Tests:
+`tests/test_watch_menu_gate.py`.
 
 **Advisor's `recommendedCandidateId` respects the tenor cap.** The
 `wheel-roll-advisor` (`advise.py`) calls its own `candidate_ranker` when picking
