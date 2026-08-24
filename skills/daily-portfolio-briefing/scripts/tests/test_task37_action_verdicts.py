@@ -95,6 +95,7 @@ def _mu_review():
         "underlying": "MU", "type": "PUT", "qty": -1,
         "strike": 950.0, "expiration": "2026-11-20",
         "entry_price": 220.0, "current_mid": 229.25, "days_to_expiry": 113,
+        "delta": -0.70,  # measured POSITION delta (broker positions payload)
         "recommendation": "ROLL_OUT_AND_DOWN",
         "matrix_cell_id": "PUT_NORMAL_ITM_NEUTRAL_ROLL_OUT",
         "roll_candidates": [
@@ -264,9 +265,13 @@ def test_delta_itm_label_uses_strike_vs_spot():
     no_ctx = _format_delta_line(-0.40)
     assert "ITM probability" in no_ctx
     assert "— ITM" not in no_ctx and "— OTM" not in no_ctx
-    # end-to-end: the MU render tags the $850P ITM (spot $835.83)
+    # end-to-end (2026-08-24 fix): the delta line carries the CURRENT
+    # position's measured delta labeled as the position ($950P, δ -0.70,
+    # ITM vs spot $835.83) — never the new STO leg's delta wearing the
+    # position's label; the STO leg's δ renders on the order line.
     md = _render([_mu_review()], _mu_snapshot())
-    assert "— ITM)" in md
+    assert "Position delta -0.70 (~70% ITM probability — ITM)" in md
+    assert "δ -0.40)." in md  # STO-leg δ labeled on the order line
 
 
 # ── Fix 4c/4d: sign- and side-aware Why/Gain text ──────────────────────────

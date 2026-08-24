@@ -367,10 +367,28 @@ def format_yield_line(yield_result: dict, prefix: str = "Yield") -> str:
             nc_bit = (f" over the +{int(nc_win)}d extension"
                       if nl_win and nc_win != nl_win
                       else f" over {int(nc_win)}d")
+        net_cd = yield_result.get("net_credit_dollars")
+        new_collat = yield_result.get("new_collateral") or 0
+        if net_cd is not None and net_cd < 0:
+            # DEBIT roll (2026-08-24 fix): annualizing a one-time debit
+            # over a short extension window produces absurd numbers —
+            # observed "net-cash -291.1% ann. on position over the +7d
+            # extension" on a $2,790 debit. A debit is a cost, not a
+            # yield stream: render the plain measured form (debit as a
+            # % of new collateral). Credits keep the annualized form.
+            if new_collat > 0:
+                net_bit = (f"net cost: ${abs(net_cd):,.0f} = "
+                           f"{abs(net_cd) / new_collat * 100:.1f}% of new "
+                           f"collateral")
+            else:
+                net_bit = f"net cost: ${abs(net_cd):,.0f}"
+        else:
+            net_bit = (f"net-cash {y['net_cash_yield_ann_pct']:+.1f}% "
+                       f"ann. on position{nc_bit}")
         line = (
             f"{prefix}: **{y['new_leg_yield_ann_pct']:.1f}%** ann. on new collateral "
             f"(${yield_result['new_collateral']:,.0f}){nl_bit}; "
-            f"net-cash {y['net_cash_yield_ann_pct']:+.1f}% ann. on position{nc_bit}."
+            f"{net_bit}."
         )
         if y.get("cap_buffer_pct") is not None:
             line += f" Cap buffer: {y['cap_buffer_pct']:+.1f}% above spot."

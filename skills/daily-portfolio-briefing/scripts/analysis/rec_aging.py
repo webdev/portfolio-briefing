@@ -554,6 +554,35 @@ def _urgency_class(block_text: str) -> int:
     return 1
 
 
+# Earnings-imminent CLOSE promotion window (2026-08-24 NVDA $260C bug: the
+# "+45% ($+1,925), earnings in 2 days" close ranked in the APPENDIX below
+# non-urgent closes — obligation × urgency alone let bigger, date-free
+# closes outrank a time-critical pre-print close).
+EARNINGS_IMMINENT_CLOSE_DAYS = 5
+
+
+def _is_earnings_imminent_close(block_text: str, kind: str | None) -> bool:
+    """True when the block is a CLOSE-family action whose underlying prints
+    within EARNINGS_IMMINENT_CLOSE_DAYS (measured 'earnings/prints in Nd'
+    text in the rendered block — never a guess). These promote ABOVE
+    non-urgent items in the sort so the headline cap can never bury a
+    pre-print close in the appendix."""
+    k = (kind or "").upper()
+    if "CLOSE" not in k and not k.startswith("TAKE_PROFIT"):
+        return False
+    for m in _EARNINGS_DAYS_RE.finditer(block_text):
+        # An affirmative-clearance mention ("Nd away (outside contract
+        # life)") is not a binary — the print lands after expiry.
+        if "outside contract life" in block_text[m.end():m.end() + 40]:
+            continue
+        try:
+            if int(m.group(1)) <= EARNINGS_IMMINENT_CLOSE_DAYS:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _obligation_at_risk(block_text: str, ident: str) -> float:
     """Dollar scale of the position the action concerns. Contract idents
     give strike × 100 (per-contract obligation — the reliable, deterministic
@@ -662,7 +691,8 @@ def apply_aging_to_action_items(items: list[str], aging_info: dict) -> list[str]
     ]
 
     # Annotate blocks + compute priority = obligation_at_risk × urgency_class
-    annotated: list[tuple[float, int, list[str]]] = []  # (priority, days, block)
+    # (imminent, priority, days, block)
+    annotated: list[tuple[int, float, int, list[str]]] = []
     for b, key in zip(blocks, block_keys):
         info = aged.get(key) if key else None
         days = int(info.get("days_flagged", 0) or 0) if info else 0
@@ -678,15 +708,20 @@ def apply_aging_to_action_items(items: list[str], aging_info: dict) -> list[str]
                 )
         block_text = "\n".join(b)  # un-annotated text (⏳ tag must not affect scoring)
         ident = (key or "").partition(":")[2]
+        kind = (key or "").partition(":")[0]
         priority = _obligation_at_risk(block_text, ident) * _urgency_class(block_text)
-        annotated.append((priority, days, block))
+        imminent = 1 if _is_earnings_imminent_close(block_text, kind) else 0
+        annotated.append((imminent, priority, days, block))
 
-    # Stable reorder: highest (obligation × urgency) first; staleness
-    # (days_flagged) is the tiebreaker, then the renderer's original order
-    # (which already encodes category priority). A stalled $4.7K roll must
-    # never outrank a loss-stopped $115K close just because it's older.
-    ordered = [blk for _p, _d, blk in
-               sorted(annotated, key=lambda t: (-t[0], -t[1]))]
+    # Stable reorder: earnings-imminent closes first (2026-08-24 NVDA $260C
+    # bug — a close with the print ≤5d away is date-certain and must rank
+    # above non-urgent take-profits, never in the appendix), then highest
+    # (obligation × urgency); staleness (days_flagged) is the tiebreaker,
+    # then the renderer's original order (which already encodes category
+    # priority). A stalled $4.7K roll must never outrank a loss-stopped
+    # $115K close just because it's older.
+    ordered = [blk for _i, _p, _d, blk in
+               sorted(annotated, key=lambda t: (-t[0], -t[1], -t[2]))]
 
     out: list[str] = []
     for i, blk in enumerate(ordered[:HEADLINE_CAP], start=1):

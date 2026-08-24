@@ -2769,6 +2769,34 @@ def render_action_list(
                         f"theta isn't worth carrying the gamma/gap risk for {dte}d more — "
                         f"close-at-50% rule (and stretch to ~30% for OTM/short-dated)."
                     )
+                # ── Earnings-imminent short-CALL close (2026-08-24 NVDA
+                # $260C): the card said only "45% captured with 88d still
+                # on the contract" while NVDA printed in 2 days — the
+                # ACTUAL urgency — and the item sat in the appendix below
+                # non-urgent closes. When the underlying prints inside the
+                # earnings-imminent window (≤5d) and before expiry, the
+                # close carries the earnings-aware rationale; the measured
+                # "prints in Nd" phrase also promotes the item in the
+                # action-sort's earnings-proximity key (rec_aging).
+                _ei_window = 5
+                try:
+                    _ei_window = int(
+                        ((snapshot_data or {}).get("_config", {}) or {})
+                        .get("earnings_imminent_close_days", 5))
+                except (TypeError, ValueError):
+                    _ei_window = 5
+                if ((rev.get("type") or "").upper() == "CALL"
+                        and not _print_imminent
+                        and _d2e_close is not None
+                        and 0 <= _d2e_close <= _ei_window
+                        and (not dte or _d2e_close <= int(dte))):
+                    _und_ei = (rev.get("underlying")
+                               or contract.split("_")[0])
+                    items.append(
+                        f"   - **Earnings-imminent:** {_und_ei} prints in "
+                        f"{_d2e_close}d — closing before the print locks "
+                        f"the gain and removes the call-away binary."
+                    )
                 items.append(
                     f"   - **Gain:** Locks ${pl_dollars:+,.0f} profit and {collateral_label}; "
                     f"redeploy that collateral into a fresh higher-premium opportunity."
@@ -3338,19 +3366,106 @@ def render_action_list(
                     _d2e_rc = None
                 if (_loss_frac is not None and _loss_frac <= _rc_max_loss
                         and _d2e_rc is not None and 0 < _d2e_rc <= 14):
+                    # ── Rule #51 precedence (2026-08-24 IREN $47P): the
+                    # willing-owner FORTRESS outranks CLOSE INTO RECOVERY on
+                    # a short put. Observed: "**CLOSE INTO RECOVERY**
+                    # IREN_PUT_47_20261218 — recovered to ~breakeven (+29.9%
+                    # of premium) before the Aug 27 print" while assignment
+                    # basis $28.36 sat 29.2% below spot $40.06 — at/above
+                    # the 25% earnings_hold_min_cushion_pct threshold that
+                    # had correctly rendered HOLD THROUGH EARNINGS three
+                    # days earlier (08-21, 31% cushion). George's doctrine
+                    # (rule #51): a ≥25% basis cushion holds THROUGH the
+                    # print; recovery-close remains the answer only BELOW
+                    # the cushion threshold. Cushion below threshold /
+                    # unmeasurable / config off → recovery close exactly as
+                    # today (rule #19 — no fabricated cushion ever holds
+                    # through a print).
+                    _und_rc = rev.get("underlying", contract.split("_")[0])
+                    _eh_rc = None
+                    if is_put:
+                        try:
+                            from analysis import momentum_hold as _mh_rc
+                            _eh_rc = _mh_rc.earnings_hold(
+                                rev, snapshot_data, config_local)
+                        except Exception:
+                            _eh_rc = None
+                    if _eh_rc:
+                        _eh_thr_rc = _eh_rc["threshold_pct"]
+                        _rem_rc = cur * 100.0 * qty
+                        _pl_rc = (entry - cur) * 100.0 * qty
+                        items.append(
+                            f"{n}. **HOLD THROUGH EARNINGS — willing owner** "
+                            f"{contract} — basis ${_eh_rc['basis']:.2f} is "
+                            f"{_eh_rc['cushion_pct']:.0f}% below spot "
+                            f"${_eh_rc['spot']:.2f}; a -{_eh_thr_rc:g}% "
+                            f"print still assigns above basis"
+                        )
+                        items.append(
+                            f"   - **Why:** willing-owner fortress — "
+                            f"assignment basis ${_eh_rc['basis']:.2f} "
+                            f"(strike ${cur_strike:g} − ${entry:.2f} "
+                            f"premium) sits {_eh_rc['cushion_pct']:.0f}% "
+                            f"below spot; even a -{_eh_thr_rc:g}% print on "
+                            f"{_und_rc} in {_d2e_rc}d still assigns above "
+                            f"basis. Remaining premium ${_rem_rc:,.0f} "
+                            f"stays yours if held; place NO GTC through "
+                            f"the print. (The roll path is earnings-blocked "
+                            f"either way.)"
+                        )
+                        items.append(
+                            f"   - **Counter-case (subordinate):** exit at "
+                            f"mid ${cur:.2f} ({-_loss_frac * 100:+.1f}% of "
+                            f"premium, ${_pl_rc:+,.0f}) before the "
+                            f"{_earn_pretty} print — take it only if you "
+                            f"are NOT a willing owner at basis "
+                            f"${_eh_rc['basis']:.2f}."
+                        )
+                        items.extend(_exit_cost_lines(
+                            rev, snapshot_data, equity_reviews, date_str,
+                            verdict_context=(
+                                f"resolved to HOLD THROUGH EARNINGS — "
+                                f"willing owner: basis cushion "
+                                f"{_eh_rc['cushion_pct']:.0f}% ≥ "
+                                f"{_eh_thr_rc:g}% threshold; the fortress "
+                                f"holds through the {_und_rc} print in "
+                                f"{_d2e_rc}d")))
+                        seen_contracts.add(contract)
+                        n += 1
+                        continue
                     _btc_cost_rc = cur * 100.0 * qty
-                    _pl_word = (f"{-_loss_frac * 100:+.1f}% of premium"
-                                if _loss_frac else "flat")
+                    _pl_dollars_rc = (entry - cur) * 100.0 * qty
+                    # Measured-capture wording (2026-08-24 fix: "recovered
+                    # to ~breakeven (+29.9% of premium)" — +29.9% captured
+                    # is NOT breakeven; state the measured capture, with the
+                    # profit dollars in the standard parseable form so the
+                    # Capital Plan and Money Plan derive the SAME number
+                    # (rule #19/#14 one-voice)).
+                    if _loss_frac < 0:
+                        _recov_word = (
+                            f"recovered to {-_loss_frac * 100:+.1f}% of "
+                            f"premium (${_pl_dollars_rc:+,.0f})")
+                    elif _loss_frac > 0:
+                        _recov_word = (
+                            f"recovered to ~breakeven "
+                            f"({-_loss_frac * 100:+.1f}% of premium, "
+                            f"${_pl_dollars_rc:+,.0f})")
+                    else:
+                        _recov_word = "recovered to flat"
+                    _exit_word = ("exiting flat removes the binary"
+                                  if _loss_frac >= 0 else
+                                  "exiting locks the gain and removes "
+                                  "the binary")
                     items.append(
                         f"{n}. **CLOSE INTO RECOVERY** {contract} — "
-                        f"recovered to ~breakeven ({_pl_word}) before the "
+                        f"{_recov_word} before the "
                         f"{_earn_pretty} print; buy-to-close {int(qty)}× "
                         f"limit ${cur:.2f} (≈ ${_btc_cost_rc:,.0f}), GTC"
                     )
                     items.append(
-                        f"   - **Why:** position recovered to ~breakeven "
-                        f"before the {_earn_pretty} print — exiting flat "
-                        f"removes the binary; re-enter post-print on your "
+                        f"   - **Why:** position {_recov_word} before the "
+                        f"{_earn_pretty} print — {_exit_word}; "
+                        f"re-enter post-print on your "
                         f"own terms. (The roll path is earnings-blocked; "
                         f"a ROLL-don't-close verdict optimizes premium "
                         f"mechanics, not event risk — event risk wins here.)"
@@ -3556,13 +3671,32 @@ def render_action_list(
                 if _cw_line_u:
                     items.append(f"   - {_cw_line_u}")
             items.append(f"   - {format_yield_line(roll_yield)}")
+            # STO-leg measured delta — labeled ON THE ORDER LINE where it
+            # belongs (2026-08-24 fix: the card's delta line rendered the
+            # NEW leg's δ wearing the POSITION's ITM-probability label —
+            # "Delta -0.08 (~8% ITM probability — OTM)" on a SOXX $520P
+            # $20 ITM whose true position delta was ~-0.63). Chain-sourced
+            # only; δ n/a when the chain carried none (rule #19 — never
+            # the moneyness heuristic on an order ticket).
+            _sto_delta_raw = (instruction or {}).get("sell_delta")
+            if _sto_delta_raw is None:
+                _sto_delta_raw = (instruction or {}).get("delta")
+            if _sto_delta_raw is None:
+                _sto_delta_raw = best.get("deltaChange")
+            try:
+                _sto_delta = (float(_sto_delta_raw)
+                              if _sto_delta_raw else None)
+            except (TypeError, ValueError):
+                _sto_delta = None
+            _sto_delta_bit = (f"; δ {_sto_delta:+.2f}"
+                              if _sto_delta is not None else "; δ n/a")
             # Order ticket — explicit two-leg combo
             items.append(
                 f"   - **Order:** Combo (calendar/diagonal) — Buy-to-Close {int(qty)}× "
                 f"{rev.get('underlying', contract.split('_')[0])} ${cur_strike:g}{opt_type[:1]} "
                 f"{cur_exp_pretty} (current mid ~${cur:.2f}); "
                 f"Sell-to-Open {int(qty)}× ${new_strike:g}{opt_type[:1]} "
-                f"{new_exp_pretty} (current bid ${new_bid:.2f} / mid ${new_mid:.2f} / ask ${new_ask:.2f})."
+                f"{new_exp_pretty} (current bid ${new_bid:.2f} / mid ${new_mid:.2f} / ask ${new_ask:.2f}{_sto_delta_bit})."
             )
             # Cluster warning — the chosen STO leg still lands on a
             # warning/critical put bucket (it was the only viable roll):
@@ -3666,56 +3800,32 @@ def render_action_list(
                 else:
                     items.append(f"   - **Earnings check:** ✅ next earnings {d2e_r}d away (outside contract life).")
 
-            # Delta of the new short (assignment probability). Fall back to a
-            # moneyness-based heuristic when the chain didn't return delta —
-            # but the heuristic MUST account for option type:
-            #   * CALL: spot > strike → ITM → delta near 1.0
-            #   * PUT:  spot > strike → OTM → delta near 0.0
-            # The previous version assumed call-style for both, which made
-            # 10%-OTM short puts (spot $210, strike $190) show as "delta 0.65,
-            # ITM" — completely wrong.
-            new_delta = (instruction or {}).get("sell_delta") or instruction.get("delta")
-            # MEASURED delta only (chain-sourced) — the moneyness heuristic
-            # below is a display approximation and must never feed the
-            # trade-validator's EV / P(assignment) math (rule #19).
-            measured_delta = new_delta if new_delta is not None else best.get("deltaChange")
+            # MEASURED delta only (chain-sourced) — feeds the
+            # trade-validator's EV / P(assignment) math (rule #19; never
+            # a heuristic).
+            measured_delta = _sto_delta
+
+            # Position delta — the CURRENT short leg's measured delta
+            # (broker/chain-sourced on the positions payload), with the
+            # ITM-probability label and the POSITION's strike for the
+            # ITM/OTM tag. 2026-08-24 fix: this line used to render the
+            # NEW STO leg's delta ($420P, -0.08) mislabeled as the
+            # position's ITM probability while the $520P sat $20 ITM
+            # (true position delta ~-0.63). Missing measured delta →
+            # omit the line, never a fabricated one (rule #19).
+            _pos_delta = rev.get("delta")
             try:
-                measured_delta = float(measured_delta) if measured_delta else None
+                _pos_delta = (float(_pos_delta)
+                              if _pos_delta is not None else None)
             except (TypeError, ValueError):
-                measured_delta = None
-            if new_delta is None and measured_delta is not None:
-                new_delta = measured_delta
-            if new_delta is None and underlying_spot and new_strike:
-                moneyness = underlying_spot / new_strike  # spot/strike
-                if opt_type == "PUT":
-                    # PUT: spot > strike means OTM (low |delta|)
-                    if moneyness >= 1.15:
-                        new_delta = -0.10
-                    elif moneyness >= 1.05:
-                        new_delta = -0.20
-                    elif moneyness >= 0.95:
-                        new_delta = -0.40
-                    elif moneyness >= 0.85:
-                        new_delta = -0.65
-                    else:
-                        new_delta = -0.85
-                else:
-                    # CALL: spot > strike means ITM (high delta)
-                    if moneyness < 0.85:
-                        new_delta = 0.10
-                    elif moneyness < 0.95:
-                        new_delta = 0.20
-                    elif moneyness < 1.05:
-                        new_delta = 0.40
-                    elif moneyness < 1.15:
-                        new_delta = 0.65
-                    else:
-                        new_delta = 0.85
-            delta_str = _format_delta_line(new_delta, opt_type,
-                                           strike=new_strike,
+                _pos_delta = None
+            delta_str = _format_delta_line(_pos_delta, opt_type,
+                                           strike=cur_strike,
                                            spot=underlying_spot)
             if delta_str:
-                items.append(f"   - {delta_str}")
+                items.append(
+                    "   - "
+                    + delta_str.replace("Delta", "Position delta", 1))
 
             # Account routing (rolls stay in the position's account)
             routing = _route_account(

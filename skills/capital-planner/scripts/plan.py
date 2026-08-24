@@ -694,10 +694,16 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
     # CLOSE patterns (whole CLOSE family — CLOSE, CLOSE_BEFORE_EARNINGS,
     # CLOSE_INTO_RECOVERY, CLOSE_WINNER, CLOSE_FOR_PROFIT, …)
     if _is_close_family(kind_raw):
-        # "+31% ($+107)" or "+39% captured ($+722)" — locked profit
-        pm = _re.search(r"\+(\d+)%(?:\s+\w+)?\s+\(\$\+([\d,]+)\)", combined)
+        # "+31% ($+107)" or "+39% captured ($+722)" or the CLOSE INTO
+        # RECOVERY form "+29.9% of premium ($+558)" — locked profit.
+        # 2026-08-24 bug: the recovery card's capture didn't parse and the
+        # plan rendered "CLOSE IREN — locks $+0" while the Money Plan
+        # banked the same close at ~$556 (rule #19/#14 one-voice — both
+        # surfaces must derive from the same measured capture).
+        pm = _re.search(r"\+([\d.]+)%(?:\s+\w+){0,2}\s+\(\$\+([\d,]+)\)",
+                        combined)
         if pm:
-            profit_pct = int(pm.group(1)) / 100.0
+            profit_pct = float(pm.group(1)) / 100.0
             profit_dollars = _money(pm.group(2))
         # "buy-to-close limit $36.84" / "buy-to-close at mid $11.40" —
         # per-share BTC cost; need contracts to scale
