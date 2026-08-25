@@ -59,7 +59,10 @@ def _team_payload():
             "ticker": "TEAM", "spot": 109.73, "rsi_14": 42, "iv_rank": 83,
             "sma_200": 108.0, "drawdown_pct": 37.7, "fivedayret_pct": 5.2,
             "verdict": "CSP ENTRY (independent setup)", "rationale": [],
-            "csp_entry": {"strike": 99, "mid": 6.25, "bid": 4.60, "ask": 7.90,
+            # bid/ask kept inside the spread-quality ceiling (2026-08-25
+            # HACK rule: spread > 40% of mid demotes the candidate) — these
+            # tests pin the PRICE-repricing behavior, not the spread gate.
+            "csp_entry": {"strike": 99, "mid": 6.25, "bid": 5.90, "ask": 6.60,
                           "expiration": "2026-09-11", "dte": 36},
         }]},
     }

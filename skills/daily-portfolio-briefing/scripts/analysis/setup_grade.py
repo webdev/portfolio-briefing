@@ -959,6 +959,59 @@ def _yield_floor_pct(config: dict | None) -> float:
         return 12.0
 
 
+# Spread-quality floor (2026-08-25, the HACK $98P bug: the top candidate
+# rendered "mid $0.97 (bid $0.10 / ask $1.85)" — a $1.75 spread, 180% of
+# mid; the quoted mid is unfillable, so the ticket is not real income).
+# Relative spread above this fraction of mid → visible ⏸ demotion,
+# conviction badges forfeited, never a Top-N slot (mirrors the rule-#44
+# yield-floor demotion pattern). Config: max_candidate_spread_pct.
+_DEFAULT_MAX_SPREAD_PCT_OF_MID = 0.40
+
+
+def max_candidate_spread_pct(config: dict | None) -> float:
+    """The configured relative-spread ceiling (fraction of mid)."""
+    try:
+        return float((config or {}).get(
+            "max_candidate_spread_pct", _DEFAULT_MAX_SPREAD_PCT_OF_MID))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_SPREAD_PCT_OF_MID
+
+
+def spread_quality_failure(q: dict | None,
+                           config: dict | None) -> dict | None:
+    """Check a live CSP/CC ticket's bid/ask spread against the
+    spread-quality ceiling (``max_candidate_spread_pct``, default 40% of
+    mid).
+
+    Returns None when the ticket passes — or when bid/ask/mid aren't all
+    measurable (fail-open, rule #19: absence of chain data is handled by
+    the ticket guards, never by a fabricated spread). On failure returns
+    the MEASURED numbers plus a rendered reason like
+    "⏸ spread too wide — $1.75 (180% of mid); premium is unfillable"."""
+    if not isinstance(q, dict):
+        return None
+    try:
+        bid = float(q.get("bid")) if q.get("bid") is not None else None
+        ask = float(q.get("ask")) if q.get("ask") is not None else None
+        mid = float(q.get("mid")) if q.get("mid") is not None else None
+    except (TypeError, ValueError):
+        return None
+    if bid is None or ask is None or mid is None or mid <= 0 or ask <= bid:
+        return None
+    spread = ask - bid
+    rel = spread / mid
+    cap = max_candidate_spread_pct(config)
+    if rel <= cap:
+        return None
+    return {
+        "spread_usd": spread,
+        "spread_pct_of_mid": rel * 100.0,
+        "cap_pct_of_mid": cap * 100.0,
+        "reason": (f"⏸ spread too wide — ${spread:,.2f} "
+                   f"({rel * 100:.0f}% of mid); premium is unfillable"),
+    }
+
+
 def _held_short_put_strikes(positions) -> dict:
     """{ticker: [strikes]} of currently HELD short puts — the rule #17
     position-aware pool the spotlight/redeploy exclusions check against."""
@@ -1385,6 +1438,27 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
             drawdown_pct=r.get("drawdown_pct"), config=config)
         exp = q.get("expiration") or ""
         ticket = f"SELL 1× ${float(strike):g}P exp {exp} ({dte} DTE)"
+        # Spread quality (2026-08-25 HACK $98P: "mid $0.97 (bid $0.10 /
+        # ask $1.85)" — a 180%-of-mid spread is unfillable): a wide-spread
+        # ticket forfeits its slot and lands in the visible exclusions
+        # (rule #24), mirroring the yield-floor demotion.
+        _ws = spread_quality_failure(q, config)
+        if _ws:
+            _ws_tk = (r.get("ticker") or "").upper()
+            try:
+                _ws_score = float((grade or {}).get("score") or 0.0)
+            except (TypeError, ValueError):
+                _ws_score = 0.0
+            _ws_entry = {
+                "side": "csp", "ticker": _ws_tk,
+                "letter": (grade or {}).get("letter") or "—",
+                "score": _ws_score, "ticket": ticket,
+                "reason": _ws["reason"],
+            }
+            _ws_prev = excluded.get(_ws_tk)
+            if _ws_prev is None or _ws_entry["score"] > _ws_prev["score"]:
+                excluded[_ws_tk] = _ws_entry
+            continue
         _consider("csp", r.get("ticker"), grade, ticket, ann,
                   gates_closed, "scout candidate", strike=strike,
                   expiration=q.get("expiration"), dte=dte, premium_mid=mid)

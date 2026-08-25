@@ -1229,6 +1229,40 @@ def _compute(
     # (live-RSI / yield floor / IV honesty), surfaced in the footer.
     battery_skips: list[str] = []
 
+    # Rule #48/#49 (2026-08-25, the WDC $380P bug: the playbook order table
+    # green-lit "WDC $380P Sep 18 '26 · Sell-to-Open · +$815" while Best
+    # Setups excluded WDC — "⛔ same-theme put already held — MU $920P
+    # (Memory & Storage)"): every composed STO open passes the CANONICAL
+    # six-step evaluator as the FINAL green light. The evaluator is
+    # authoritative over the legacy battery for the VERDICT; the battery
+    # keeps its playbook-specific context (deployment caps, conviction
+    # re-scores, annotations). Evaluated against the POST-Phase-1 book:
+    # positions minus the playbook's own closes (a swept contract is not a
+    # held stack), with the closes passed as today's close idents (never
+    # re-open what Phase 1 buys back). analytics=None for step 6 — the
+    # playbook's own projected-state machinery (adaptive deploy caps +
+    # the projected validator above) is this surface's capacity authority
+    # (the sanctioned rebuild path; closes fire first).
+    _ea_closed_keys = {(cl.ticker, round(float(cl.strike), 4))
+                       for cl in closes}
+    _ea_close_idents = {cl.contract for cl in closes if cl.contract}
+    _ea_positions = []
+    for _p in (snapshot_data.get("positions") or []):
+        if not isinstance(_p, dict):
+            continue
+        try:
+            _p_key = (str(_p.get("underlying") or "").upper(),
+                      round(float(_p.get("strike") or 0), 4))
+        except (TypeError, ValueError):
+            _p_key = None
+        if _p_key is not None \
+                and (_p.get("assetType") or "").upper() == "OPTION" \
+                and (_p.get("type") or "").upper() == "PUT" \
+                and (_f(_p.get("qty"), 0.0) or 0.0) < 0 \
+                and _p_key in _ea_closed_keys:
+            continue              # swept by Phase 1 — not part of the book
+        _ea_positions.append(_p)
+
     scored: list[ConvictionScoredCandidate] = []
     seen: set[tuple] = set()
     for raw in cand_pool:
@@ -1673,6 +1707,63 @@ def _compute(
             pass
         if _floor_skip:
             continue
+        # Rule #48 — THE ENTRY ALGORITHM is the FINAL green light on every
+        # composed STO open (2026-08-25 WDC: the legacy battery predates
+        # rules #48/#49 and never ran theme-stacking or day-color, so the
+        # order table green-lit a ticket Best Setups excluded). A WAIT /
+        # BLOCKED verdict demotes the candidate to the warnings footer with
+        # the evaluator's measured reason (rule #24) — it never occupies an
+        # order slot or the Money Plan Deploy line. Fail-open: evaluator
+        # unavailable / erroring → candidate unchanged (rule #19).
+        _ea_dec = None
+        try:
+            from analysis import entry_algorithm as _ea_mod
+            _ea_dec = _ea_mod.evaluate_entry(
+                "csp", c.ticker, c.strike, c.expiration or None,
+                cand.mid_price, snapshot_data, None, _cfg_top,
+                positions=_ea_positions,
+                action_close_idents=_ea_close_idents,
+                dte=c.dte,
+                parkev_rec=parkev_recs.get(c.ticker),
+                sector_pcts=_sector_pcts_pb or None,
+                as_of=today)
+        except Exception:
+            _ea_dec = None
+        if _ea_dec is not None and not _ea_dec.entered:
+            # Checks this surface has ALREADY adjudicated through its own
+            # documented single-source authorities stay with those
+            # authorities (the same deference the projected validator's
+            # `ignorable` set encodes above): the phase-2 battery is this
+            # surface's RSI/vintage + yield-floor authority (live recompute
+            # + chase guard, rule #24 footers); the playbook's rule-#39
+            # policy carries the documented fresh-High / Medium-drawdown
+            # override (−3 penalty + visible warning); per-name sizing is
+            # the equity_stacking module (graded bands + force_include kill
+            # switch); capacity is the projected-state machinery. EVERY
+            # OTHER evaluator finding — theme_stacking, day_color_wait,
+            # earnings_window, held_put_overlap, closing_today, tenor_cap,
+            # tail_risk, actionable_floor — decides the verdict here.
+            _ea_adjudicated = {
+                "vintage", "rsi_hard_block", "rsi_extended_wait",
+                "yield_floor", "lt_verdict", "name_concentration",
+                "capacity",
+            }
+            _ea_findings = [
+                f for f in _ea_dec.ordered_reasons
+                if f.get("status") in ("block", "wait")
+                and f.get("check") not in _ea_adjudicated]
+            if _ea_findings:
+                _ea_f0 = next(
+                    (f for f in _ea_findings if f.get("status") == "block"),
+                    _ea_findings[0])
+                _ea_tag = "⛔" if _ea_f0.get("status") == "block" else "⏸"
+                _ea_verdict = ("BLOCKED" if _ea_f0.get("status") == "block"
+                               else "WAIT")
+                battery_skips.append(
+                    f"{_ea_tag} {c.ticker} ${c.strike:g}P — entry algorithm "
+                    f"{_ea_verdict} (step {_ea_f0.get('step')}: "
+                    f"{_ea_f0.get('check')}) — {_ea_f0.get('detail')}")
+                continue
         scored.append(cand)
 
     scored.sort(key=lambda x: (-x.conviction_score, -x.annualized_yield_pct))

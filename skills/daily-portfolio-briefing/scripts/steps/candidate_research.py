@@ -737,6 +737,20 @@ def _yield_floor_failure(q: dict | None, config: dict | None) -> dict | None:
     }
 
 
+def _spread_quality_failure(q: dict | None, config: dict | None) -> dict | None:
+    """Spread-quality check on a live CSP ticket (2026-08-25 HACK $98P:
+    "mid $0.97 (bid $0.10 / ask $1.85)" — a 180%-of-mid spread is
+    unfillable). Single source of truth:
+    ``analysis.setup_grade.spread_quality_failure`` (config
+    ``max_candidate_spread_pct``, default 40% of mid). Fail-open on a
+    missing module / unmeasurable bid-ask (rule #19)."""
+    try:
+        from analysis.setup_grade import spread_quality_failure
+    except ImportError:
+        return None
+    return spread_quality_failure(q, config)
+
+
 def short_puts_by_ticker(positions: list | None) -> dict:
     """Tally the user's OPEN short puts from snapshot positions.
 
@@ -956,6 +970,7 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
     held: list[tuple[str, dict, object]] = []
     already_open: list[tuple[str, dict, dict]] = []  # candidate duplicates a held put
     thin_premium: list[tuple[str, dict, dict]] = []  # rule #44 yield floor (bug 3)
+    wide_spread: list[tuple[str, dict, dict]] = []   # spread quality (2026-08-25 HACK)
     below_floor: list[tuple[str, dict, str]] = []    # B floor (George 2026-08-12)
     algo_blocked: list[tuple[str, dict, object]] = []  # rule #48 entry algorithm
     algo_wait: list[tuple[str, dict, object, dict]] = []  # rule #49 timing WAITs
@@ -1059,6 +1074,17 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 thin = _yield_floor_failure(q, config) if q else None
                 if thin:
                     thin_premium.append((tname, r, thin))
+                    continue
+                # Spread quality (2026-08-25, the HACK $98P bug: the top
+                # candidate rendered "mid $0.97 (bid $0.10 / ask $1.85)" —
+                # a $1.75 spread, 180% of mid — untradeable). Relative
+                # spread over `max_candidate_spread_pct` (default 40% of
+                # mid) demotes to a visible "spread too wide" row with the
+                # measured numbers (rule #24); conviction badges forfeited;
+                # never a Top-N slot (mirrors the yield-floor demotion).
+                wide = _spread_quality_failure(q, config) if q else None
+                if wide:
+                    wide_spread.append((tname, r, wide))
                     continue
                 # CRITICAL: long-put cancellation check first — a short put at
                 # the same strike as a held LONG put cancels protection (the
@@ -1385,6 +1411,34 @@ def render_candidate_briefing(scout_payload: dict | None, *, fv_by_ticker: dict 
                 f"- **`{tk}`** ({tname}, {spot_s}) — SELL "
                 f"${q.get('strike', 0):g}P mid ${q.get('mid', 0):.2f} → "
                 f"{thin['reason']}"
+            )
+        lines.append("")
+
+    if wide_spread:
+        # 2026-08-25 (HACK $98P) — visible with measured numbers (rule
+        # #24), never a candidate slot, no conviction badges.
+        _ws_cap = 40.0
+        try:
+            from analysis.setup_grade import max_candidate_spread_pct
+            _ws_cap = max_candidate_spread_pct(config) * 100.0
+        except Exception:
+            pass
+        lines.append(f"{_h_sub} ⏸ Spread too wide — premium unfillable "
+                     f"at mid ({len(wide_spread)})")
+        lines.append(f"_A quoted mid over a bid/ask spread wider than "
+                     f"{_ws_cap:.0f}% of mid is not a fillable premium — "
+                     f"shown with measured numbers; conviction badges "
+                     f"forfeited; never a Top-N slot._")
+        lines.append("")
+        for tname, r, wide in sorted(wide_spread,
+                                     key=lambda x: (x[0], x[1].get("ticker", ""))):
+            tk = (r.get("ticker") or "").upper()
+            q = r.get("csp_entry") or {}
+            lines.append(
+                f"- **`{tk}`** ({tname}) — SELL "
+                f"${q.get('strike', 0):g}P mid ${q.get('mid', 0):.2f} "
+                f"(bid ${q.get('bid', 0):.2f} / ask ${q.get('ask', 0):.2f}) "
+                f"→ {wide['reason']}"
             )
         lines.append("")
 

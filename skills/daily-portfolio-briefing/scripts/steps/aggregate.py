@@ -1139,6 +1139,12 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] Setup Grade coverage check failed: {_e}",
               file=_sys.stderr)
+        # BUG B (2026-08-25): fail-open must be VISIBLE — a silently
+        # skipped verifier reads exactly like a clean pass.
+        lines.append(
+            f"_⚠ Setup Grade coverage check failed to run this cycle "
+            f"({type(_e).__name__}) — new-open grade coverage unaudited_")
+        lines.append("")
 
     # Tenor-cap sweep (rule #14 backstop, 2026-08-04): no actionable ticket
     # anywhere may carry an STO leg past the applicable tenor cap vs the
@@ -1188,6 +1194,11 @@ def aggregate_briefing(
     except Exception as _e:
         import sys as _sys
         print(f"[aggregate] price-consistency sweep failed: {_e}", file=_sys.stderr)
+        # BUG B (2026-08-25): visible fail-open — never a silent skip.
+        lines.append(
+            f"_⚠ Price consistency sweep failed to run this cycle "
+            f"({type(_e).__name__}) — spot disagreements unaudited_")
+        lines.append("")
 
     # RSI one-voice sweep (rule #43, 2026-08-14 SNDK bug): the Best Setups
     # spotlight said "RSI 48 late-band" while the SNDK close card said
@@ -1204,6 +1215,11 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] rsi-consistency sweep failed: {_e}",
               file=_sys.stderr)
+        # BUG B (2026-08-25): visible fail-open — never a silent skip.
+        lines.append(
+            f"_⚠ RSI consistency sweep failed to run this cycle "
+            f"({type(_e).__name__}) — RSI disagreements unaudited_")
+        lines.append("")
 
     # 🧮 Entry Algorithm Conformance (rule #48, George 2026-08-14: "the
     # exact algorithm that ensures that the entry is as good as possible
@@ -1225,6 +1241,14 @@ def aggregate_briefing(
         import sys as _sys
         print(f"[aggregate] entry-algorithm conformance failed: {_e}",
               file=_sys.stderr)
+        # BUG B (2026-08-25): the fail-open try/except silenced exactly
+        # the auditor that would have flagged the WDC playbook ticket —
+        # an audit failure must be VISIBLE, never indistinguishable from
+        # a clean pass.
+        lines.append(
+            f"_⚠ Entry Algorithm conformance audit failed to run this "
+            f"cycle ({type(_e).__name__}) — green-lit tickets unaudited_")
+        lines.append("")
 
     lines.extend(render_inconsistencies(flagged_inconsistencies))
 

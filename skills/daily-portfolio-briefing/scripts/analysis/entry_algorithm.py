@@ -945,6 +945,16 @@ _PREMIUM_RE = re.compile(r"(?:@|mid)\s*\$(\d+(?:\.\d+)?)", re.I)
 _DTE_RE = re.compile(r"\((\d+)\s*DTE\)")
 _ISO_IN_LINE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 
+# Playbook order-table ticket rows (the 2026-08-25 WDC escape: "| 3 |
+# **WDC $380P Sep 18 '26** | Sell-to-Open | 1 | $8.15 GTD | +$815 | ..."
+# — table rows were verifier-exempt by old convention, which is exactly
+# how that surface escaped the audit). A row is a green-lit order-table
+# ticket when it carries a dedicated `| Sell-to-Open |` type cell.
+_TABLE_STO_CELL_RE = re.compile(r"\|\s*Sell[- ]to[- ]Open\s*\|", re.I)
+_TABLE_TICKER_STRIKE_RE = re.compile(
+    r"\*\*([A-Z][A-Z0-9]{0,4})\s+\$(\d+(?:\.\d+)?)([PC])\b")
+_TABLE_LIMIT_RE = re.compile(r"\$(\d+(?:\.\d+)?)\s*GT[CD]\b", re.I)
+
 # Markers that mean the ticket is ALREADY demoted / not green-lit.
 _NOT_GREEN_MARKERS = ("⏸", "⛔", "🚫", "Deferred", "excluded:",
                       "Below setup floor", "not actionable")
@@ -1008,6 +1018,29 @@ def audit_conformance(
     in_fence = False
     in_excluded_section = False
     section_demoted = False
+
+    def _flag_if_rejected(line: str, ticker: str, side: str, strike: float,
+                          exp, dte, premium) -> None:
+        """Run the canonical evaluator; append an offender on non-ENTER."""
+        try:
+            dec = evaluate_entry(
+                side, ticker, strike, exp, premium, snapshot_data,
+                analytics, config,
+                action_close_idents=action_close_idents,
+                dte=dte, as_of=as_of)
+        except Exception:
+            return          # evaluator failure never breaks the ship
+        if not dec.entered:
+            p = dec.primary or {}
+            offenders.append({
+                "line": line.strip()[:160],
+                "ticker": ticker,
+                "verdict": dec.verdict,
+                "reason": dec.primary_detail,
+                "step": p.get("step"),
+                "check": p.get("check"),
+            })
+
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("```"):
@@ -1027,7 +1060,44 @@ def audit_conformance(
             continue
         if in_excluded_section or section_demoted:
             continue
-        if stripped.startswith("_") or stripped.startswith("|"):
+        if stripped.startswith("_"):
+            continue
+        if stripped.startswith("|"):
+            # Order-table tickets (BUG B, 2026-08-25: "| 3 | **WDC $380P
+            # Sep 18 '26** | Sell-to-Open | 1 | $8.15 GTD | +$815 | ..."
+            # escaped the audit because table rows were verifier-exempt by
+            # old convention — exactly how the playbook surface green-lit
+            # a ticket the evaluator WAITs). A row with a dedicated
+            # `| Sell-to-Open |` type cell IS a green-lit new-open ticket;
+            # the row is self-contained, so demotion markers are read from
+            # the ROW itself (the surrounding block may legitimately carry
+            # ⏸/⛔ warning footers or Buy-to-Close sibling rows).
+            if not _TABLE_STO_CELL_RE.search(line):
+                continue
+            if any(mk in line for mk in _NOT_GREEN_MARKERS):
+                continue    # the row itself is demoted — not green-lit
+            tm = _TABLE_TICKER_STRIKE_RE.search(line)
+            if not tm or tm.group(1) in _NON_TICKERS:
+                continue    # never guess a ticker (rule #19)
+            t_ticker = tm.group(1)
+            t_strike = float(tm.group(2))
+            t_side = SIDE_CSP if tm.group(3) == "P" else SIDE_CC
+            t_key = (t_ticker, t_side, t_strike)
+            if t_key in seen:
+                continue
+            seen.add(t_key)
+            t_m_iso = _ISO_IN_LINE_RE.search(line)
+            t_exp = t_m_iso.group(0) if t_m_iso else _parse_exp(line)[1]
+            t_dte = None
+            t_m_dte = _DTE_RE.search(line)
+            if t_m_dte:
+                t_dte = int(t_m_dte.group(1))
+            t_premium = None
+            t_m_prem = _PREMIUM_RE.search(line) or _TABLE_LIMIT_RE.search(line)
+            if t_m_prem:
+                t_premium = float(t_m_prem.group(1))
+            _flag_if_rejected(line, t_ticker, t_side, t_strike, t_exp,
+                              t_dte, t_premium)
             continue
         if not _SELL_MARK_RE.search(line):
             continue
@@ -1064,24 +1134,7 @@ def audit_conformance(
         m_prem = _PREMIUM_RE.search(line)
         if m_prem:
             premium = float(m_prem.group(1))
-        try:
-            dec = evaluate_entry(
-                side, ticker, strike, exp, premium, snapshot_data,
-                analytics, config,
-                action_close_idents=action_close_idents,
-                dte=dte, as_of=as_of)
-        except Exception:
-            continue        # evaluator failure never breaks the ship
-        if not dec.entered:
-            p = dec.primary or {}
-            offenders.append({
-                "line": stripped[:160],
-                "ticker": ticker,
-                "verdict": dec.verdict,
-                "reason": dec.primary_detail,
-                "step": p.get("step"),
-                "check": p.get("check"),
-            })
+        _flag_if_rejected(line, ticker, side, strike, exp, dte, premium)
     return offenders
 
 
