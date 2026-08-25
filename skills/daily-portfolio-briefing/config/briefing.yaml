@@ -1004,7 +1004,7 @@ redeploy_aware_tp:
 # byte-identical legacy.
 momentum_hold:
   enabled: true
-  rsi_stall: 65                     # RSI at/above which the ride stalls
+  rsi_stall: 70                     # RSI at/above which the ride stalls (George 2026-08-25: "I'll exit when RSI is 70")
   min_otm_pct: 0.10                 # gamma-safety OTM cushion floor
   hard_ceiling_pct: 0.85            # ≥ this capture always closes
   earnings_hold_min_cushion_pct: 25 # willing-owner fortress threshold
