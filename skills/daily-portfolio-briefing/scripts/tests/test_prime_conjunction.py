@@ -339,7 +339,9 @@ def test_panel_no_prime_info_renders_plain_none_never_fabricated():
 def test_prime_list_not_capped_by_top_n():
     """Every conjunction-passer is unmistakable — the prime list is never
     cut at the weighted top-N."""
-    ideas = [_graded_idea(f"T{i}", "B", 66.0 + i, 18.0, prime=True)
+    # Letter-only tickers — digit roots (T0…T4) are correctly rejected by
+    # the symbol-universe gate (the 2026-08-26 5ZM.HM foreign-listing fix).
+    ideas = [_graded_idea(f"T{'ABCDE'[i]}", "B", 66.0 + i, 18.0, prime=True)
              for i in range(5)]
     best = sg.collect_best_setups(new_ideas=ideas, config=CFG_ON)
     assert len(best["prime"]) == 5

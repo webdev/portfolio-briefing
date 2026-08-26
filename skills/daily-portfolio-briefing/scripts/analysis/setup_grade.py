@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import copy
 import re
-from datetime import date
+from datetime import date, datetime
 
 try:  # pipeline import context (scripts/ on sys.path)
     from analysis import rsi_discipline as _rsi_mod
@@ -977,8 +977,28 @@ def max_candidate_spread_pct(config: dict | None) -> float:
         return _DEFAULT_MAX_SPREAD_PCT_OF_MID
 
 
+# Pre-open cutoff for the spread-quality wording (2026-08-26: an 8:55 AM
+# pre-open run rendered 10 exclusions "⏸ spread too wide … premium is
+# unfillable" — spreads are NATURALLY wide before the open, so the wording
+# must not imply permanence. The ticket stays excluded — the measured
+# spread IS unfillable right now — but the reason says so honestly).
+_MARKET_OPEN_SETTLED = (9, 35)
+
+
+def _is_pre_open(now=None) -> bool:
+    """True before 09:35 (the same local clock the briefing header's
+    "generated …" timestamp uses — render/panels.render_header)."""
+    if now is None:
+        now = datetime.now()
+    try:
+        return ((now.hour, now.minute) < _MARKET_OPEN_SETTLED)
+    except AttributeError:
+        return False
+
+
 def spread_quality_failure(q: dict | None,
-                           config: dict | None) -> dict | None:
+                           config: dict | None,
+                           now=None) -> dict | None:
     """Check a live CSP/CC ticket's bid/ask spread against the
     spread-quality ceiling (``max_candidate_spread_pct``, default 40% of
     mid).
@@ -987,7 +1007,12 @@ def spread_quality_failure(q: dict | None,
     measurable (fail-open, rule #19: absence of chain data is handled by
     the ticket guards, never by a fabricated spread). On failure returns
     the MEASURED numbers plus a rendered reason like
-    "⏸ spread too wide — $1.75 (180% of mid); premium is unfillable"."""
+    "⏸ spread too wide — $1.75 (180% of mid); premium is unfillable".
+
+    ``now`` (datetime, default the render clock): before 09:35 the reason
+    reads "⏸ spread too wide pre-open — $X (Y% of mid); recheck after the
+    open" — still excluded (the quoted spread IS unfillable now) but the
+    wording stops implying permanence on a pre-open quote."""
     if not isinstance(q, dict):
         return None
     try:
@@ -1003,12 +1028,18 @@ def spread_quality_failure(q: dict | None,
     cap = max_candidate_spread_pct(config)
     if rel <= cap:
         return None
+    if _is_pre_open(now):
+        reason = (f"⏸ spread too wide pre-open — ${spread:,.2f} "
+                  f"({rel * 100:.0f}% of mid); recheck after the open")
+    else:
+        reason = (f"⏸ spread too wide — ${spread:,.2f} "
+                  f"({rel * 100:.0f}% of mid); premium is unfillable")
     return {
         "spread_usd": spread,
         "spread_pct_of_mid": rel * 100.0,
         "cap_pct_of_mid": cap * 100.0,
-        "reason": (f"⏸ spread too wide — ${spread:,.2f} "
-                   f"({rel * 100:.0f}% of mid); premium is unfillable"),
+        "pre_open": _is_pre_open(now),
+        "reason": reason,
     }
 
 
@@ -1139,7 +1170,7 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
                         snapshot_data=None, capacity_tag=None,
                         gates_closed: bool = False,
                         config: dict | None = None,
-                        closing_today=None) -> dict:
+                        closing_today=None, now=None) -> dict:
     """Top-N CSP + top-N CC setups across the graded universe.
 
     Filters (per spec): the side's RSI hard block ('—' letters excluded)
@@ -1255,6 +1286,33 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         if not grade or grade.get("letter") in ("—", "n/a", None):
             return
         if grade.get("score") is None:
+            return
+        # Symbol-universe gate (2026-08-26 5ZM.HM bug: Best Setups #1 was
+        # "B (74) `5ZM.HM` — SELL 1× 5ZM.HM $75P exp Fri Nov 20 '26" — a
+        # Hamburg listing with NO US option chain; the ticket is unfillable
+        # fiction, rule #19). Pool boundary for EVERY graded pool: an
+        # invalid symbol lands in the visible exclusions (rule #24), never
+        # a slot, never the prime/closest-miss pool.
+        try:
+            from analysis.symbol_universe import symbol_exclusion_reason
+            _sym_reason = symbol_exclusion_reason(ticker)
+        except Exception:
+            _sym_reason = None      # gate unavailable → legacy (fail-open)
+        if _sym_reason:
+            _s_tk = str(ticker or "").strip().upper()
+            try:
+                _s_score = float((grade or {}).get("score") or 0.0)
+            except (TypeError, ValueError):
+                _s_score = 0.0
+            _s_entry = {
+                "side": side, "ticker": _s_tk,
+                "letter": (grade or {}).get("letter") or "—",
+                "score": _s_score, "ticket": ticket, "reason": _sym_reason,
+            }
+            _s_pool = excluded if side == "csp" else excluded_cc
+            _s_prev = _s_pool.get(_s_tk)
+            if _s_prev is None or _s_entry["score"] > _s_prev["score"]:
+                _s_pool[_s_tk] = _s_entry
             return
         # Rule #46 (2026-08-14 SNDK): resolve the RSI vintage BEFORE this
         # grade may occupy a slot — a +19% mover kept its pre-move "RSI 48"
@@ -1442,7 +1500,7 @@ def collect_best_setups(*, new_ideas=None, long_term_opportunities=None,
         # ask $1.85)" — a 180%-of-mid spread is unfillable): a wide-spread
         # ticket forfeits its slot and lands in the visible exclusions
         # (rule #24), mirroring the yield-floor demotion.
-        _ws = spread_quality_failure(q, config)
+        _ws = spread_quality_failure(q, config, now=now)
         if _ws:
             _ws_tk = (r.get("ticker") or "").upper()
             try:

@@ -20,6 +20,28 @@ import yaml
 log = structlog.get_logger()
 
 
+def _is_us_optionable(ticker: str | None) -> bool:
+    """Source-screener symbol filter (2026-08-26 5ZM.HM bug: yfinance
+    resolved "Zoom Video" to its Hamburg listing 5ZM.HM, the cache pinned
+    it, and the foreign symbol flowed into the briefing's graded pools as
+    an unfillable US option ticket).
+
+    Single source of truth: analysis.symbol_universe in the
+    daily-portfolio-briefing skill (^[A-Z]{1,5}$ plus known dotted US
+    classes like BRK.B). Import failure → no filtering (legacy behavior).
+    """
+    try:
+        import sys
+        _dpb_scripts = (Path(__file__).resolve().parents[2]
+                        / "daily-portfolio-briefing" / "scripts")
+        if str(_dpb_scripts) not in sys.path:
+            sys.path.insert(0, str(_dpb_scripts))
+        from analysis.symbol_universe import is_us_optionable_symbol
+    except Exception:
+        return True
+    return is_us_optionable_symbol(ticker)
+
+
 class ConfigDict(TypedDict, total=False):
     """Type hint for config structure."""
     source: dict[str, Any]
@@ -202,10 +224,16 @@ def resolve_ticker(name: str, config: ConfigDict) -> str | None:
     if stripped in overrides:
         return overrides[stripped]
 
-    # Persistent cache
+    # Persistent cache. A cached FOREIGN listing (the "Zoom Video" →
+    # 5ZM.HM Hamburg entry, 2026-08-26) is ignored so the name re-resolves
+    # against the US-optionable universe instead of pinning the leak.
     ticker_map = _load_ticker_map(config)
     if stripped in ticker_map:
-        return ticker_map[stripped]
+        cached = ticker_map[stripped]
+        if _is_us_optionable(cached):
+            return cached
+        log.warning("ticker_map_non_us_ignored", name=stripped,
+                    ticker=cached)
 
     # yfinance fallback
     if not config["ticker_resolution"].get("use_yfinance_fallback", True):
@@ -214,11 +242,17 @@ def resolve_ticker(name: str, config: ConfigDict) -> str | None:
     try:
         import yfinance as yf
         search = yf.Search(stripped)
-        if search.quotes:
-            ticker = search.quotes[0].get("symbol")
-            if ticker:
+        # First US-optionable hit — never a foreign-exchange listing
+        # (yfinance ranks by relevance, and for dual-listed names the
+        # foreign line can rank first: "Zoom Video" → 5ZM.HM).
+        for quote in search.quotes or []:
+            ticker = quote.get("symbol")
+            if ticker and _is_us_optionable(ticker):
                 _save_ticker_map(stripped, ticker, config)
                 return ticker
+        if search.quotes:
+            log.warning("ticker_resolution_non_us_only", name=stripped,
+                        first=search.quotes[0].get("symbol"))
     except Exception as e:
         log.warning("ticker_resolution_failed", name=stripped, error=str(e))
 

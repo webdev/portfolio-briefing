@@ -393,9 +393,13 @@ def test_grade_coverage_failure_renders_visible_warning(monkeypatch):
 def test_spread_quality_failure_hack_shape():
     """Observed 2026-08-25 candidate: "SELL 1× HACK $98P exp Fri Sep 18
     '26 (24 DTE, monthly) · mid $0.97 (bid $0.10 / ask $1.85)" — a $1.75
-    spread, 180% of mid. The helper returns the measured demotion."""
+    spread, 180% of mid. The helper returns the measured demotion.
+    (Clock pinned post-open — the pre-open wording variant is pinned in
+    test_spread_preopen_wording.py.)"""
+    from datetime import datetime as _dt
     ws = sg.spread_quality_failure(
-        {"bid": 0.10, "ask": 1.85, "mid": 0.97}, {})
+        {"bid": 0.10, "ask": 1.85, "mid": 0.97}, {},
+        now=_dt(2026, 8, 25, 10, 30))
     assert ws is not None
     assert ws["reason"] == ("⏸ spread too wide — $1.75 (180% of mid); "
                             "premium is unfillable")
@@ -442,10 +446,13 @@ def _spread_payload():
     }
 
 
-def test_candidate_trades_demotes_hack_wide_spread():
+def test_candidate_trades_demotes_hack_wide_spread(monkeypatch):
     """The HACK-shape candidate demotes to the visible '⏸ Spread too wide'
     section with the measured numbers — badge forfeited, never a Today's
-    Candidates slot. The clean-spread AMD candidate is unaffected."""
+    Candidates slot. The clean-spread AMD candidate is unaffected.
+    (Clock pinned post-open so the settled wording renders — the pre-open
+    variant is pinned in test_spread_preopen_wording.py.)"""
+    monkeypatch.setattr(sg, "_is_pre_open", lambda now=None: False)
     md = cr.render_candidate_briefing(_spread_payload(), fv_by_ticker={},
                                       config={}, generated_at="T")
     assert "⏸ Spread too wide — premium unfillable at mid (1)" in md
@@ -462,10 +469,14 @@ def test_candidate_trades_demotes_hack_wide_spread():
 def test_best_setups_excludes_wide_spread_ticket():
     """Best Setups: a wide-spread scout ticket forfeits its Top-N slot and
     lands in the visible exclusions with the measured reason (mirroring
-    the yield-floor demotion pattern); the clean ticket keeps its slot."""
+    the yield-floor demotion pattern); the clean ticket keeps its slot.
+    (Clock pinned post-open — pre-open wording pinned in
+    test_spread_preopen_wording.py.)"""
+    from datetime import datetime as _dt
     results = _spread_payload()["results_by_theme"]["cyber"]
     best = sg.collect_best_setups(scout_results=results,
-                                  snapshot_data={}, config={})
+                                  snapshot_data={}, config={},
+                                  now=_dt(2026, 8, 25, 10, 30))
     csp_tickers = [e["ticker"] for e in best["csp"]]
     assert "HACK" not in csp_tickers
     assert "AMD" in csp_tickers

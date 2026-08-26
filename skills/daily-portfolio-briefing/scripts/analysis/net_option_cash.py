@@ -97,8 +97,12 @@ def gtc_hold_idents(action_list_lines: list) -> set:
 # whose close was pulled OUT of the action list (redeploy-aware hold,
 # dollar-floor convenience close). Rule #43 (2026-08-17): the 08-14 NOK
 # lesson generalized — ANY demotion path, not just HOLD/GTC verbs.
+# "_directive_ride" (2026-08-26 MELI split brain): a position riding under
+# a user directive with machine-readable exits ("🏇 RIDING (directive)") is
+# never banked — the observed Money Plan said "Bank today: 1 close(s) →
+# $+3,435 realized (MELI $1460P)" while George's filed directive said ride.
 _DEMOTION_FLAGS = ("_redeploy_hold_demotion", "_close_floor_demotion",
-                   "_momentum_ride")
+                   "_momentum_ride", "_directive_ride")
 
 
 def demoted_close_idents(options_reviews: list | None) -> set:

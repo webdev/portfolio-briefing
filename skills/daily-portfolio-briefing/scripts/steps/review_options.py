@@ -215,13 +215,37 @@ def review_options(
                 directive_match = d
                 break
         if directive_match:
+            # Directive rides (2026-08-26 MELI split brain): carry the
+            # position's real economics + the directive payload so the
+            # action list can TRACK the directive's own exit conditions
+            # with measured values ("🏇 RIDING (directive)") instead of
+            # silently dropping the position. ``_directive_ride`` is the
+            # Money-Plan demotion flag (net_option_cash._DEMOTION_FLAGS):
+            # a riding close is NEVER banked.
+            _exp = pos.get("expiration")
+            try:
+                _dte = max(0, (datetime.strptime(_exp, "%Y-%m-%d").date()
+                               - date.today()).days) if _exp else None
+            except (ValueError, TypeError):
+                _dte = None
+            _has_exits = bool(directive_match.get("exit_conditions"))
             options_reviews.append({
                 "underlying": underlying,
                 "contract": contract_label,
                 "type": pos.get("type", "?"),
+                "qty": pos.get("qty"),
+                "strike": pos.get("strike"),
+                "expiration": _exp,
+                "current_mid": float(pos.get("currentMid")
+                                     or pos.get("currentPrice") or 0.0),
+                "entry_price": float(pos.get("premiumReceived")
+                                     or pos.get("entryPrice") or 0.0),
+                "days_to_expiry": _dte,
                 "recommendation": "DEFERRED" if directive_match["type"] == "DEFER" else directive_match["type"],
                 "rationale": f"User directive {directive_match.get('reason', '')}",
                 "matrix_cell_id": f"DIRECTIVE_{directive_match['type']}",
+                "directive": directive_match,
+                "_directive_ride": _has_exits,
             })
             continue
 

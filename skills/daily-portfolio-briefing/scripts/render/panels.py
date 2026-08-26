@@ -1717,7 +1717,7 @@ _DEFERRED_CAPACITY_RE = re.compile(r"⏸ Deferred \(capacity gated\)")
 # "Why should I roll Nokia if it's in December?" — the downgraded 🔧
 # OPTIONAL roll is a no-action-required item and counts under "+N hold").
 _HOLD_CLASS_HEAD_RE = re.compile(
-    r"^\s{0,3}\d+\.\s+\S*\s*\*\*(?:HOLD\b|RIDE\b|OPTIONAL\b)")
+    r"^\s{0,3}\d+\.\s+\S*\s*\*\*(?:HOLD\b|RIDE\b|RIDING\b|OPTIONAL\b)")
 # 🚨 URGENT executable items rank first within the executable group.
 _URGENT_HEAD_RE = re.compile(r"^\s{0,3}\d+\.\s+[^\n]*🚨")
 
@@ -2368,6 +2368,80 @@ def render_action_list(
             return (e_d - _today_urgent).days
         except (ValueError, TypeError):
             return None
+
+    # ---- 0. DIRECTIVE RIDES (2026-08-26 MELI split brain) ----
+    # A pipeline directive (state/directives/index.yaml) with a
+    # machine-readable exit_conditions block suppresses the
+    # recommendation-class CLOSE and instead TRACKS the directive's OWN
+    # exits with measured values. Observed bug: the action list rendered
+    # "2. **CLOSE** MELI_PUT_1460_20270617 — +34% ($+3,435) …
+    # ⏳ IGNORED 3 DAYS" while George's filed directive (momentum ride,
+    # GTC 75%/85%, red-day/RSI-70 stall) was honored only by Fable. Rules
+    # #19/#24: every number measured this cycle; a fired stall is stated
+    # LOUDLY — the exit line IS the action item.
+    for rev in options_reviews:
+        if not isinstance(rev, dict) or not rev.get("directive"):
+            continue
+        contract = rev.get("contract", "")
+        if not contract or contract in seen_contracts:
+            continue
+        try:
+            from analysis import directive_rides as _dr
+            und = rev.get("underlying") or contract.split("_")[0]
+            entry = rev.get("entry_price") or 0
+            mid = rev.get("current_mid") or 0
+            capture_pct = ((entry - mid) / entry * 100)  \
+                if (entry and entry > 0 and mid) else None
+            _ride_rsi = None
+            try:
+                from analysis.vintage_guard import resolve_new_open_rsi
+                _ride_rsi = resolve_new_open_rsi(
+                    und, (snapshot_data or {}).get("technicals") or {},
+                    (snapshot_data or {}).get("quotes") or {},
+                    (snapshot_data or {}).get("positions") or [],
+                    (snapshot_data or {}).get("_config") or {},
+                ).get("rsi")
+            except Exception:
+                _ride_rsi = None
+            ride = _dr.evaluate_ride(
+                rev["directive"], ticker=und,
+                capture_pct=capture_pct,
+                day_move_pct=_dr.measured_day_move_pct(und, snapshot_data),
+                rsi=_ride_rsi,
+                days_to_earnings=_days_to_earnings(und),
+                config=(snapshot_data or {}).get("_config") or {})
+        except Exception:
+            ride = None              # fail-open — legacy DEFER stands
+        if ride is None:
+            continue
+        cap_s = f" — {capture_pct:+.0f}% captured" if capture_pct else ""
+        if ride["stalled"]:
+            items.append(
+                f"{n}. 🏇 **EXIT — STALL FIRED (directive)** {contract}"
+                f"{cap_s} — {ride['today_line']} · exits armed were: "
+                f"{ride['exits_line']}")
+            strike = rev.get("strike")
+            opt_c = "P" if (rev.get("type") or "").upper() == "PUT" else "C"
+            qty = abs(rev.get("qty", 0) or 0)
+            if mid and strike and qty:
+                items.append(
+                    f"   - **Action:** BUY TO CLOSE {qty:g}× {und} "
+                    f"${float(strike):g}{opt_c} — exit per directive "
+                    f"(mid ${mid:.2f}, limit ≈ ${mid * 1.05:.2f})")
+            else:
+                items.append(
+                    "   - **Action:** exit per directive — mid unavailable "
+                    "this cycle; price the buyback at the broker")
+        else:
+            items.append(
+                f"{n}. 🏇 **RIDING (directive)** {contract}{cap_s} — "
+                f"exits armed: {ride['exits_line']} · {ride['today_line']}")
+        _d_reason = str((rev.get("directive") or {}).get("reason") or "").strip()
+        if _d_reason:
+            items.append(f"   - **Directive:** "
+                         f"{_truncate_at_word(_d_reason, 220)}")
+        seen_contracts.add(contract)
+        n += 1
 
     for rev in options_reviews:
         rationale = (rev.get("rationale") or "")
