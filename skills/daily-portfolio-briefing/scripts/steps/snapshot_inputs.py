@@ -87,6 +87,8 @@ def _compose_balance(
     base_balance: dict,
     long_market_value: float,
     option_market_value: float,
+    positions: list | None = None,
+    equity_exclusions: list | None = None,
 ) -> dict:
     """Compose the snapshot balance dict, preferring the broker's own NLV.
 
@@ -107,6 +109,28 @@ def _compose_balance(
       `nlv_reconciliation` record with `warning: True` is attached so the
       render layer surfaces both numbers — never silently ship a
       reconstructed NLV that disagrees with broker truth.
+
+    2026-08-28 extension (rule #19 — name what's missing, never a bare Δ):
+
+    - **Ledger cash**: the adapter's `cash` is E*TRADE's
+      `cashAvailableForInvestment` — a buying-power figure that EXCLUDES
+      unsettled same-day trade proceeds. On 2026-08-28 (five option opens +
+      the MSFT $510C→$530C roll) it understated real cash by $37,697 and
+      fired a false 🔴 warning. When the adapter provides `netCash` (total
+      ledger cash), the computed NLV uses it, with an itemized note.
+    - **Missing marks**: any OPTION position with nonzero qty and a
+      missing mark (`marketValue` None, or 0 with a live mid available)
+      gets its mark ESTIMATED from the snapshot's own mid (or bid/ask
+      midpoint); if no estimate is possible it is EXCLUDED with a named
+      note ("computed excludes MSFT Mar 19 '27 $530 Call — no mark this
+      snapshot"). Equity positions skipped upstream for no usable price
+      arrive via `equity_exclusions` and are itemized the same way.
+    - **Classification**: when the warning still fires and every position
+      carries a mark, the record says so — the Δ is by elimination a
+      cash-ledger gap (broker NLV implies more cash than the cash field
+      reports), so the operator sees "data gap on known cash leg", not an
+      unknown disagreement. All notes ride in
+      `nlv_reconciliation["itemized"]` for the header + attribution panel.
     """
     # Boundary coercion: the live adapter returns Decimal for SEVERAL
     # balance fields (totalAccountValue, cash, netCash, buying power, ...).
@@ -115,13 +139,78 @@ def _compose_balance(
     base_balance = {k: _coerce_jsonable(v) for k, v in (base_balance or {}).items()}
 
     cash = _safe_float(base_balance.get("cash", 0))
-    computed_nlv = round(long_market_value + option_market_value + cash, 2)
+    itemized: list[str] = []
+
+    # ── Ledger cash: prefer netCash (total, incl. unsettled) when the
+    # adapter provided it — cashAvailableForInvestment excludes unsettled
+    # same-day trade proceeds (the 2026-08-28 $37,697 false alarm).
+    ledger_cash = cash
+    if "netCash" in base_balance:
+        net_cash = _safe_float(base_balance.get("netCash"))
+        if abs(net_cash) > 1e-9:  # present-but-zero with cash>0 → distrust
+            ledger_cash = net_cash
+            if abs(net_cash - cash) > 0.01:
+                itemized.append(
+                    f"ledger cash (netCash) ${net_cash:,.0f} used for the "
+                    f"computed NLV — available-for-investment cash "
+                    f"${cash:,.0f} excludes ${net_cash - cash:,.0f} of "
+                    f"unsettled/withheld funds"
+                )
+
+    # ── Missing option marks: estimate from the snapshot's own mid where
+    # available; otherwise exclude WITH a named note (rule #19).
+    effective_option_mv = option_market_value
+    mark_exclusions: list[str] = []
+    for pos in positions or []:
+        if pos.get("assetType") != "OPTION":
+            continue
+        qty = _safe_float(pos.get("qty"))
+        if qty == 0:
+            continue
+        mv = pos.get("marketValue")
+        mv_f = _safe_float(mv)
+        name = pos.get("symbolDescription") or pos.get("symbol") or "?"
+        mid = _safe_float(pos.get("currentMid"))
+        if mid == 0:
+            bid, ask = _safe_float(pos.get("bid")), _safe_float(pos.get("ask"))
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+        if mv is None:
+            if mid > 0:
+                est = round(mid * 100.0 * qty, 2)
+                effective_option_mv += est
+                itemized.append(
+                    f"{name} — mark estimated at ${est:,.0f} from the "
+                    f"snapshot mid ${mid:,.2f} (no marketValue this snapshot)"
+                )
+            else:
+                mark_exclusions.append(name)
+                itemized.append(
+                    f"computed excludes {name} — no mark this snapshot"
+                )
+        elif mv_f == 0 and mid > 0:
+            # A zero mark with a live mid is a stale/absent mark on a real
+            # contract (new open / fresh roll); a zero mark with no mid is a
+            # genuinely worthless option — no note (no noise on clean days).
+            est = round(mid * 100.0 * qty, 2)
+            effective_option_mv += est
+            itemized.append(
+                f"{name} — mark estimated at ${est:,.0f} from the "
+                f"snapshot mid ${mid:,.2f} (marketValue $0 this snapshot)"
+            )
+
+    for sym in equity_exclusions or []:
+        itemized.append(
+            f"computed excludes {sym} — no usable price this snapshot"
+        )
+
+    computed_nlv = round(long_market_value + effective_option_mv + ledger_cash, 2)
     broker_nlv = _safe_float(base_balance.get("totalAccountValue", 0))
 
     balance = {
         **base_balance,
         "longMarketValue": round(long_market_value, 2),
-        "optionMarketValue": round(option_market_value, 2),
+        "optionMarketValue": round(effective_option_mv, 2),
         "computedAccountValue": computed_nlv,
     }
 
@@ -130,13 +219,29 @@ def _compose_balance(
         balance["accountValue"] = round(broker_nlv, 2)
         delta = round(computed_nlv - broker_nlv, 2)
         pct = abs(delta) / broker_nlv
+        warning = pct > _NLV_RECONCILIATION_PCT
+        if warning and not mark_exclusions and not (equity_exclusions or []):
+            # Every position carries a mark → by elimination the Δ sits on
+            # the cash leg. Name it (rule #19): the broker's own components
+            # imply a different cash figure than the cash field reports —
+            # the 2026-08-28 signature (unsettled same-day trade proceeds
+            # missing from cashAvailableForInvestment).
+            implied_cash = round(
+                broker_nlv - long_market_value - effective_option_mv, 2)
+            itemized.append(
+                f"all positions carry marks — Δ is a cash-ledger gap: "
+                f"broker NLV implies cash ${implied_cash:,.0f} vs "
+                f"${ledger_cash:,.0f} in the cash field (likely unsettled "
+                f"same-day trade proceeds; verify at broker)"
+            )
         balance["nlv_reconciliation"] = {
             "broker_nlv": round(broker_nlv, 2),
             "computed_nlv": computed_nlv,
             "delta": delta,
             "pct": round(pct * 100, 2),
-            "warning": pct > _NLV_RECONCILIATION_PCT,
+            "warning": warning,
             "using": "broker",
+            **({"itemized": itemized} if itemized else {}),
         }
     else:
         # No broker figure (fixture without totalAccountValue) — fall back
@@ -946,7 +1051,10 @@ def snapshot_inputs(
         if pos.get("assetType") == "OPTION":
             option_market_value += _safe(pos.get("marketValue"))
 
-    balance = _compose_balance(base_balance, long_market_value, option_market_value)
+    balance = _compose_balance(
+        base_balance, long_market_value, option_market_value,
+        positions=refreshed_positions, equity_exclusions=skipped,
+    )
     balance["asOf"] = datetime.utcnow().isoformat() + "Z"
     _rec = balance.get("nlv_reconciliation") or {}
     if _rec.get("warning"):
@@ -956,6 +1064,8 @@ def snapshot_inputs(
             f"({_rec['pct']:.1f}%); using the broker figure",
             file=sys.stderr,
         )
+        for _note in _rec.get("itemized") or []:
+            print(f"    [warn]   ↳ {_note}", file=sys.stderr)
 
     # Live option chains: held expirations + up to 3 future expirations per
     # underlying so the wheel-roll-advisor can enumerate roll candidates with

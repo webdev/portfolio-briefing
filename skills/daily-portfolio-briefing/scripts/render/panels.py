@@ -252,6 +252,15 @@ def render_header(
             f"${_rec.get('broker_nlv', 0):,.0f} — Δ ${_rec.get('delta', 0):+,.0f} "
             f"({_rec.get('pct', 0):.1f}%); using the broker figure."
         )
+        # Itemization (rule #19 — name what's missing, never a bare Δ):
+        # 2026-08-28 rendered the bare line above while the whole $37,697
+        # gap was a cash-ledger gap (unsettled same-day trade proceeds
+        # missing from cashAvailableForInvestment). Each note names the
+        # excluded/estimated position or the measured cash gap so the check
+        # distinguishes "data gap on N known items" from "unknown
+        # disagreement".
+        for _note in _rec.get("itemized") or []:
+            lines.append(f"  - ↳ {_note}")
     # Capacity gate banner — printed daily right after the cash line
     # (06-wheel-parameters.md §7A) so the operator never has to compute
     # whether the portfolio has room for new short puts.

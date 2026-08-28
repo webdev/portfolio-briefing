@@ -482,7 +482,10 @@ def aggregate_briefing(
                 snapshot_root=_bt_root, as_of=date_str, spy_closes=_spy_closes,
                 config=bt_cfg,
             )
-            lines.extend(render_benchmark_panel(_bench, _attrib))
+            lines.extend(render_benchmark_panel(
+                _bench, _attrib,
+                nlv_reconciliation=balance.get("nlv_reconciliation"),
+            ))
             benchmark_report_json = {
                 "benchmark": _bench.to_dict(),
                 "attribution": _attrib.to_dict(),

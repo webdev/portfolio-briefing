@@ -61,17 +61,24 @@ def _get(obj, attr, default=None):
     return getattr(obj, attr, default)
 
 
-def render_benchmark_panel(bench_report, attribution) -> list[str]:
+def render_benchmark_panel(bench_report, attribution,
+                           nlv_reconciliation: dict | None = None) -> list[str]:
     """Emit the '## 📊 Benchmark & Attribution' markdown section.
 
     Args:
         bench_report: BenchmarkReport (or its to_dict()) — may be None.
         attribution: AttributionReport (or its to_dict()) — may be None.
+        nlv_reconciliation: today's `balance["nlv_reconciliation"]` record —
+            when the header's 🔴 NLV data-integrity check fired WITH an
+            itemization, the unattributed-residual flag cross-references it
+            instead of a bare "investigate" (2026-08-28: the same $37.8K
+            showed up in both surfaces with no link between them).
     """
     lines: list[str] = ["## 📊 Benchmark & Attribution", ""]
     try:
         _render_benchmark_table(lines, bench_report)
-        _render_attribution(lines, attribution)
+        _render_attribution(lines, attribution,
+                            nlv_reconciliation=nlv_reconciliation)
     except Exception as e:  # noqa: BLE001 — never break the briefing
         lines.append(f"_⚠️ Benchmark panel partially unavailable: {e}_")
         lines.append("")
@@ -142,7 +149,8 @@ def _pick_period(attribution):
     return periods[0] if periods else None
 
 
-def _render_attribution(lines: list[str], attribution) -> None:
+def _render_attribution(lines: list[str], attribution,
+                        nlv_reconciliation: dict | None = None) -> None:
     if attribution is None or _get(attribution, "status") != "ok":
         note = _get(attribution, "note", "") if attribution is not None else ""
         lines.append(f"_P/L attribution unavailable this cycle"
@@ -197,7 +205,18 @@ def _render_attribution(lines: list[str], attribution) -> None:
     unattr = _get(main, "unattributed", 0.0) or 0.0
     flag = ""
     if nlv_start and abs(unattr) > max(0.005 * nlv_start, 500.0):
-        flag = " ⚠️ (large residual — balance vs positions disagree; investigate)"
+        # Cross-reference the header's NLV data-integrity itemization when
+        # it names the same gap (rule #19). 2026-08-28: 'Unattributed
+        # (residual): +$37,778 ⚠️ (large residual — balance vs positions
+        # disagree; investigate)' and the header's 🔴 Δ $-37,779 were the
+        # SAME cash-ledger gap rendered as two unlinked mysteries.
+        _rec = nlv_reconciliation or {}
+        if _rec.get("warning") and (_rec.get("itemized") or []):
+            flag = (f" ⚠️ (matches today's 🔴 NLV data-integrity Δ "
+                    f"${_rec.get('delta', 0):+,.0f} — see the header "
+                    f"itemization: {(_rec.get('itemized') or [])[0]})")
+        else:
+            flag = " ⚠️ (large residual — balance vs positions disagree; investigate)"
     lines.append(f"- Unattributed (residual): {_fmt_usd(unattr)}{flag}")
 
     # Cash drag — opportunity cost of put collateral vs SPY.

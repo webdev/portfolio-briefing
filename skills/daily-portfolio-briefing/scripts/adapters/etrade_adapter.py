@@ -240,7 +240,17 @@ def fetch_etrade_snapshot(
         "totalAccountValue": 0.0,
         "cash": 0.0,
         "longMarketValue": 0.0,
+        # Ledger cash (E*TRADE Computed `netCash` — TOTAL cash including
+        # unsettled same-day trade proceeds). `cash` above is
+        # `cashAvailableForInvestment`, a buying-power figure that EXCLUDES
+        # unsettled proceeds: on 2026-08-28 (five same-day option opens +
+        # the MSFT $510C→$530C roll) it understated real cash by $37,697,
+        # firing a false 🔴 NLV data-integrity warning. netCash is what NLV
+        # reconstruction must use; cashAvailableForInvestment remains the
+        # right figure for capital-planning surfaces.
+        "netCash": 0.0,
     }
+    saw_net_cash = False
     all_positions = []
 
     # Normalize the desc whitelist once
@@ -278,6 +288,9 @@ def fetch_etrade_snapshot(
             aggregate_balance["totalAccountValue"] += nlv
             aggregate_balance["cash"] += cash
             aggregate_balance["longMarketValue"] += lmv
+            if "netCash" in cmp_data:
+                aggregate_balance["netCash"] += float(cmp_data.get("netCash") or 0)
+                saw_net_cash = True
             acct["nlv"] = nlv
             acct["cash"] = cash
         except Exception as e:
@@ -317,6 +330,11 @@ def fetch_etrade_snapshot(
             "cash": round(aggregate_balance["cash"], 2),
             "longMarketValue": round(aggregate_balance["longMarketValue"], 2),
             "accountValue": round(aggregate_balance["totalAccountValue"], 2),  # alias
+            # Only emit netCash when the broker payload actually carried it —
+            # downstream (`_compose_balance`) must be able to distinguish
+            # "ledger cash is $0" from "field not provided" (rule #19).
+            **({"netCash": round(aggregate_balance["netCash"], 2)}
+               if saw_net_cash else {}),
         },
         open_orders=open_orders,
         source="etrade",
