@@ -266,6 +266,27 @@ def render_header(
     # whether the portfolio has room for new short puts.
     if gate_state is not None and getattr(gate_state, "banner", ""):
         lines.append(f"**{gate_state.banner}**")
+        # Coverage honesty note (2026-08-31): when the integrity check
+        # classified a POSITIVE cash-ledger gap (broker NLV implies MORE
+        # cash than the cash field), the coverage ratio computed off the
+        # cash field may read low. Show BOTH measured reads — never
+        # silently adopt the higher figure.
+        _gap = _rec.get("cash_gap") or {}
+        try:
+            _implied = float(_gap.get("implied_cash") or 0)
+            _ledger = float(_gap.get("ledger_cash") or 0)
+            _cov = float(getattr(gate_state, "coverage_ratio", 0) or 0)
+        except (TypeError, ValueError):
+            _implied = _ledger = _cov = 0.0
+        import math as _math
+        if (_implied > _ledger > 0 and _cov > 0
+                and _math.isfinite(_cov)):
+            _implied_cov = _cov * _implied / _ledger
+            lines.append(
+                f"  - ↳ _coverage may read low — broker NLV implies cash "
+                f"${_implied:,.0f} (coverage ~{_implied_cov:.2f}×) vs the "
+                f"${_ledger:,.0f} field ({_cov:.2f}×); verify at broker_"
+            )
     lines.append(f"**Action Items:** {action_count}")
 
     # Add YTD P&L if available and not error

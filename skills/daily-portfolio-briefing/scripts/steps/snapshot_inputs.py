@@ -141,21 +141,42 @@ def _compose_balance(
     cash = _safe_float(base_balance.get("cash", 0))
     itemized: list[str] = []
 
-    # ── Ledger cash: prefer netCash (total, incl. unsettled) when the
-    # adapter provided it — cashAvailableForInvestment excludes unsettled
-    # same-day trade proceeds (the 2026-08-28 $37,697 false alarm).
+    # ── Ledger cash: broadened capture (2026-08-31 — the cash-ledger gap
+    # PERSISTED across a settlement weekend, Fri Δ$37.7K → Mon Δ$46.6K, and
+    # the payload's netCash was identical to cashAvailableForInvestment, so
+    # netCash alone doesn't carry the true ledger figure). Try, in order,
+    # every candidate the adapter captured: netCash, cashBalance,
+    # settledCashForInvestment, totalCash — first present nonzero wins.
+    # cashAvailableForInvestment (the `cash` field) remains the fallback; it
+    # excludes unsettled same-day proceeds (the 2026-08-28 $37,697 false
+    # alarm).
+    _adapter_cash_fields = base_balance.get("cashFields") or {}
+    ledger_candidates: list[tuple[str, float]] = []
+    _cand_seen: set[str] = set()
+    for fld in ("netCash", "cashBalance", "settledCashForInvestment",
+                "totalCash"):
+        if fld in _cand_seen:
+            continue
+        if fld == "netCash" and "netCash" in base_balance:
+            ledger_candidates.append(
+                (fld, _safe_float(base_balance.get("netCash"))))
+            _cand_seen.add(fld)
+        elif fld in _adapter_cash_fields:
+            ledger_candidates.append(
+                (fld, _safe_float(_adapter_cash_fields.get(fld))))
+            _cand_seen.add(fld)
     ledger_cash = cash
-    if "netCash" in base_balance:
-        net_cash = _safe_float(base_balance.get("netCash"))
-        if abs(net_cash) > 1e-9:  # present-but-zero with cash>0 → distrust
-            ledger_cash = net_cash
-            if abs(net_cash - cash) > 0.01:
+    for fld, fval in ledger_candidates:
+        if abs(fval) > 1e-9:  # present-but-zero with cash>0 → distrust
+            ledger_cash = fval
+            if abs(fval - cash) > 0.01:
                 itemized.append(
-                    f"ledger cash (netCash) ${net_cash:,.0f} used for the "
+                    f"ledger cash ({fld}) ${fval:,.0f} used for the "
                     f"computed NLV — available-for-investment cash "
-                    f"${cash:,.0f} excludes ${net_cash - cash:,.0f} of "
+                    f"${cash:,.0f} excludes ${fval - cash:,.0f} of "
                     f"unsettled/withheld funds"
                 )
+            break
 
     # ── Missing option marks: estimate from the snapshot's own mid where
     # available; otherwise exclude WITH a named note (rule #19).
@@ -220,20 +241,43 @@ def _compose_balance(
         delta = round(computed_nlv - broker_nlv, 2)
         pct = abs(delta) / broker_nlv
         warning = pct > _NLV_RECONCILIATION_PCT
+        cash_gap: dict | None = None
         if warning and not mark_exclusions and not (equity_exclusions or []):
             # Every position carries a mark → by elimination the Δ sits on
             # the cash leg. Name it (rule #19): the broker's own components
-            # imply a different cash figure than the cash field reports —
-            # the 2026-08-28 signature (unsettled same-day trade proceeds
-            # missing from cashAvailableForInvestment).
+            # imply a different cash figure than the cash field reports.
+            # 2026-08-31: the gap persisted across a settlement weekend, so
+            # "likely unsettled same-day trade proceeds" was NOT honest —
+            # name the measured alternatives instead.
             implied_cash = round(
                 broker_nlv - long_market_value - effective_option_mv, 2)
             itemized.append(
                 f"all positions carry marks — Δ is a cash-ledger gap: "
                 f"broker NLV implies cash ${implied_cash:,.0f} vs "
-                f"${ledger_cash:,.0f} in the cash field (likely unsettled "
-                f"same-day trade proceeds; verify at broker)"
+                f"${ledger_cash:,.0f} in the cash field — collateral "
+                f"holds, unsettled proceeds, or a balance-field mapping "
+                f"gap; verify Balances at the broker"
             )
+            # Diagnostic provenance (rule #19 — name what you measured):
+            # list which cash fields WERE present with their values, and
+            # which candidates were absent, so the next occurrence
+            # identifies the right field immediately.
+            _seen_parts = [
+                f"cash (availableForInvestment) ${cash:,.0f}"]
+            _seen_parts += [f"{fld} ${fval:,.0f}"
+                            for fld, fval in ledger_candidates]
+            _absent = [fld for fld in
+                       ("netCash", "cashBalance",
+                        "settledCashForInvestment", "totalCash")
+                       if fld not in _cand_seen]
+            itemized.append(
+                "cash fields seen: " + " · ".join(_seen_parts)
+                + (f" — {'/'.join(_absent)} absent" if _absent else "")
+            )
+            cash_gap = {
+                "implied_cash": implied_cash,
+                "ledger_cash": round(ledger_cash, 2),
+            }
         balance["nlv_reconciliation"] = {
             "broker_nlv": round(broker_nlv, 2),
             "computed_nlv": computed_nlv,
@@ -242,6 +286,10 @@ def _compose_balance(
             "warning": warning,
             "using": "broker",
             **({"itemized": itemized} if itemized else {}),
+            # Structured cash-gap record (drives the capacity dual-read
+            # line in render_header — measured both ways, never silently
+            # adopting the higher figure).
+            **({"cash_gap": cash_gap} if cash_gap else {}),
         }
     else:
         # No broker figure (fixture without totalAccountValue) — fall back

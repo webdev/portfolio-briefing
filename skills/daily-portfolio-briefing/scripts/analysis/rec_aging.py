@@ -67,6 +67,30 @@ _TRIM_KINDS = {"TRIM", "REVIEW_CORE"}
 _NEW_SHORT_PUT_KINDS = {"NEW_CSP", "PULLBACK_CSP", "NEW_WEEKLY"}
 _HEDGE_KINDS = {"HEDGE"}
 
+# Hold-class directive items are NEVER aged (2026-08-31 bug: the briefing
+# rendered "2. 🏇 **RIDING (directive)** MELI_PUT_1460_20270617 — +25%
+# captured — exits armed: … ⏳ IGNORED 3 DAYS". A directive-tracked ride is
+# the OPPOSITE of ignoring — the operator filed the directive, the pipeline
+# tracks its exits every cycle; there is nothing to "execute today". The
+# same applies to any hold-class directive surface: 🏇 RIDING, 🔔
+# reminder-armed. NOT covered: "🏇 EXIT — STALL FIRED (directive)" — that
+# IS an actionable exit ticket and must keep aging.)
+_HOLD_CLASS_DIRECTIVE_KIND_RE = re.compile(
+    r"^(?:RIDING|RIDE(?:_|$)|REMINDER)")
+_HOLD_CLASS_DIRECTIVE_LINE_RE = re.compile(
+    r"(?:🏇\s*\*\*\s*(?:RIDING|RIDE)\b|🔔\s*\*\*)")
+
+
+def is_hold_class_directive(line: str = "", kind: str = "") -> bool:
+    """True when an action-list item is a hold-class directive item (🏇
+    RIDING / 🏇 RIDE / 🔔 reminder-armed) that the aging machinery must skip
+    entirely — no ⏳ IGNORED tag, no aging clock, no ⛔ Stalled promotion."""
+    if kind and _HOLD_CLASS_DIRECTIVE_KIND_RE.match(normalize_kind(kind)):
+        return True
+    if line and _HOLD_CLASS_DIRECTIVE_LINE_RE.search(line.split("\n")[0]):
+        return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Keys + action extraction
@@ -497,7 +521,12 @@ def render_stalled_panel(aged: dict, suppressed=None) -> list[str]:
     suppressed = set(suppressed or ())
     stalled = [(k, v) for k, v in (aged or {}).items()
                if int(v.get("days_flagged", 0) or 0) >= STALLED_DAYS
-               and k not in suppressed]
+               and k not in suppressed
+               # Hold-class directive items (🏇 RIDING / 🔔) are tracked, not
+               # ignored — never promote them to the stalled panel, even if a
+               # stale state entry carried them here (2026-08-31 MELI bug).
+               and not is_hold_class_directive(
+                   kind=v.get("kind") or k.split(":", 1)[0])]
     if not stalled:
         return []
     stalled.sort(key=lambda kv: -int(kv[1].get("days_flagged", 0) or 0))
@@ -647,6 +676,11 @@ def apply_aging_to_action_items(items: list[str], aging_info: dict) -> list[str]
     for b in blocks:
         a = action_from_line(b[0])
         if a is None:
+            block_keys.append(None)
+            continue
+        if is_hold_class_directive(b[0], a["kind"]):
+            # Hold-class directive item (🏇 RIDING / 🏇 RIDE / 🔔): tracked,
+            # not ignored — never enters the aging clock, never tagged ⏳.
             block_keys.append(None)
             continue
         block_keys.append(a["key"])

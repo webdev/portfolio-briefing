@@ -37,6 +37,55 @@ class EtradeSnapshot:
     warnings: List[str]
 
 
+# Candidate ledger-cash fields in the E*TRADE balance response (Computed
+# and Computed.RealTimeValues), in preference order. 2026-08-31: the NLV
+# cash-ledger gap PERSISTED across a settlement weekend (Fri Δ$37.7K → Mon
+# Δ$46.6K) and the payload's `netCash` was IDENTICAL to
+# `cashAvailableForInvestment` ($37,219.91) — i.e. netCash did not carry
+# the gap either. Capture every candidate that IS present (and persist the
+# full Computed field set) so the next occurrence identifies the right
+# field immediately (rule #19: name what you measured).
+_CASH_FIELD_CANDIDATES = (
+    "netCash", "cashBalance", "settledCashForInvestment", "totalCash",
+)
+
+
+def _collect_cash_fields(cmp_data: Dict[str, Any],
+                         rtv: Optional[Dict[str, Any]] = None
+                         ) -> Dict[str, float]:
+    """Extract the candidate ledger-cash fields present in ONE account's
+    balance payload (Computed first, then the RealTimeValues sub-object).
+
+    Returns only fields the broker actually sent — downstream must be able
+    to distinguish "field absent" from "$0" (rule #19). Non-numeric values
+    are skipped, never guessed.
+    """
+    out: Dict[str, float] = {}
+    rtv = rtv or {}
+    for fld in _CASH_FIELD_CANDIDATES:
+        val = cmp_data.get(fld, rtv.get(fld))
+        if val is None:
+            continue
+        try:
+            out[fld] = float(val)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _numeric_scalars(d: Dict[str, Any]) -> Dict[str, float]:
+    """All float-coercible scalar fields of a payload dict (diagnostics)."""
+    out: Dict[str, float] = {}
+    for k, v in (d or {}).items():
+        if isinstance(v, dict) or isinstance(v, list):
+            continue
+        try:
+            out[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _load_credentials() -> tuple[Optional[str], Optional[str], Optional[Dict]]:
     """Load consumer key/secret + OAuth tokens via the in-repo auth module.
 
@@ -251,6 +300,12 @@ def fetch_etrade_snapshot(
         "netCash": 0.0,
     }
     saw_net_cash = False
+    # Broadened ledger-cash capture (2026-08-31): aggregate every candidate
+    # cash field the payload actually carries, plus the FULL Computed field
+    # set per account, so a persisted cash-ledger gap is diagnosable from
+    # the snapshot alone (rule #19).
+    cash_fields_seen: Dict[str, float] = {}
+    raw_computed_by_account: Dict[str, Dict[str, float]] = {}
     all_positions = []
 
     # Normalize the desc whitelist once
@@ -291,6 +346,18 @@ def fetch_etrade_snapshot(
             if "netCash" in cmp_data:
                 aggregate_balance["netCash"] += float(cmp_data.get("netCash") or 0)
                 saw_net_cash = True
+            for fld, fval in _collect_cash_fields(cmp_data, rtv).items():
+                cash_fields_seen[fld] = cash_fields_seen.get(fld, 0.0) + fval
+            # Persist the full balance field set (Computed scalars +
+            # RealTimeValues.* scalars) — the 2026-08-31 gap was
+            # undiagnosable because only the composed fields were stored.
+            raw_scalars = _numeric_scalars(cmp_data)
+            raw_scalars.update({
+                f"RealTimeValues.{k}": v
+                for k, v in _numeric_scalars(rtv).items()
+            })
+            if raw_scalars:
+                raw_computed_by_account[acct_desc] = raw_scalars
             acct["nlv"] = nlv
             acct["cash"] = cash
         except Exception as e:
@@ -335,6 +402,14 @@ def fetch_etrade_snapshot(
             # "ledger cash is $0" from "field not provided" (rule #19).
             **({"netCash": round(aggregate_balance["netCash"], 2)}
                if saw_net_cash else {}),
+            # Every candidate ledger-cash field the payload carried
+            # (aggregated), and the full per-account Computed field set —
+            # emitted only when present so absence stays explicit.
+            **({"cashFields": {k: round(v, 2)
+                               for k, v in cash_fields_seen.items()}}
+               if cash_fields_seen else {}),
+            **({"rawComputedByAccount": raw_computed_by_account}
+               if raw_computed_by_account else {}),
         },
         open_orders=open_orders,
         source="etrade",
