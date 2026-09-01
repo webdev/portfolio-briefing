@@ -112,12 +112,6 @@ themes:
       - NOW    # servicenow — AI workflows + agentic automation
       - PANW   # palo alto — security platform (also in cybersecurity)
       - CRWD   # crowdstrike — endpoint (also in cybersecurity)
-      - TSM    # foundry — AI chips
-      - ARM    # IP licensing for AI inference
-      - AVGO   # AI ASIC + networking
-      - MRVL   # custom ASIC
-      - QCOM   # mobile + automotive + edge AI
-      - TXN    # analog / power management
       - CRM    # Salesforce — enterprise CRM + Einstein AI agents — added 2026-06-01
       - INTU   # Intuit — TurboTax/QuickBooks SaaS, GenAI integration — added 2026-06-01
       - SNOW   # Snowflake — data warehouse / AI workload platform — added 2026-06-01
@@ -137,7 +131,7 @@ themes:
       - XLK    # Tech Select Sector SPDR — promoted to anchor 2026-06-01 for broad-tech read
       - QQQ    # Nasdaq-100 ETF — promoted to anchor 2026-06-01 for broad-mega-cap-tech tape
     etfs: [IGV, XLK]
-    notes: "Software + chips running AI workloads at the application layer"
+    notes: "Software running AI workloads at the application layer (chips live in Semis — removed 2026-09-01 so theme-stacking does not correlate software with chip puts)"
 
   networking:
     name: "Networking"
