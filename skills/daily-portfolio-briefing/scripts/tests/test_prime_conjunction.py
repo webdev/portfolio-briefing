@@ -147,7 +147,9 @@ def test_green_day_and_near_earnings_each_fail_csp():
     prime, missing = sg.prime_conjunction(
         _csp_components(days_to_earnings=5), "csp", CFG_ON)
     assert prime is False
-    assert missing == ["earnings 5d away (< 14d clear)"]
+    # Wording updated 2026-09-01 (the RBRK "-5d away" sign bug): a genuine
+    # near-future miss names the NEXT print explicitly.
+    assert missing == ["next earnings 5d away (< 14d clear)"]
 
 
 def test_broken_trend_fails():

@@ -537,11 +537,35 @@ def build_money_plan(
                      f"(entry premium + roll credits − buybacks)")
     if cov_now is not None and cov_after is not None \
             and abs(cov_after - cov_now) >= 0.005:
-        cash_line += f" · **Coverage after:** {cov_now:.2f}× → ~{cov_after:.2f}×"
+        # Rule #43 (2026-09-01): the honest formula
+        # ((cash − buybacks) / (obligation − freed)) correctly goes
+        # NEGATIVE when buybacks exceed available cash — a temporary
+        # margin draw until the freed collateral settles — but a bare
+        # "0.00× → ~-0.02×" reads broken. Floor the DISPLAYED post ratio
+        # at 0.00× and say what the negative means with measured numbers;
+        # the RAW value stays in the JSON (plan_json["coverage_after"]).
+        cov_after_disp = max(cov_after, 0.0)
+        cash_line += (f" · **Coverage after:** {cov_now:.2f}× → "
+                      f"~{cov_after_disp:.2f}×")
+        if cov_after < 0:
+            note_bits = []
+            buybacks = _f((noc or {}).get("total_buybacks"))
+            if buybacks:
+                note_bits.append(
+                    f"buybacks −${abs(buybacks):,.0f} draw on margin "
+                    "until freed collateral settles")
+            else:  # unmeasured buybacks — honest words, no number
+                note_bits.append(
+                    "buybacks draw on margin until freed collateral "
+                    "settles")
+            freed = _f(pb.get("total_freed"))
+            if freed > 0:
+                note_bits.append(f"obligation drops ${freed:,.0f}")
+            cash_line += " (" + "; ".join(note_bits) + ")"
         # Honest-physics note (rule #43, 2026-08-14): when the improvement
         # is small, say WHY — closing puts shrinks the obligation side; on
         # a margin-secured book the freed collateral does not become cash.
-        if 0 < (cov_after - cov_now) < _SMALL_COVERAGE_GAIN:
+        elif 0 < (cov_after - cov_now) < _SMALL_COVERAGE_GAIN:
             cash_line += " — obligation shrinks; cash does not"
     elif cov_now is not None:
         cash_line += f" · **Coverage:** {cov_now:.2f}×"

@@ -375,9 +375,17 @@ def _context_component(day_change_pct, days_to_earnings, drawdown_pct,
         if d is not None:
             clear = int(cfg["earnings_clear_days"])
             near = int(cfg["earnings_near_days"])
-            s = 1.0 if d >= clear else (0.0 if d <= near else 0.5)
-            subs.append(s)
-            notes.append(f"earnings {d}d {'✓' if s >= 1.0 else '✗'}")
+            if d < 0:
+                # Negative days = the print already HAPPENED (the calendar
+                # carried the last/most-recent date, not the next one —
+                # the 2026-09-01 RBRK bug). A passed print with no known
+                # next date inside the window is CLEAR, not a conflict.
+                subs.append(1.0)
+                notes.append(f"earnings passed {-d}d ago ✓")
+            else:
+                s = 1.0 if d >= clear else (0.0 if d <= near else 0.5)
+                subs.append(s)
+                notes.append(f"earnings {d}d {'✓' if s >= 1.0 else '✗'}")
     if drawdown_pct is not None:
         try:
             dd = float(drawdown_pct)
@@ -539,8 +547,15 @@ def prime_conjunction(components: dict, side: str,
             if d is None:
                 missing.append(
                     f"earnings date unknown (prime needs ≥ {clear}d clear)")
-            elif d < clear:
-                missing.append(f"earnings {d}d away (< {clear}d clear)")
+            elif 0 <= d < clear:
+                # Honest wording: this is the NEXT print, inside the window.
+                missing.append(
+                    f"next earnings {d}d away (< {clear}d clear)")
+            # d < 0 → the calendar's date is the LAST print (already
+            # happened — the 2026-09-01 RBRK "-5d away" bug). A passed
+            # print satisfies the clear check; only a KNOWN next date
+            # inside the window fails it, and an unknown next date stays
+            # non-prime via the branches above.
 
     return (not missing), missing
 

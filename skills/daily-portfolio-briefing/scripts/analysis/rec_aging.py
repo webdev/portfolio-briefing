@@ -75,20 +75,44 @@ _HEDGE_KINDS = {"HEDGE"}
 # same applies to any hold-class directive surface: 🏇 RIDING, 🔔
 # reminder-armed. NOT covered: "🏇 EXIT — STALL FIRED (directive)" — that
 # IS an actionable exit ticket and must keep aging.)
+#
+# Extended 2026-09-01: ALL passive-verdict headline kinds are hold-class,
+# not just directive rides. The real briefing rendered "5. **HOLD FOR
+# BASIS** AMAT_PUT_470_20260925 — assignment acceptable (exit-cost
+# verdict); no roll ticket · RSI 35 🟢 pullback ⏳ IGNORED 3 DAYS" — but a
+# HOLD verdict has nothing to execute; tagging it IGNORED nags the
+# operator to act on a card whose whole point is "do nothing". Covers
+# HOLD FOR BASIS, HOLD THROUGH EARNINGS, HOLD — GTC AT 50%,
+# HOLD_FOR_DECAY variants: any kind starting with HOLD, or a headline
+# whose bold verb starts with HOLD. Actionable kinds
+# (CLOSE/ROLL/URGENT/EXIT/STALL-FIRED) still age.
 _HOLD_CLASS_DIRECTIVE_KIND_RE = re.compile(
-    r"^(?:RIDING|RIDE(?:_|$)|REMINDER)")
+    r"^(?:RIDING|RIDE(?:_|$)|REMINDER|HOLD(?:_|$))")
 _HOLD_CLASS_DIRECTIVE_LINE_RE = re.compile(
     r"(?:🏇\s*\*\*\s*(?:RIDING|RIDE)\b|🔔\s*\*\*)")
+# Headline whose BOLD VERB starts with HOLD ("**HOLD FOR BASIS**",
+# "**HOLD THROUGH EARNINGS — willing owner**", "**HOLD — GTC AT 50%**").
+# Anchored to the verb slot (optional list number + urgency glyphs before
+# the first **) so a mid-line "**HOLD**" mention on an actionable card
+# can never exempt it.
+_HOLD_CLASS_VERB_LINE_RE = re.compile(
+    r"^\s*(?:\d+\.\s+)?[^\w*]*\*\*\s*HOLD\b")
 
 
 def is_hold_class_directive(line: str = "", kind: str = "") -> bool:
-    """True when an action-list item is a hold-class directive item (🏇
-    RIDING / 🏇 RIDE / 🔔 reminder-armed) that the aging machinery must skip
-    entirely — no ⏳ IGNORED tag, no aging clock, no ⛔ Stalled promotion."""
+    """True when an action-list item is a hold-class item — a directive
+    ride (🏇 RIDING / 🏇 RIDE / 🔔 reminder-armed) or a passive HOLD-family
+    verdict (HOLD FOR BASIS / HOLD THROUGH EARNINGS / HOLD — GTC AT 50% /
+    HOLD_FOR_DECAY) — that the aging machinery must skip entirely — no ⏳
+    IGNORED tag, no aging clock, no ⛔ Stalled promotion."""
     if kind and _HOLD_CLASS_DIRECTIVE_KIND_RE.match(normalize_kind(kind)):
         return True
-    if line and _HOLD_CLASS_DIRECTIVE_LINE_RE.search(line.split("\n")[0]):
-        return True
+    if line:
+        first = line.split("\n")[0]
+        if _HOLD_CLASS_DIRECTIVE_LINE_RE.search(first):
+            return True
+        if _HOLD_CLASS_VERB_LINE_RE.match(first):
+            return True
     return False
 
 
@@ -709,6 +733,15 @@ def apply_aging_to_action_items(items: list[str], aging_info: dict) -> list[str]
         today_actions, aging_info.get("state") or {},
         aging_info.get("reconciliation") or {}, today_iso,
     )
+    # Purge stale aging state for hold-class keys (2026-09-01): entries
+    # written before the HOLD-family exemption (e.g.
+    # "HOLD_FOR_BASIS:AMAT_PUT_470_20260925" with days_flagged 3) must not
+    # survive into tomorrow's state file — a hold-class item is tracked,
+    # not ignored, so its clock is deleted, not carried.
+    for _k in list(updated_state):
+        if is_hold_class_directive(kind=_k.split(":", 1)[0]):
+            del updated_state[_k]
+            aged.pop(_k, None)
     aging_info["aged"] = aged
     aging_info["updated_state"] = updated_state
     aging_info["actions_export"] = [
