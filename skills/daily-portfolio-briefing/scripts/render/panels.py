@@ -2446,13 +2446,32 @@ def render_action_list(
             continue
         cap_s = f" — {capture_pct:+.0f}% captured" if capture_pct else ""
         if ride["stalled"]:
+            # Rule #43 (2026-09-02, BUG A): a FIRED stall is the
+            # directive's OWN actionable exit. Observed briefing rendered
+            # "🏇 **EXIT — STALL FIRED (directive)** SNDK_PUT_1030_20261120
+            # — +34% captured — [today: SNDK -2.5% (red-day stall ≤ -2%) —
+            # STALL TRIGGER FIRED, exit per directive]" with a real ticket,
+            # yet the Money Plan banked only "$+160 realized (AVGO $340P)"
+            # and the Capital Plan freed only $34,000 — the _directive_ride
+            # demotion (correct while RIDING, rule #51) kept the fired exit
+            # out of every banking surface. Clear the demotion so the item
+            # banks like any actionable close (Money Plan, net option cash,
+            # Capital Plan); the realized dollars render on the headline so
+            # downstream parsers read measured numbers, never a guess
+            # (rule #19). Still-riding items keep the flag and stay
+            # unbanked.
+            rev["_directive_ride"] = False
+            rev["_directive_stall_fired"] = True
+            qty = abs(rev.get("qty", 0) or 0)
+            if cap_s and entry and entry > 0 and mid and qty:
+                _realized = (entry - mid) * 100.0 * qty
+                cap_s += f" (${_realized:+,.0f})"
             items.append(
                 f"{n}. 🏇 **EXIT — STALL FIRED (directive)** {contract}"
                 f"{cap_s} — {ride['today_line']} · exits armed were: "
                 f"{ride['exits_line']}")
             strike = rev.get("strike")
             opt_c = "P" if (rev.get("type") or "").upper() == "PUT" else "C"
-            qty = abs(rev.get("qty", 0) or 0)
             if mid and strike and qty:
                 items.append(
                     f"   - **Action:** BUY TO CLOSE {qty:g}× {und} "

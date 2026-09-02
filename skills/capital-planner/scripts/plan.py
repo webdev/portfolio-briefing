@@ -620,8 +620,13 @@ import re as _re
 # urgency glyphs — the renderer emits "2. 🚨 **URGENT — EXECUTE ROLL** …"
 # (2026-08-17 QCOM $180P) and without it the whole block fell out of the
 # capital plan (Tier 1 showed no roll, "Collateral freed: $0").
+# The optional parenthetical inside the verb absorbs directive suffixes —
+# the renderer emits "2. 🏇 **EXIT — STALL FIRED (directive)** SNDK_…"
+# (rule #43, 2026-09-02) and without it the fired stall exit fell out of
+# the capital plan entirely ("Collateral freed: $34,000" while the action
+# list's SNDK exit freed $103,000).
 _ACTION_LINE_RE = _re.compile(
-    r"^\s*(?P<n>\d+)\.\s+[^\w*]*\*\*(?P<kind>[A-Z][A-Z _—-]+)\*\*\s+(?P<rest>.+)",
+    r"^\s*(?P<n>\d+)\.\s+[^\w*]*\*\*(?P<kind>[A-Z][A-Z _()—-]+)\*\*\s+(?P<rest>.+)",
     _re.IGNORECASE,
 )
 
@@ -649,9 +654,15 @@ _CONTRACT_IDENT_RE = _re.compile(
 
 
 def _normalize_kind_raw(kind_raw: str) -> str:
-    """Strip the URGENT prefix and em-dash separators from a rendered verb:
-    'URGENT_—_EXECUTE_ROLL' → 'EXECUTE_ROLL'."""
+    """Strip the URGENT prefix, trailing parentheticals and em-dash
+    separators from a rendered verb: 'URGENT_—_EXECUTE_ROLL' →
+    'EXECUTE_ROLL'; 'EXIT_—_STALL_FIRED_(DIRECTIVE)' → 'CLOSE_STALL_FIRED'
+    (a fired directive stall is the directive's own actionable exit and
+    routes through the CLOSE family — rule #43, 2026-09-02 SNDK)."""
     k = _re.sub(r"^URGENT[_—–-]+", "", kind_raw)
+    k = _re.sub(r"_*\([^)]*\)\s*$", "", k).strip("_ ")
+    if _re.match(r"^EXIT[_—–-]+STALL[_ ]FIRED$", k):
+        return "CLOSE_STALL_FIRED"
     return _KIND_ALIASES.get(k, k)
 
 
@@ -715,6 +726,22 @@ def _parse_action_block(head: str, body_text: str, rules: dict) -> CapitalAction
             contracts = int(cm.group(1))
         if bm:
             btc_cost = _money(bm.group(1)) * 100 * contracts
+        else:
+            # 🏇 EXIT — STALL FIRED ticket form (rule #43, 2026-09-02):
+            # "**Action:** BUY TO CLOSE 1× SNDK $1030P — exit per
+            # directive (mid $27.75, limit ≈ $29.14)" — the observed
+            # briefing's SNDK exit carried no "buy-to-close limit" line,
+            # so its ~$2,775 buyback and $103,000 freed never reached the
+            # plan.
+            sm = _re.search(
+                r"BUY TO CLOSE\s+([\d.]+)×.*?\(mid\s+\$([\d,.]+)",
+                combined, _re.IGNORECASE)
+            if sm:
+                try:
+                    contracts = int(float(sm.group(1))) or contracts
+                except ValueError:
+                    pass
+                btc_cost = _money(sm.group(2)) * 100 * contracts
         # "frees $35,500 cash collateral"
         fm = _re.search(r"frees\s+\$([\d,]+)", combined, _re.IGNORECASE)
         if fm:
@@ -1106,6 +1133,32 @@ def build_capital_plan(
         elif a.kind == "LT_LEAP":
             # LEAP buys are real debits (live_debit_total from the chain)
             plan.total_debit_paid += a.cash_out
+
+    # Advisory-row demotion (rule #43, 2026-09-02 — BUG B): the observed
+    # briefing's Tier 1 CRITICAL was filled with "EXIT NFLX — REVIEW NFLX —
+    # consider exit — net cash +$0" rows while the real cash close sat in
+    # Tier 2 ("CLOSE AVGO — locks $+160, frees $34,000 — net cash
+    # +$33,375"). A zero-cash-impact REVIEW/consider-exit row must never
+    # sit in a HIGHER tier than the best positive-cash action. Demote such
+    # rows into the best cash-action tier — within that tier the net-cash
+    # sort below places the cash actions first, so the advisory rows can
+    # never render above the close that frees the money. The rows stay
+    # visible with the demotion reason (rule #24 — never hidden).
+    _cash_tiers = [a.tier for a in plan.actions if a.net_cash > 0]
+    if _cash_tiers:
+        _adv_target = min(_cash_tiers)
+        for a in plan.actions:
+            is_advisory = (
+                a.cash_in == 0 and a.cash_out == 0
+                and not getattr(a, "cash_unknown", False)
+                and (a.kind in ("LT_EXIT", "EXIT")
+                     or "REVIEW" in (a.description or "")
+                     or "consider exit" in (a.description or "").lower()))
+            if is_advisory and a.tier < _adv_target:
+                a.tier = _adv_target
+                a.tier_reason = (
+                    f"{a.tier_reason} · advisory ($0 cash impact) — "
+                    f"ranked below cash-freeing actions").strip(" ·")
 
     # Sort within each tier by descending net_cash (highest cash benefit first),
     # tie-break by EV descending where available.

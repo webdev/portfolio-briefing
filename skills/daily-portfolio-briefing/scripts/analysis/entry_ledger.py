@@ -678,8 +678,15 @@ def _digest_line(sc: dict) -> str | None:
     bits = [f"🎓 Entry quality: last 10 avg {l10['letter']} "
             f"({l10['avg']:.0f})"]
     trend = sc.get("trend")
-    if trend:
-        bits[0] += f" {trend['arrow']}"
+    # Rule #43 (2026-09-02, BUG C): the observed header "**🎓 Entry
+    # quality: last 10 avg D (38) → · last entry NVDA $195P — D (RSI 54
+    # late-band)**" rendered a dangling "→ ·" — an arrow with nothing
+    # after it (the flat/empty trend token). Render an arrow only when it
+    # carries a real direction (↗ / ↘); flat or missing → no arrow, never
+    # a dangling glyph (rule #19 — no fabricated trend).
+    arrow = trend.get("arrow") if isinstance(trend, dict) else None
+    if arrow in ("↗", "↘"):
+        bits[0] += f" {arrow}"
     last5 = sc.get("last_5") or []
     if last5:
         le = last5[0]

@@ -50,9 +50,14 @@ from pathlib import Path
 # close taken ahead of a print — it banks from the action list directly
 # rather than depending on a playbook fold-in. The realized<=0 guard below
 # keeps loss closes out regardless of kind.
+# EXIT_STALL_FIRED ("🏇 EXIT — STALL FIRED (directive)") is a fired
+# directive stall — the directive's OWN actionable exit (rule #43,
+# 2026-09-02: the observed SNDK fired exit was missing from "Bank today:
+# 1 close(s) → $+160 realized (AVGO $340P)"). Still-RIDING items render
+# kind RIDING and never match — riders stay unbanked (rule #51).
 _BANK_KIND_RE = re.compile(
     r"^(CLOSE|CLOSE_FOR_PROFIT|CLOSE_WINNER|CLOSE_INTO_RECOVERY"
-    r"|CLOSE_BEFORE_EARNINGS|TAKE_PROFIT.*)$")
+    r"|CLOSE_BEFORE_EARNINGS|EXIT_STALL_FIRED|TAKE_PROFIT.*)$")
 _DEPLOY_KINDS = {"NEW_CSP", "PULLBACK_CSP", "NEW_WEEKLY"}
 
 # A block containing any of these markers is NOT actionable today.

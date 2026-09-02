@@ -82,7 +82,13 @@ def _is_close_kind(kind: str) -> bool:
     k = (kind or "").upper()
     if _is_hold_kind(k):
         return False  # a GTC/hold never fills at mid today
-    return "CLOSE" in k or k.startswith("TAKE_PROFIT")
+    # "EXIT — STALL FIRED (directive)" → normalized "EXIT_STALL_FIRED" —
+    # a fired directive stall is the directive's own actionable exit and
+    # buys back at mid like any close (rule #43, 2026-09-02: the observed
+    # SNDK stall-fired exit was missing from "Net option cash today
+    # (mid-fills): −$595 buyback" while its ticket said mid $27.75).
+    return ("CLOSE" in k or k.startswith("TAKE_PROFIT")
+            or "STALL_FIRED" in k or "STALL FIRED" in k)
 
 
 def gtc_hold_idents(action_list_lines: list) -> set:
@@ -101,6 +107,10 @@ def gtc_hold_idents(action_list_lines: list) -> set:
 # a user directive with machine-readable exits ("🏇 RIDING (directive)") is
 # never banked — the observed Money Plan said "Bank today: 1 close(s) →
 # $+3,435 realized (MELI $1460P)" while George's filed directive said ride.
+# Once the stall has FIRED ("🏇 EXIT — STALL FIRED (directive)") the render
+# clears this flag (render/panels.py block #0) — a fired stall is the
+# directive's own actionable exit and banks like any close (rule #43,
+# 2026-09-02 SNDK).
 _DEMOTION_FLAGS = ("_redeploy_hold_demotion", "_close_floor_demotion",
                    "_momentum_ride", "_directive_ride")
 
